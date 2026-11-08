@@ -29,6 +29,7 @@ from mrwatch.git_ops import (
     run_git,
 )
 from mrwatch.gitlab_client import GitLabClient
+from mrwatch.review_findings import dump_snippets, extract_snippets
 from mrwatch.opencode_runner import (
     OpencodeError,
     RunnerEnv,
@@ -172,6 +173,16 @@ class Worker:
             return None
         return out.strip() or None
 
+    async def _collect_snippets(
+        self, review_md: str, diff: str | None, workspace: Path
+    ) -> str | None:
+        try:
+            snippets = await asyncio.to_thread(extract_snippets, review_md, diff, workspace)
+        except Exception as exc:
+            logger.warning("snippet extraction failed in %s: %s", workspace.name, exc)
+            return None
+        return dump_snippets(snippets)
+
     async def _process_review(self, review: sqlite3.Row) -> None:
         review_id = review["id"]
         config = self._config
@@ -226,6 +237,7 @@ class Worker:
             return
 
         diff_refs = detail.get("diff_refs") or {}
+        snippets_json: str | None = None
         mark_reviewing(self._conn, review_id)
         try:
             base_sha = await self._resolve_base_sha(
@@ -256,6 +268,8 @@ class Worker:
                 variant=(project_cfg.variant if project_cfg and project_cfg.variant else oc.variant),
                 length_retry_variant=oc.length_retry_variant,
             )
+            if result.review_md:
+                snippets_json = await self._collect_snippets(result.review_md, diff, workspace)
         except OpencodeError as exc:
             finish_review(self._conn, review_id, "error", error=f"opencode failed: {exc}")
             return
@@ -277,6 +291,7 @@ class Worker:
                 exit_code=result.exit_code,
                 counts=counts,
                 verdict=parse_verdict(result.review_md),
+                snippets_json=snippets_json,
             )
 
 

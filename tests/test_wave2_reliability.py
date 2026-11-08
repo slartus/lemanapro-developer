@@ -711,7 +711,7 @@ def test_migration_v3_to_v4_moves_legacy_cursor(tmp_path):
     assert poll_state_get(c, MR_CURSOR_KEY.format(10)) == "2026-01-01T00:00:00+00:00"
     assert poll_state_get(c, MR_CURSOR_KEY.format(20)) is None
     assert poll_state_get(c, "mr_cursor") is None
-    assert c.execute("PRAGMA user_version").fetchone()[0] == 8
+    assert c.execute("PRAGMA user_version").fetchone()[0] == 9
     assert {r[1] for r in c.execute("PRAGMA table_info(review)")} >= {"not_before"}
     c.close()
 

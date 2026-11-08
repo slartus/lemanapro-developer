@@ -7,6 +7,7 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from mrwatch.review_findings import MAX_PARSE_INPUT_CHARS, iter_findings
 from mrwatch.procutil import (
     OutputLimitExceeded,
     communicate_capped,
@@ -236,17 +237,12 @@ async def run_review(
     return result
 
 
-SEVERITY_PATTERN = re.compile(r"^\s*[-*]\s*\[(BLOCKER|MAJOR|MINOR|NIT)\]", re.MULTILINE)
-
-
 def parse_severity_counts(review_md: str | None) -> tuple[int, int, int, int]:
     """(blocker, major, minor, nit) по маркерам находок в формате агента."""
     counts = [0, 0, 0, 0]
-    if not review_md:
-        return (0, 0, 0, 0)
     order = {"BLOCKER": 0, "MAJOR": 1, "MINOR": 2, "NIT": 3}
-    for match in SEVERITY_PATTERN.finditer(review_md):
-        counts[order[match.group(1)]] += 1
+    for finding in iter_findings((review_md or "")[:MAX_PARSE_INPUT_CHARS]):
+        counts[order[finding.severity]] += 1
     return tuple(counts)
 
 

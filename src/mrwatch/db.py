@@ -9,7 +9,7 @@ from mrwatch.opencode_runner import MAX_VERDICT_INPUT_CHARS, parse_verdict
 
 MAX_REVIEW_MD_LENGTH = MAX_VERDICT_INPUT_CHARS
 TRUNCATION_MARKER = "...[truncated]"
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
 
 DERIVED_ROLES = frozenset({"reviewer", "assignee", "author"})
 MENTIONED_ROLE = "mentioned"
@@ -111,6 +111,8 @@ def init_schema(conn: sqlite3.Connection) -> None:
         _run_migration(conn, 7, _migrate_to_v7)
     if version < 8:
         _run_migration(conn, 8, _migrate_to_v8)
+    if version < 9:
+        _run_migration(conn, 9, _migrate_to_v9)
     conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
     conn.commit()
 
@@ -466,6 +468,10 @@ def claim_next_review(conn: sqlite3.Connection) -> sqlite3.Row | None:
     return conn.execute("SELECT * FROM review WHERE id = ?", (review_id,)).fetchone()
 
 
+def _migrate_to_v9(conn: sqlite3.Connection) -> None:
+    _add_column(conn, "review", "snippets_json", "TEXT")
+
+
 def finish_review(
     conn: sqlite3.Connection,
     review_id: int,
@@ -476,6 +482,7 @@ def finish_review(
     error: str | None = None,
     counts: tuple[int, int, int, int] = (0, 0, 0, 0),
     verdict: str | None = None,
+    snippets_json: str | None = None,
 ) -> None:
     if review_md is not None and len(review_md) > MAX_REVIEW_MD_LENGTH:
         review_md = review_md[:MAX_REVIEW_MD_LENGTH] + TRUNCATION_MARKER
@@ -484,7 +491,7 @@ def finish_review(
         UPDATE review
         SET status = ?, review_md = ?, session_id = ?, exit_code = ?, error = ?,
             finished_at = ?, crit_count = ?, major_count = ?, minor_count = ?, nit_count = ?,
-            verdict = ?
+            verdict = ?, snippets_json = ?
         WHERE id = ?
         """,
         (
@@ -496,6 +503,7 @@ def finish_review(
             utcnow_iso(),
             *counts,
             verdict,
+            snippets_json,
             review_id,
         ),
     )
@@ -510,7 +518,7 @@ def retry_review(conn: sqlite3.Connection, review_id: int) -> bool:
             error = NULL, started_at = NULL, finished_at = NULL,
             attempt = 0, not_before = NULL,
             crit_count = 0, major_count = 0, minor_count = 0, nit_count = 0,
-            verdict = NULL
+            verdict = NULL, snippets_json = NULL
         WHERE id = ? AND status IN ('error', 'done')
         """,
         (review_id,),

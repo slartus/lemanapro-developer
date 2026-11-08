@@ -17,6 +17,7 @@ from mrwatch.agents import list_readonly_agents
 from mrwatch.config import Config, default_config_path, load_config
 from mrwatch.db import get_review, list_mrs, retry_review, sync_projects
 from mrwatch.gitlab_client import GitlabApiError
+from mrwatch.review_findings import load_snippets
 
 logger = logging.getLogger(__name__)
 
@@ -96,7 +97,8 @@ async def review_detail(request: Request, review_id: int):
     ).fetchall()
     return templates.TemplateResponse(
         request, "review.html",
-        {"review": review, "mr": mr, "siblings": siblings},
+        {"review": review, "mr": mr, "siblings": siblings,
+         "snippets": load_snippets(review["snippets_json"])},
     )
 
 
