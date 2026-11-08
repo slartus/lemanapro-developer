@@ -697,3 +697,57 @@ async def test_migration_v6_reruns_backfill_once_and_sets_draft(conn):
     api.project_calls.clear()
     await poller.tick()
     assert all(c[1] is not None for c in api.project_calls)
+
+
+MR_URL = "https://gitlab.example.com/g/p/-/merge_requests/5"
+
+
+def _mention_url(conn):
+    return conn.execute("SELECT mention_url FROM mr WHERE iid = 5").fetchone()[0]
+
+
+async def _tick_with_target_url(conn, target_url, action="mentioned", todo_id=1):
+    api = StubApi()
+    api.details[(10, 5)] = _detail(10, 5)
+    api.todos = [{"id": todo_id, "target_type": "MergeRequest", "action_name": action,
+                  "target_url": target_url, "target": {"project_id": 10, "iid": 5}}]
+    await _make_poller(conn, api).tick()
+
+
+@pytest.mark.parametrize("action", ["mentioned", "directly_addressed"])
+async def test_mention_url_saved_from_todo(conn, action):
+    await _tick_with_target_url(conn, MR_URL + "#note_9", action)
+    assert _mention_url(conn) == MR_URL + "#note_9"
+
+
+async def test_mention_url_not_saved_for_other_action(conn):
+    await _tick_with_target_url(conn, MR_URL + "#note_9", "assigned")
+    assert _mention_url(conn) is None
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        "javascript:alert(1)",
+        "ftp://gitlab.example.com/g/p/-/merge_requests/5#note_1",
+        "https://evil.example.org/g/p/-/merge_requests/5#note_1",
+        "https://gitlab.example.com:8443/g/p/-/merge_requests/5#note_1",
+        "https://user@gitlab.example.com/g/p/-/merge_requests/5#note_1",
+        "https://gitlab.example.com/g/p/-/merge_requests/6#note_1",
+        "https://gitlab.example.com/g/p/-/merge_requests/55#note_1",
+        "https://gitlab.example.com/other/-/merge_requests/5#note_1",
+        "https://gitlab.example.com/g/p/-/merge_requests/5/../6#note_1",
+        "//gitlab.example.com/g/p/-/merge_requests/5",
+        "",
+        None,
+    ],
+)
+async def test_mention_url_rejected(conn, bad):
+    await _tick_with_target_url(conn, bad)
+    assert _mention_url(conn) is None
+
+
+async def test_mention_url_updated_to_latest(conn):
+    await _tick_with_target_url(conn, MR_URL + "#note_1")
+    await _tick_with_target_url(conn, MR_URL + "#note_2", todo_id=2)
+    assert _mention_url(conn) == MR_URL + "#note_2"

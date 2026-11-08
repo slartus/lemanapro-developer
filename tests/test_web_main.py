@@ -547,3 +547,31 @@ async def test_verdict_tag_absent_and_untrusted_value_ignored(ctx):
     assert 'class="verdict ' not in index.text
     assert 'class="verdict ' not in page.text
     assert "<b>x</b>" not in index.text
+
+
+async def test_mention_url_in_api_and_badge_link(ctx):
+    ctx_obj, _ = ctx
+    url = "https://gitlab.example.com/g/p/-/mr/1#note_5"
+    ctx_obj.conn.execute("UPDATE mr SET my_roles = 'mentioned', mention_url = ?", (url,))
+    ctx_obj.conn.commit()
+    async with _client(ctx_obj) as client:
+        api = await client.get("/api/mrs")
+        page = await client.get("/")
+    assert api.json()[0]["mention_url"] == url
+    assert (
+        f'<a href="{url}" title="Открыть комментарий с упоминанием" rel="noopener noreferrer">'
+        '<span class="badge role mentioned">'
+    ) in page.text
+
+
+async def test_foreign_mention_url_not_exposed_or_rendered(ctx):
+    ctx_obj, _ = ctx
+    ctx_obj.conn.execute(
+        "UPDATE mr SET my_roles = 'mentioned', mention_url = 'https://evil.example.org/x'"
+    )
+    ctx_obj.conn.commit()
+    async with _client(ctx_obj) as client:
+        api = await client.get("/api/mrs")
+        page = await client.get("/")
+    assert api.json()[0]["mention_url"] == ""
+    assert "evil.example.org" not in page.text

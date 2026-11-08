@@ -6,6 +6,7 @@ import re
 import sqlite3
 from datetime import UTC, datetime, timedelta
 from typing import Any
+from urllib.parse import unquote, urlsplit
 
 from mrwatch.config import Config
 from mrwatch.db import (
@@ -19,6 +20,7 @@ from mrwatch.db import (
     review_exists_for_head,
     poll_state_get,
     poll_state_set,
+    set_mention_url,
     todo_mark_seen,
     todo_seen_ids,
     update_mr_roles,
@@ -211,6 +213,12 @@ class Poller:
         if result is None or detail.get("state") != "opened":
             return 0
         mentioned = todo.get("action_name") in MENTION_ACTIONS
+        if mentioned:
+            mention_url = validated_mention_url(
+                todo.get("target_url"), self._config.gitlab.url, detail.get("web_url")
+            )
+            if mention_url:
+                set_mention_url(self._conn, result.mr_id, mention_url)
         is_reviewer = self._username() in _reviewer_usernames(detail)
         if result.inserted or mentioned or is_reviewer:
             return self._enqueue(result.mr_id, "new", detail, project_db_id)
@@ -394,6 +402,35 @@ def derive_roles(mr: dict[str, Any], username: str) -> frozenset[str]:
     if username in _assignee_usernames(mr):
         roles.add("assignee")
     return frozenset(roles)
+
+
+def _origin(parts) -> tuple[str, int | None] | None:
+    try:
+        port = parts.port
+    except ValueError:
+        return None
+    if not parts.hostname:
+        return None
+    return parts.hostname.lower(), port
+
+
+def validated_mention_url(url: Any, gitlab_url: str, mr_web_url: Any) -> str:
+    if not isinstance(url, str) or not isinstance(mr_web_url, str) or not url:
+        return ""
+    parts = urlsplit(url)
+    base = urlsplit(gitlab_url)
+    mr_parts = urlsplit(mr_web_url)
+    if parts.scheme not in ("http", "https") or parts.username or parts.password:
+        return ""
+    origin = _origin(parts)
+    if origin is None or origin != _origin(base) or origin != _origin(mr_parts):
+        return ""
+    mr_path = mr_parts.path.rstrip("/")
+    if not mr_path or ".." in unquote(parts.path).split("/"):
+        return ""
+    if parts.path != mr_path and not parts.path.startswith(mr_path + "/"):
+        return ""
+    return url
 
 
 def todo_signal_roles(todo: dict[str, Any]) -> frozenset[str]:

@@ -52,7 +52,7 @@
     <td class="muted">{{ m["path_with_namespace"].split("/")[-1] }}</td>
     {% set href = m["web_url"] | safe_url %}
     <td>{% if href %}<a class="mr-title" href="{{ href }}">{{ m["title"] or ("!" ~ m["iid"]) }}</a>{% else %}<span class="mr-title">{{ m["title"] or ("!" ~ m["iid"]) }}</span>{% endif %}
-      {% if m["my_roles"] or m["is_draft"] %}<span class="role-tags">{% if m["is_draft"] %}<span class="badge role draft">draft</span>{% endif %}{% if m["my_roles"] %}{% for code in m["my_roles"].split(",") %}<span class="badge role {{ code }}">{{ role_labels.get(code, code) }}</span>{% endfor %}{% endif %}</span>{% endif %}</td>
+      {% if m["my_roles"] or m["is_draft"] %}<span class="role-tags">{% if m["is_draft"] %}<span class="badge role draft">draft</span>{% endif %}{% if m["my_roles"] %}{% for code in m["my_roles"].split(",") %}{% set mention_href = (m["mention_url"] | safe_url) if code == "mentioned" else "" %}{% if mention_href %}<a href="{{ mention_href }}" title="Открыть комментарий с упоминанием" rel="noopener noreferrer"><span class="badge role {{ code }}">{{ role_labels.get(code, code) }}</span></a>{% else %}<span class="badge role {{ code }}">{{ role_labels.get(code, code) }}</span>{% endif %}{% endfor %}{% endif %}</span>{% endif %}</td>
     <td>{{ m["author_name"] or m["author_username"] or "—" }}</td>
     <td class="small">{{ m["source_branch"] or "—" }}</td>
     <td>
@@ -148,7 +148,17 @@ function renderRow(m) {
     const tags = el("span", "role-tags");
     if (m.is_draft) tags.appendChild(el("span", "badge role draft", "draft"));
     roles.forEach(function (code) {
-      tags.appendChild(el("span", "badge role " + code, ROLE_LABELS[code] || code));
+      const badge = el("span", "badge role " + code, ROLE_LABELS[code] || code);
+      if (code === "mentioned" && m.mention_url) {
+        const a = document.createElement("a");
+        a.href = safeHref(m.mention_url);
+        a.title = "Открыть комментарий с упоминанием";
+        a.rel = "noopener noreferrer";
+        a.appendChild(badge);
+        tags.appendChild(a);
+      } else {
+        tags.appendChild(badge);
+      }
     });
     title.appendChild(tags);
   }

@@ -9,7 +9,7 @@ from mrwatch.opencode_runner import MAX_VERDICT_INPUT_CHARS, parse_verdict
 
 MAX_REVIEW_MD_LENGTH = MAX_VERDICT_INPUT_CHARS
 TRUNCATION_MARKER = "...[truncated]"
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 
 DERIVED_ROLES = frozenset({"reviewer", "assignee", "author"})
 MENTIONED_ROLE = "mentioned"
@@ -110,6 +110,8 @@ def init_schema(conn: sqlite3.Connection) -> None:
         _run_migration(conn, 6, _migrate_to_v6)
     if version < 7:
         _run_migration(conn, 7, _migrate_to_v7)
+    if version < 8:
+        _run_migration(conn, 8, _migrate_to_v8)
     conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
     conn.commit()
 
@@ -151,6 +153,10 @@ def _migrate_to_v6(conn: sqlite3.Connection) -> None:
     tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
     if "poll_state" in tables:
         conn.execute("DELETE FROM poll_state WHERE key LIKE 'roles_backfill_v5:%'")
+
+
+def _migrate_to_v8(conn: sqlite3.Connection) -> None:
+    _add_column(conn, "mr", "mention_url", "TEXT")
 
 
 def _migrate_to_v7(conn: sqlite3.Connection) -> None:
@@ -250,6 +256,11 @@ def update_mr_roles(
         "UPDATE mr SET my_roles = ?, is_draft = COALESCE(?, is_draft) WHERE id = ?",
         (merged, None if is_draft is None else int(is_draft), row["id"]),
     )
+    conn.commit()
+
+
+def set_mention_url(conn: sqlite3.Connection, mr_id: int, url: str) -> None:
+    conn.execute("UPDATE mr SET mention_url = ? WHERE id = ?", (url, mr_id))
     conn.commit()
 
 
