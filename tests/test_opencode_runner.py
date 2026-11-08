@@ -12,6 +12,7 @@ from mrwatch.opencode_runner import (
     output_truncated_by_length,
     parse_opencode_output,
     parse_severity_counts,
+    parse_verdict,
     run_review,
     collect_project_instructions,
 )
@@ -207,3 +208,31 @@ def test_build_review_prompt_includes_project_rules():
     prompt = build_review_prompt("t", "a", None, None, project_rules="ПРАВИЛО")
     assert "ПРАВИЛА ПРОЕКТА" in prompt
     assert "ПРАВИЛО" in prompt
+
+
+@pytest.mark.parametrize(
+    "md, expected",
+    [
+        ("## Summary\nok\n\n## Verdict\nAPPROVE", "APPROVE"),
+        ("## Verdict\nAPPROVE_WITH_NITS\n", "APPROVE_WITH_NITS"),
+        ("### verdict\nREQUEST_CHANGES", "REQUEST_CHANGES"),
+        ("Summary\n\nVerdict: REQUEST_CHANGES", "REQUEST_CHANGES"),
+        ("Verdict: APPROVE с пометкой «нет изменений для ревью»", "APPROVE"),
+        ("## Verdict\n**REQUEST_CHANGES**", "REQUEST_CHANGES"),
+        ("## Verdict\n`APPROVE_WITH_NITS` — мелочи", "APPROVE_WITH_NITS"),
+        ("**Verdict:** **APPROVE**", "APPROVE"),
+        ("## Verdict: APPROVE", "APPROVE"),
+        ("## Verdict\n\nAPPROVE с пометкой «пусто»\n", "APPROVE"),
+        ("## Summary\nнужно APPROVE\n\n## Verdict\nREQUEST_CHANGES", "REQUEST_CHANGES"),
+        ("## Summary\nREQUEST_CHANGES вероятно\n\nVerdict: APPROVE", "APPROVE"),
+        ("## Verdict\nAPPROVE\n## Risks\nREQUEST_CHANGES", "APPROVE"),
+        ("## Summary\nAPPROVE", None),
+        ("## Verdict\nMAYBE", None),
+        ("## Verdict\nNOT_APPROVE", None),
+        ("## Verdict\nAPPROVED", None),
+        ("", None),
+        (None, None),
+    ],
+)
+def test_parse_verdict(md, expected):
+    assert parse_verdict(md) == expected

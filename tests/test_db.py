@@ -372,7 +372,7 @@ def test_migration_v1_to_v2_adds_severity_columns(tmp_path):
     assert {"crit_count", "major_count", "minor_count", "nit_count"} <= columns
     mr_columns = {r[1] for r in conn.execute("PRAGMA table_info(mr)")}
     assert "author_name" in mr_columns
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == 6
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 7
     assert "my_roles" in mr_columns
     conn.close()
 
@@ -411,7 +411,7 @@ def test_migration_v5_idempotent_and_keeps_data(tmp_path):
     init_schema(conn)
     _run_migration(conn, 5, _migrate_to_v5)
     init_schema(conn)
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == 6
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 7
     assert conn.execute("SELECT my_roles FROM mr").fetchone()["my_roles"] == "mentioned"
     conn.close()
 
@@ -447,9 +447,60 @@ def test_migration_v6_adds_is_draft_and_is_idempotent(tmp_path):
     columns = {r[1]: r for r in conn.execute("PRAGMA table_info(mr)")}
     assert columns["is_draft"][3] == 1
     assert columns["is_draft"][4] == "0"
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == 6
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 7
     conn.execute("PRAGMA user_version = 5")
     conn.commit()
     init_schema(conn)
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == 6
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 7
+    conn.close()
+
+
+def test_migration_v7_adds_verdict_backfills_and_is_idempotent(tmp_path):
+    conn = connect(tmp_path / "v6.db")
+    init_schema(conn)
+    conn.execute("ALTER TABLE review DROP COLUMN verdict")
+    conn.execute("PRAGMA user_version = 6")
+    conn.execute("INSERT INTO project (id, gitlab_project_id, path_with_namespace, agent) VALUES (1, 1, 'g/p', 'a')")
+    conn.execute("INSERT INTO mr (id, project_id, iid, head_sha, updated_at, first_seen_at) VALUES (1, 1, 1, 'x', 't', 't')")
+    samples = [
+        ("done", "## Verdict\nREQUEST_CHANGES"),
+        ("done", "## Verdict\nAPPROVE_WITH_NITS"),
+        ("done", "нет вердикта"),
+        ("done", None),
+        ("error", "## Verdict\nAPPROVE"),
+    ]
+    for index, (status, md) in enumerate(samples):
+        conn.execute(
+            "INSERT INTO review (mr_id, \"trigger\", head_sha, status, agent, review_md, created_at) "
+            "VALUES (1, 'new', ?, ?, 'a', ?, 't')",
+            (f"sha{index}", status, md),
+        )
+    conn.commit()
+    init_schema(conn)
+    init_schema(conn)
+    verdicts = [r[0] for r in conn.execute("SELECT verdict FROM review ORDER BY id")]
+    assert verdicts == ["REQUEST_CHANGES", "APPROVE_WITH_NITS", None, None, None]
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 7
+    conn.execute("PRAGMA user_version = 6")
+    conn.commit()
+    init_schema(conn)
+    assert [r[0] for r in conn.execute("SELECT verdict FROM review ORDER BY id")] == verdicts
+    conn.close()
+
+
+def test_finish_review_stores_verdict_and_retry_clears_it(tmp_path):
+    conn = connect(tmp_path / "v.db")
+    init_schema(conn)
+    mapping = sync_projects(conn, [(10, "g/p", "agent-a", False, True)])
+    mr = upsert_mr(
+        conn, project_db_id=mapping[10], iid=1, title="t", author_username="me",
+        source_branch="f", web_url="https://x/1", state="opened", head_sha="a" * 40,
+        updated_at="2026-01-01T12:00:00Z",
+    )
+    rid = create_review(conn, mr.mr_id, "new", "a" * 40, "agent-a")
+    finish_review(conn, rid, "done", review_md="x", verdict="REQUEST_CHANGES")
+    assert get_review(conn, rid)["verdict"] == "REQUEST_CHANGES"
+    assert list_mrs(conn)[0]["verdict"] == "REQUEST_CHANGES"
+    assert retry_review(conn, rid)
+    assert get_review(conn, rid)["verdict"] is None
     conn.close()

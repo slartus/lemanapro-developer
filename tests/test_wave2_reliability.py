@@ -719,7 +719,7 @@ def test_migration_v3_to_v4_moves_legacy_cursor(tmp_path):
     assert poll_state_get(c, MR_CURSOR_KEY.format(10)) == "2026-01-01T00:00:00+00:00"
     assert poll_state_get(c, MR_CURSOR_KEY.format(20)) is None
     assert poll_state_get(c, "mr_cursor") is None
-    assert c.execute("PRAGMA user_version").fetchone()[0] == 6
+    assert c.execute("PRAGMA user_version").fetchone()[0] == 7
     assert {r[1] for r in c.execute("PRAGMA table_info(review)")} >= {"not_before"}
     c.close()
 
@@ -1101,7 +1101,7 @@ async def test_api_review_json(tmp_path):
         resp = await client.get(f"/api/reviews/{review_id}")
         missing = await client.get("/api/reviews/999")
     body = resp.json()
-    assert set(body) == {"id", "status", "error", "finished_at"}
+    assert set(body) == {"id", "status", "error", "finished_at", "verdict"}
     assert body["status"] == "error" and body["error"] == "bad"
     assert body["finished_at"] is not None
     assert missing.status_code == 404

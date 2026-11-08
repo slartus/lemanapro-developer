@@ -35,6 +35,7 @@ from mrwatch.opencode_runner import (
     build_review_prompt,
     collect_project_instructions,
     parse_severity_counts,
+    parse_verdict,
     run_review,
 )
 
@@ -280,6 +281,7 @@ class Worker:
                 session_id=result.session_id,
                 exit_code=result.exit_code,
                 counts=counts,
+                verdict=parse_verdict(result.review_md),
             )
 
 

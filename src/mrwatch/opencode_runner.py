@@ -251,6 +251,40 @@ def parse_severity_counts(review_md: str | None) -> tuple[int, int, int, int]:
     return tuple(counts)
 
 
+VERDICTS = ("APPROVE_WITH_NITS", "REQUEST_CHANGES", "APPROVE")
+VERDICT_TOKEN = re.compile(r"(?<![A-Za-z0-9_])(APPROVE_WITH_NITS|REQUEST_CHANGES|APPROVE)(?![A-Za-z0-9_])")
+VERDICT_HEADING = re.compile(r"^[ \t]{0,3}#{1,6}[ \t]*Verdict\b[ \t:\-]*(.*)$", re.IGNORECASE)
+VERDICT_LINE = re.compile(r"^[ \t]*(?:[-+>][ \t]*)?Verdict[ \t]*:(.*)$", re.IGNORECASE)
+ANY_HEADING = re.compile(r"^[ \t]{0,3}#{1,6}\s")
+
+
+def parse_verdict(review_md: str | None) -> str | None:
+    if not review_md:
+        return None
+    lines = review_md.replace("*", "").replace("`", "").splitlines()
+    section_hits: list[str] = []
+    line_hits: list[str] = []
+    for index, line in enumerate(lines):
+        heading = VERDICT_HEADING.match(line)
+        if heading:
+            body = [heading.group(1)]
+            for following in lines[index + 1:]:
+                if ANY_HEADING.match(following):
+                    break
+                body.append(following)
+            token = VERDICT_TOKEN.search("\n".join(body))
+            if token:
+                section_hits.append(token.group(1))
+            continue
+        inline = VERDICT_LINE.match(line)
+        if inline:
+            token = VERDICT_TOKEN.search(inline.group(1))
+            if token:
+                line_hits.append(token.group(1))
+    hits = section_hits or line_hits
+    return hits[-1] if hits else None
+
+
 MAX_RULES_TOTAL_CHARS = 40_000
 MAX_RULE_FILE_CHARS = 16_000
 

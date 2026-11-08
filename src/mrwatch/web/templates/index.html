@@ -18,6 +18,7 @@
   .empty { text-align: center; padding: 2rem 1rem; }
 {% endblock %}
 {% block content %}
+{% set verdict_labels = {"APPROVE": "approve", "APPROVE_WITH_NITS": "approve · nits", "REQUEST_CHANGES": "changes"} %}
 <div class="toolbar">
   <input type="search" id="q" placeholder="Поиск: проект, MR, автор, ветка" aria-label="Поиск">
   <select id="sf" aria-label="Фильтр по статусу">
@@ -35,6 +36,7 @@
     {% endfor %}
   </select>
   <label class="small"><input type="checkbox" id="hd"> скрыть draft</label>
+  <label class="small"><input type="checkbox" id="cf"> требуют правок</label>
   <button id="fc-btn" onclick="forceCheck()">Проверить сейчас</button>
   <span id="fc-status" class="muted small" role="status"></span>
 </div>
@@ -46,7 +48,7 @@
   </thead>
   <tbody id="mr-body">
   {% for m in mrs %}
-  <tr data-status="{{ m["latest_review_status"] or "" }}" data-roles="{{ m["my_roles"] or "" }}" data-draft="{{ 1 if m["is_draft"] else 0 }}">
+  <tr data-status="{{ m["latest_review_status"] or "" }}" data-roles="{{ m["my_roles"] or "" }}" data-draft="{{ 1 if m["is_draft"] else 0 }}" data-verdict="{{ m["verdict"] or "" }}">
     <td class="muted">{{ m["path_with_namespace"].split("/")[-1] }}</td>
     {% set href = m["web_url"] | safe_url %}
     <td>{% if href %}<a class="mr-title" href="{{ href }}">{{ m["title"] or ("!" ~ m["iid"]) }}</a>{% else %}<span class="mr-title">{{ m["title"] or ("!" ~ m["iid"]) }}</span>{% endif %}
@@ -67,6 +69,7 @@
         {% if not (m["crit_count"] or m["major_count"] or m["minor_count"] or m["nit_count"]) %}
           <span class="sev clean">✓</span>
         {% endif %}
+        {% if m["verdict"] in verdict_labels %}<span class="verdict {{ m["verdict"] }}">{{ verdict_labels[m["verdict"]] }}</span>{% endif %}
       {% else %}<span class="muted">—</span>{% endif %}
     </td>
     <td class="muted small nowrap"><time data-ts="{{ m["updated_at"] }}"{% if m["state"] in (none, "opened", "locked") %} data-open="1"{% endif %}>{{ m["updated_at"] }}</time></td>
@@ -86,6 +89,7 @@ const q = document.getElementById("q");
 const sf = document.getElementById("sf");
 const rf = document.getElementById("rf");
 const hd = document.getElementById("hd");
+const cf = document.getElementById("cf");
 const ROLE_LABELS = {{ role_labels | tojson }};
 const hasMrs = {{ (mrs | length > 0) | tojson }};
 let timer = null;
@@ -98,6 +102,7 @@ function applyFilter() {
   document.querySelectorAll("#mr-body tr").forEach(function (tr) {
     const ok = (!status || tr.dataset.status === status) &&
       (!hd.checked || tr.dataset.draft !== "1") &&
+      (!cf.checked || tr.dataset.verdict === "REQUEST_CHANGES") &&
       (!role || (tr.dataset.roles || "").split(",").includes(role)) &&
       (!needle || tr.textContent.toLowerCase().includes(needle));
     tr.hidden = !ok;
@@ -113,6 +118,8 @@ function hasActive() {
     return ACTIVE.includes(tr.dataset.status);
   });
 }
+
+const VERDICT_LABELS = {APPROVE: "approve", APPROVE_WITH_NITS: "approve · nits", REQUEST_CHANGES: "changes"};
 
 function safeHref(url) {
   return /^https?:\/\//i.test(url || "") ? url : "#";
@@ -131,6 +138,7 @@ function renderRow(m) {
   const roles = m.my_roles || [];
   tr.dataset.roles = roles.join(",");
   tr.dataset.draft = m.is_draft ? "1" : "0";
+  tr.dataset.verdict = m.verdict || "";
   tr.appendChild(el("td", "muted", (m.path_with_namespace || "").split("/").pop()));
   const title = el("td");
   const link = el("a", "mr-title", m.title || ("!" + m.iid));
@@ -165,6 +173,7 @@ function renderRow(m) {
       if (k[1]) { any = true; sev.appendChild(el("span", "sev " + k[0], String(k[1]))); sev.append(" "); }
     });
     if (!any) sev.appendChild(el("span", "sev clean", "✓"));
+    if (VERDICT_LABELS[m.verdict]) sev.appendChild(el("span", "verdict " + m.verdict, VERDICT_LABELS[m.verdict]));
   } else {
     sev.appendChild(el("span", "muted", "—"));
   }
@@ -225,6 +234,7 @@ q.addEventListener("input", applyFilter);
 sf.addEventListener("change", applyFilter);
 rf.addEventListener("change", applyFilter);
 hd.addEventListener("change", applyFilter);
+cf.addEventListener("change", applyFilter);
 schedule();
 </script>
 {% endblock %}
