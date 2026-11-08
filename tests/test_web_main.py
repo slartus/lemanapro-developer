@@ -480,3 +480,39 @@ async def test_api_mrs_and_index_expose_draft(ctx):
     assert 'class="badge role draft">draft</span>' in body
     assert 'data-draft="1"' in body
     assert 'id="hd"' in page.text
+
+
+async def test_favicon_svg(ctx):
+    ctx_obj, _ = ctx
+    async with _client(ctx_obj) as client:
+        response = await client.get("/favicon.svg")
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("image/svg+xml")
+    assert "<svg" in response.text
+    assert response.headers["cache-control"] == "public, max-age=86400"
+
+
+async def test_favicon_ico_served(ctx):
+    ctx_obj, _ = ctx
+    async with _client(ctx_obj) as client:
+        response = await client.get("/favicon.ico")
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("image/svg+xml")
+
+
+async def test_base_template_links_icon(ctx):
+    ctx_obj, _ = ctx
+    async with _client(ctx_obj) as client:
+        response = await client.get("/")
+    assert '<link rel="icon" type="image/svg+xml" href="/favicon.svg">' in response.text
+
+
+@pytest.mark.parametrize("path", ["/favicon.svg", "/favicon.ico"])
+async def test_favicon_host_check(ctx, path):
+    ctx_obj, _ = ctx
+    app = create_app(ctx_obj)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://evil.example.com:9999"
+    ) as client:
+        response = await client.get(path)
+    assert response.status_code == 403

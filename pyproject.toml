@@ -19,6 +19,9 @@ dependencies = [
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[tool.setuptools.package-data]
+"mrwatch.web" = ["templates/*.html", "static/*.svg"]
+
 [dependency-groups]
 dev = ["pytest", "pytest-asyncio"]
 
