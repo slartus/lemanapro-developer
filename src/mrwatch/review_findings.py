@@ -64,8 +64,7 @@ def iter_findings(review_md: str | None) -> Iterator[Finding]:
     index = 0
     for line_no, raw in enumerate(split_review_lines(review_md)):
         if fence is not None:
-            stripped = raw.strip()
-            if stripped and stripped[0] == fence[0] and len(stripped) >= len(fence) and not stripped.strip(fence[0]):
+            if _is_fence_close(raw, fence):
                 fence = None
             continue
         opening = FENCE_OPEN.match(raw)
@@ -389,16 +388,18 @@ def _dedent(raw: str, width: int) -> str:
 
 def split_inline_code(text: str) -> list[tuple[str, bool]]:
     runs = list(BACKTICK_RUN.finditer(text))
+    next_same_width: list[int | None] = [None] * len(runs)
+    last_seen: dict[int, int] = {}
+    for k in range(len(runs) - 1, -1, -1):
+        run_width = runs[k].end() - runs[k].start()
+        next_same_width[k] = last_seen.get(run_width)
+        last_seen[run_width] = k
     segments: list[tuple[str, bool]] = []
     pos = 0
     i = 0
     while i < len(runs):
         opener = runs[i]
-        width = opener.end() - opener.start()
-        closer_index = next(
-            (j for j in range(i + 1, len(runs)) if runs[j].end() - runs[j].start() == width),
-            None,
-        )
+        closer_index = next_same_width[i]
         if closer_index is None:
             i += 1
             continue
