@@ -114,17 +114,6 @@ async def test_500_retries_then_raises():
         await client.aclose()
 
 
-async def test_mark_todo_done_swallows_errors():
-    def handler(request: httpx.Request) -> httpx.Response:
-        raise httpx.ConnectError("down")
-
-    client = _client(handler)
-    try:
-        await client.mark_todo_done(1)
-    finally:
-        await client.aclose()
-
-
 async def test_get_todos_paginates():
     def handler(request: httpx.Request) -> httpx.Response:
         if "page=2" not in str(request.url):

@@ -5,14 +5,15 @@ import json
 import logging
 import os
 import re
-import signal
 from dataclasses import dataclass, field
 from pathlib import Path
+
+from mrwatch.procutil import OutputLimitExceeded, communicate_capped, kill_group as _kill_group, kill_on_exit
 
 logger = logging.getLogger(__name__)
 
 STDOUT_CAP_BYTES = 10_000_000
-KILL_GRACE_SEC = 5.0
+OUTPUT_HARD_LIMIT_BYTES = 50_000_000
 _GLPAT_RE = re.compile(r"glpat-[A-Za-z0-9_\-]+")
 _BEARER_RE = re.compile(r"Bearer\s+\S+", re.IGNORECASE)
 
@@ -45,6 +46,8 @@ def _build_env(home: str, tmpdir: Path) -> dict[str, str]:
         "PATH": "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin",
         "HOME": home,
         "TMPDIR": str(tmpdir),
+        "OPENCODE_DISABLE_PROJECT_CONFIG": "1",
+        "OPENCODE_DISABLE_CLAUDE_CODE": "1",
     }
 
 
@@ -86,33 +89,34 @@ def output_truncated_by_length(raw: str) -> bool:
     return False
 
 
-async def _kill_group(proc: asyncio.subprocess.Process) -> None:
-    try:
-        os.killpg(proc.pid, signal.SIGTERM)
-    except ProcessLookupError:
-        return
-    try:
-        await asyncio.wait_for(proc.wait(), timeout=KILL_GRACE_SEC)
-    except asyncio.TimeoutError:
+def length_step_tokens(raw: str) -> tuple[int | None, int | None] | None:
+    found: tuple[int | None, int | None] | None = None
+    for line in raw.splitlines():
+        line = line.strip()
+        if not line.startswith("{"):
+            continue
         try:
-            os.killpg(proc.pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
-        await proc.wait()
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        part = event.get("part") or event
+        if isinstance(part, dict) and part.get("type") == "step-finish" and part.get("reason") == "length":
+            tokens = part.get("tokens")
+            tokens = tokens if isinstance(tokens, dict) else {}
+            found = (tokens.get("output"), tokens.get("reasoning"))
+    return found
 
 
-async def run_review(
-    env: RunnerEnv,
-    workspace: Path,
-    agent: str,
+def build_opencode_argv(
+    opencode_bin: str,
     prompt: str,
-    timeout_sec: int,
-    log_path: Path,
-    tmpdir: Path,
-) -> ReviewResult:
-    result = ReviewResult()
+    agent: str,
+    workspace: Path,
+    model: str | None = None,
+    variant: str | None = None,
+) -> list[str]:
     cmd = [
-        env.opencode_bin,
+        opencode_bin,
         "run",
         prompt,
         "--agent", agent,
@@ -120,9 +124,36 @@ async def run_review(
         "--format", "json",
         "--pure",
     ]
-    log_path.parent.mkdir(parents=True, exist_ok=True)
-    if not Path(env.opencode_bin).expanduser().exists():
-        raise OpencodeError(f"opencode binary not found: {env.opencode_bin}")
+    if model:
+        cmd += ["--model", model]
+    if variant:
+        cmd += ["--variant", variant]
+    return cmd
+
+
+def _length_error(raw: str) -> str:
+    tokens = length_step_tokens(raw) or (None, None)
+    return (
+        f"модель исчерпала лимит вывода (output={tokens[0]}, reasoning={tokens[1]} токенов) "
+        "до текста ревью; увеличьте limit.output модели в opencode.json "
+        "или задайте opencode.variant/model"
+    )
+
+
+def _append_log(log_path: Path, text: str) -> None:
+    with log_path.open("a", encoding="utf-8") as log:
+        log.write(text)
+
+
+async def _run_attempt(
+    env: RunnerEnv,
+    workspace: Path,
+    cmd: list[str],
+    timeout_sec: float,
+    log_path: Path,
+    tmpdir: Path,
+) -> tuple[ReviewResult, str]:
+    result = ReviewResult()
     try:
         proc = await asyncio.create_subprocess_exec(
             *cmd,
@@ -135,31 +166,74 @@ async def run_review(
     except FileNotFoundError as exc:
         raise OpencodeError(f"failed to start opencode: {exc}") from exc
     try:
-        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout_sec)
+        stdout, stderr = await asyncio.wait_for(
+            communicate_capped(proc, OUTPUT_HARD_LIMIT_BYTES), timeout=timeout_sec
+        )
     except asyncio.TimeoutError:
         await _kill_group(proc)
         result.exit_code = proc.returncode
         result.timed_out = True
-        result.error = f"opencode timed out after {timeout_sec}s (killed)"
-        return result
+        result.error = f"opencode timed out after {int(timeout_sec)}s (killed)"
+        return result, ""
+    except OutputLimitExceeded:
+        await _kill_group(proc)
+        result.exit_code = proc.returncode
+        result.error = f"opencode output exceeded {OUTPUT_HARD_LIMIT_BYTES} bytes (killed)"
+        return result, ""
+    except BaseException:
+        await kill_on_exit(proc)
+        raise
     result.exit_code = proc.returncode
     out_text = _mask(stdout[:STDOUT_CAP_BYTES].decode("utf-8", "replace"))
     err_text = _mask(stderr[:STDOUT_CAP_BYTES].decode("utf-8", "replace"))
-    with log_path.open("a", encoding="utf-8") as log:
-        log.write(out_text)
-        if err_text:
-            log.write("\n--- stderr ---\n" + err_text)
+    await asyncio.to_thread(
+        _append_log, log_path, out_text + ("\n--- stderr ---\n" + err_text if err_text else "")
+    )
     result.review_md, result.session_id = parse_opencode_output(out_text)
     if result.review_md is None and proc.returncode != 0:
         result.error = f"opencode exit {proc.returncode}: {err_text.strip()[-500:] or 'no output'}"
     elif result.review_md is None:
         if output_truncated_by_length(out_text):
-            result.error = (
-                "model stopped at token limit (reason=length) без текста — "
-                "вероятно, дифф слишком большой; попробуйте Re-review"
-            )
+            result.error = _length_error(out_text)
         else:
             result.error = "opencode produced no review text"
+    return result, out_text
+
+
+async def run_review(
+    env: RunnerEnv,
+    workspace: Path,
+    agent: str,
+    prompt: str,
+    timeout_sec: int,
+    log_path: Path,
+    tmpdir: Path,
+    model: str | None = None,
+    variant: str | None = None,
+    length_retry_variant: str | None = None,
+) -> ReviewResult:
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    if not Path(env.opencode_bin).expanduser().exists():
+        raise OpencodeError(f"opencode binary not found: {env.opencode_bin}")
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout_sec
+    cmd = build_opencode_argv(env.opencode_bin, prompt, agent, workspace, model, variant)
+    result, out_text = await _run_attempt(env, workspace, cmd, timeout_sec, log_path, tmpdir)
+    truncated = (
+        result.review_md is None
+        and result.exit_code == 0
+        and not result.timed_out
+        and output_truncated_by_length(out_text)
+    )
+    remaining = deadline - loop.time()
+    if truncated and length_retry_variant and length_retry_variant != variant and remaining > 1:
+        await asyncio.to_thread(
+            _append_log, log_path, f"\n--- retry: reason=length, variant={length_retry_variant} ---\n"
+        )
+        retry_cmd = build_opencode_argv(
+            env.opencode_bin, prompt, agent, workspace, model, length_retry_variant
+        )
+        result, _ = await _run_attempt(env, workspace, retry_cmd, remaining, log_path, tmpdir)
     return result
 
 

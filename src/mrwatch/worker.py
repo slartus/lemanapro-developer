@@ -4,11 +4,30 @@ import asyncio
 import logging
 import shutil
 import sqlite3
+from collections.abc import Callable
 from pathlib import Path
 
+from mrwatch.agents import AgentError, validate_agent
 from mrwatch.config import Config, ResolvedPaths
-from mrwatch.db import claim_next_review, finish_review, mark_reviewing, requeue_review
-from mrwatch.git_ops import GitEnv, clone_for_review, diff_for_review, make_git_env, remove_workspace
+from mrwatch.db import (
+    claim_next_review,
+    finish_review,
+    mark_reviewing,
+    rebase_review_head,
+    requeue_review,
+)
+from mrwatch.git_ops import (
+    BASE_REF,
+    GitEnv,
+    GitOpsError,
+    HeadMismatchError,
+    clone_for_review,
+    diff_for_review,
+    is_safe_branch,
+    make_git_env,
+    remove_workspace,
+    run_git,
+)
 from mrwatch.gitlab_client import GitLabClient
 from mrwatch.opencode_runner import (
     OpencodeError,
@@ -25,6 +44,7 @@ CLONE_RETRY_BACKOFF_SEC = 5.0
 MAX_CLONE_ATTEMPTS = 3
 MIN_FREE_DISK_BYTES = 5 * 1024**3
 IDLE_SLEEP_SEC = 2.0
+ERROR_PAUSE_SEC = 5.0
 
 
 class Worker:
@@ -35,30 +55,55 @@ class Worker:
         api: GitLabClient,
         config: Config,
         paths: ResolvedPaths,
-        queue: asyncio.Queue | None = None,
+        work_event: asyncio.Event | None = None,
         clone_harden: bool = True,
+        agents_dirs: tuple[Path, ...] | None = None,
+        config_provider: Callable[[], Config] | None = None,
     ) -> None:
         self.worker_id = worker_id
         self._conn = conn
         self._api = api
-        self._config = config
+        self._static_config = config
+        self._config_provider = config_provider
         self._paths = paths
-        self._queue = queue
+        self._work_event = work_event
         self._clone_harden = clone_harden
-        self._git_env = make_git_env(config.gitlab.pat_command, paths.workspaces.parent / "tmp")
+        self._agents_dirs = agents_dirs
+
+    @property
+    def _config(self) -> Config:
+        if self._config_provider is not None:
+            return self._config_provider()
+        return self._static_config
+
+    @property
+    def _git_env(self) -> GitEnv:
+        return make_git_env(self._config.gitlab.pat_command, self._paths.workspaces.parent / "tmp")
 
     async def run(self) -> None:
         while True:
-            processed = await self.process_one()
-            if not processed:
-                await asyncio.sleep(IDLE_SLEEP_SEC)
+            if self._work_event is not None:
+                self._work_event.clear()
+            try:
+                processed = await self.process_one()
+            except Exception:
+                logger.exception("worker %s: loop iteration failed", self.worker_id)
+                await asyncio.sleep(ERROR_PAUSE_SEC)
+                continue
+            if processed:
+                continue
+            await self._idle()
+
+    async def _idle(self) -> None:
+        if self._work_event is None:
+            await asyncio.sleep(IDLE_SLEEP_SEC)
+            return
+        try:
+            await asyncio.wait_for(self._work_event.wait(), timeout=IDLE_SLEEP_SEC)
+        except asyncio.TimeoutError:
+            pass
 
     async def process_one(self) -> bool:
-        if self._queue is not None:
-            try:
-                await asyncio.wait_for(self._queue.get(), timeout=5.0)
-            except asyncio.TimeoutError:
-                pass
         review = claim_next_review(self._conn)
         if review is None:
             return False
@@ -91,18 +136,60 @@ class Worker:
 
     def _requeue_or_fail(self, review_id: int, attempt: int, error: str) -> None:
         if attempt < MAX_CLONE_ATTEMPTS:
-            requeue_review(self._conn, review_id)
+            requeue_review(self._conn, review_id, delay_sec=CLONE_RETRY_BACKOFF_SEC * attempt)
         else:
             finish_review(self._conn, review_id, "error", error=error)
 
+    def _handle_head_mismatch(self, review: sqlite3.Row, exc: HeadMismatchError) -> None:
+        review_id = review["id"]
+        logger.warning("review %s: %s", review_id, exc)
+        if rebase_review_head(self._conn, review_id, exc.actual):
+            self._requeue_or_fail(review_id, review["attempt"], f"MR head moved: {exc}")
+        else:
+            finish_review(
+                self._conn, review_id, "error",
+                error=f"MR head moved to {exc.actual[:12]}; a review for it already exists",
+            )
+
+    async def _resolve_base_sha(
+        self, workspace: Path, detail: dict, diff_refs: dict, head_sha: str
+    ) -> str | None:
+        if detail.get("sha") == head_sha:
+            return diff_refs.get("base_sha")
+        target = detail.get("target_branch")
+        if not target or not is_safe_branch(target):
+            return None
+        env = GitEnv(
+            pat_command="",
+            base_env={
+                "PATH": "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin",
+                "HOME": str(Path.home()),
+            },
+        )
+        try:
+            out = await run_git(
+                ["git", "merge-base", BASE_REF, head_sha],
+                workspace, env,
+            )
+        except GitOpsError as exc:
+            logger.warning("merge-base failed in %s: %s", workspace.name, exc)
+            return None
+        return out.strip() or None
+
     async def _process_review(self, review: sqlite3.Row) -> None:
         review_id = review["id"]
+        config = self._config
         if self._low_disk():
             finish_review(self._conn, review_id, "error", error="low disk: <5GB free")
             return
         mr = self._load_mr(review["mr_id"])
         if mr is None:
             finish_review(self._conn, review_id, "error", error="mr row missing")
+            return
+        try:
+            validate_agent(review["agent"], self._agents_dirs)
+        except AgentError as exc:
+            finish_review(self._conn, review_id, "error", error=f"agent rejected: {exc}")
             return
         try:
             detail = await self._api.get_project_mr(
@@ -126,12 +213,18 @@ class Worker:
                 repo_url=repo_url,
                 mr_iid=mr["iid"],
                 target_branch=detail.get("target_branch"),
-                depth=self._config.review.clone_depth,
-                env=self._git_env,
+                depth=config.review.clone_depth,
+                env=make_git_env(config.gitlab.pat_command, self._paths.workspaces.parent / "tmp"),
                 tmpdir=self._paths.workspaces.parent / "tmp",
                 harden=self._clone_harden,
+                expected_sha=review["head_sha"],
             )
+        except HeadMismatchError as exc:
+            await asyncio.to_thread(remove_workspace, workspace, self._paths.workspaces)
+            self._handle_head_mismatch(review, exc)
+            return
         except Exception as exc:
+            await asyncio.to_thread(remove_workspace, workspace, self._paths.workspaces)
             logger.warning("review %s: clone failed: %s", review_id, exc)
             self._requeue_or_fail(review_id, review["attempt"], f"clone failed: {exc}")
             return
@@ -139,9 +232,10 @@ class Worker:
         diff_refs = detail.get("diff_refs") or {}
         mark_reviewing(self._conn, review_id)
         try:
-            diff = await diff_for_review(
-                workspace, diff_refs.get("base_sha"), mr["head_sha"]
+            base_sha = await self._resolve_base_sha(
+                workspace, detail, diff_refs, review["head_sha"]
             )
+            diff = await diff_for_review(workspace, base_sha, review["head_sha"])
             prompt = build_review_prompt(
                 title=mr["title"] or "",
                 author=mr["author_username"],
@@ -149,20 +243,28 @@ class Worker:
                 diff=diff,
             )
             log_path = self._paths.logs / f"review-{review_id}.log"
+            project_cfg = next(
+                (p for p in config.projects if p.gitlab_project_id == mr["gitlab_project_id"]),
+                None,
+            )
+            oc = config.opencode
             result = await run_review(
-                env=RunnerEnv(opencode_bin=self._config.opencode.bin),
+                env=RunnerEnv(opencode_bin=oc.bin),
                 workspace=workspace,
                 agent=review["agent"],
                 prompt=prompt,
-                timeout_sec=self._config.review.timeout_sec,
+                timeout_sec=config.review.timeout_sec,
                 log_path=log_path,
                 tmpdir=self._paths.workspaces.parent / "tmp",
+                model=(project_cfg.model if project_cfg and project_cfg.model else oc.model),
+                variant=(project_cfg.variant if project_cfg and project_cfg.variant else oc.variant),
+                length_retry_variant=oc.length_retry_variant,
             )
         except OpencodeError as exc:
             finish_review(self._conn, review_id, "error", error=f"opencode failed: {exc}")
             return
         finally:
-            remove_workspace(workspace)
+            await asyncio.to_thread(remove_workspace, workspace, self._paths.workspaces)
         if result.error is not None and result.review_md is None:
             finish_review(
                 self._conn, review_id, "error",
@@ -187,9 +289,11 @@ def start_workers(
     api: GitLabClient,
     config: Config,
     paths: ResolvedPaths,
-    queue: asyncio.Queue,
+    work_event: asyncio.Event,
+    config_provider: Callable[[], Config] | None = None,
 ) -> list[asyncio.Task]:
     workers = [
-        Worker(i, conn, api, config, paths, queue) for i in range(count)
+        Worker(i, conn, api, config, paths, work_event, config_provider=config_provider)
+        for i in range(count)
     ]
     return [asyncio.create_task(w.run(), name=f"mrwatch-worker-{i}") for i, w in enumerate(workers)]

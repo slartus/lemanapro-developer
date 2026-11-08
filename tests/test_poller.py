@@ -18,7 +18,10 @@ from mrwatch.db import (
 )
 from mrwatch.gitlab_client import GitlabApiError
 from mrwatch.db import SCAN_DONE_KEY, list_mrs
-from mrwatch.poller import CURSOR_KEY, Poller
+from mrwatch.db import MR_CURSOR_KEY, todo_seen_ids
+from mrwatch.poller import Poller
+
+CURSOR_KEY = MR_CURSOR_KEY.format(10)
 
 USER = {"id": 1, "username": "me"}
 
@@ -30,7 +33,7 @@ class StubApi:
         self.mrs: list[dict] = []
         self.details: dict[tuple[int, int], dict] = {}
         self.notes: dict[tuple[int, int], list[dict]] = {}
-        self.done_todos: list[int] = []
+        self.project_calls: list[tuple] = []
         self.fail_todos = False
         self.fail_notes = False
 
@@ -42,13 +45,8 @@ class StubApi:
             raise GitlabApiError("todos down", status=500)
         return list(self.todos)
 
-    async def mark_todo_done(self, todo_id: int):
-        self.done_todos.append(todo_id)
-
-    async def get_merge_requests(self, updated_after):
-        return list(self.mrs)
-
-    async def get_project_merge_requests(self, project_id: int):
+    async def get_project_merge_requests(self, project_id: int, updated_after=None, state="opened"):
+        self.project_calls.append((project_id, updated_after, state))
         return [m for m in self.mrs if m.get("project_id") == project_id]
 
     async def get_mr_notes(self, project_id: int, iid: int):
@@ -105,14 +103,14 @@ def conn(tmp_path):
     c.close()
 
 
-def _make_poller(conn, api, config=None, queue=None):
+def _make_poller(conn, api, config=None, work_event=None):
     config = config or _config()
     re_review = config.projects[0].re_review_on_push
     mapping = sync_projects(conn, [(10, "g/p", "agent-a", re_review, True)])
-    return Poller(conn, api, config, mapping, queue=queue)
+    return Poller(conn, api, config, mapping, work_event=work_event)
 
 
-async def test_todo_triggers_review_and_marks_done(conn):
+async def test_todo_triggers_review_and_is_remembered(conn):
     api = StubApi()
     api.details[(10, 5)] = _detail(10, 5, reviewers=["me"])
     api.todos = [{"id": 77, "target_type": "MergeRequest", "action_name": "mentioned",
@@ -122,7 +120,7 @@ async def test_todo_triggers_review_and_marks_done(conn):
     created = await poller.tick()
 
     assert created == 1
-    assert api.done_todos == [77]
+    assert todo_seen_ids(conn) == {77}
     reviews = list_reviews(conn)
     assert len(reviews) == 1
     assert reviews[0]["trigger"] == "new"
@@ -139,7 +137,7 @@ async def test_todo_foreign_project_ignored(conn):
     created = await poller.tick()
 
     assert created == 0
-    assert api.done_todos == []
+    assert todo_seen_ids(conn) == set()
     assert list_reviews(conn) == []
 
 
@@ -245,6 +243,7 @@ async def test_cursor_written_with_overlap(conn):
 async def test_cursor_kept_when_nothing_new(conn):
     api = StubApi()
     poller = _make_poller(conn, api)
+    poll_state_set(conn, SCAN_DONE_KEY.format(10), "2026-01-01T00:00:00+00:00")
     poll_state_set(conn, CURSOR_KEY, "2026-01-01T00:00:00+00:00")
 
     await poller.tick()
@@ -257,13 +256,15 @@ async def test_full_scan_cursor_used_by_sweep(conn):
     api.mrs = [_mr(10, 1, author="other", updated_at="2026-01-01T12:00:00Z")]
     poller = _make_poller(conn, api)
     seen = {}
-    original = api.get_merge_requests
+    original = api.get_project_merge_requests
 
-    async def spy(updated_after):
-        seen["cursor"] = updated_after
-        return await original(updated_after)
+    async def spy(project_id, updated_after=None, state="opened"):
+        if updated_after is not None:
+            seen["cursor"] = updated_after
+            seen["state"] = state
+        return await original(project_id, updated_after, state)
 
-    api.get_merge_requests = spy
+    api.get_project_merge_requests = spy
     await poller.tick()
     await poller.tick()
 
@@ -312,15 +313,15 @@ async def test_run_loop_records_error_and_clears_on_success(conn):
     assert poll_state_get(conn, "poll_last_ok") is not None
 
 
-async def test_queue_notified_on_new_reviews(conn):
+async def test_work_event_set_on_new_reviews(conn):
     api = StubApi()
     api.mrs = [_mr(10, 1, author="me")]
-    queue = asyncio.Queue()
-    poller = _make_poller(conn, api, queue=queue)
+    work_event = asyncio.Event()
+    poller = _make_poller(conn, api, work_event=work_event)
 
     await poller.tick()
 
-    assert queue.qsize() == 1
+    assert work_event.is_set()
     assert get_review(conn, 1)["status"] == "queued"
 
 
@@ -333,9 +334,10 @@ async def test_full_scan_new_project_picked_up_later(conn):
     calls = {"n": 0}
     original = api.get_project_merge_requests
 
-    async def counting(project_id):
-        calls["n"] += 1
-        return await original(project_id)
+    async def counting(project_id, updated_after=None, state="opened"):
+        if updated_after is None:
+            calls["n"] += 1
+        return await original(project_id, updated_after, state)
 
     api.get_project_merge_requests = counting
     await poller.tick()
@@ -348,7 +350,7 @@ async def test_full_scan_new_project_picked_up_later(conn):
         ProjectConfig(gitlab_project_id=20, slug="g/p2", agent="agent-a")
     )
     mapping = sync_projects(conn, [(10, "g/p", "agent-a", True, True), (20, "g/p2", "agent-a", True, True)])
-    poller2 = Poller(conn, api, config, mapping, queue=None)
+    poller2 = Poller(conn, api, config, mapping)
 
     created = await poller2.tick()
     assert created == 1

@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import sqlite3
+import time
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from logging.handlers import RotatingFileHandler
@@ -13,7 +14,7 @@ from fastapi.responses import JSONResponse, PlainTextResponse
 
 from mrwatch.config import Config, ResolvedPaths, default_config_path, get_pat, load_config, resolve_paths
 from mrwatch.db import backup, connect, init_schema, poll_state_get, requeue_incomplete, sync_projects
-from mrwatch.git_ops import cleanup_old_workspaces
+from mrwatch.git_ops import cleanup_old_review_logs, cleanup_old_workspaces, cleanup_stale_askpass
 from mrwatch.gitlab_client import GitLabClient
 from mrwatch.poller import Poller
 from mrwatch.web.routes import router as web_router
@@ -74,7 +75,7 @@ class HostCheckMiddleware:
 
 
 def setup_logging(logs_dir: Path) -> None:
-    logs_dir.mkdir(parents=True, exist_ok=True)
+    logs_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
     root = logging.getLogger()
     if any(isinstance(h, RotatingFileHandler) for h in root.handlers):
         return
@@ -90,11 +91,22 @@ def setup_logging(logs_dir: Path) -> None:
     root.addHandler(console)
 
 
+def _backup_due(backup_dir: Path, interval_sec: float, now: float | None = None) -> bool:
+    mtimes = [p.stat().st_mtime for p in backup_dir.glob("mrwatch-*.db") if p.is_file()]
+    if not mtimes:
+        return True
+    return (time.time() if now is None else now) - max(mtimes) >= interval_sec
+
+
 async def _backup_loop(ctx: AppContext) -> None:
+    backup_dir = ctx.paths.db.parent / "backups"
+    first = True
     while True:
-        await asyncio.sleep(BACKUP_INTERVAL_SEC)
+        if not (first and await asyncio.to_thread(_backup_due, backup_dir, BACKUP_INTERVAL_SEC)):
+            await asyncio.sleep(BACKUP_INTERVAL_SEC)
+        first = False
         try:
-            dest = await asyncio.to_thread(backup, ctx.conn, ctx.paths.db.parent / "backups")
+            dest = await asyncio.to_thread(backup, ctx.paths.db, ctx.paths.db.parent / "backups")
             _prune_backups(dest.parent, BACKUP_KEEP)
             logger.info("db backup written: %s", dest.name)
         except Exception:
@@ -107,23 +119,47 @@ def _prune_backups(backup_dir: Path, keep: int) -> None:
         old.unlink(missing_ok=True)
 
 
+def _log_task_exit(task: asyncio.Task) -> None:
+    if task.cancelled():
+        return
+    exc = task.exception()
+    if exc is not None:
+        logger.error("background task %s died", task.get_name(), exc_info=exc)
+    else:
+        logger.error("background task %s exited unexpectedly", task.get_name())
+
+
+def _supervise(task: asyncio.Task) -> asyncio.Task:
+    task.add_done_callback(_log_task_exit)
+    return task
+
+
 def create_app(ctx: AppContext, port: int = DEFAULT_PORT) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         requeue_incomplete(ctx.conn)
         cleanup_old_workspaces(ctx.paths.workspaces, ctx.config.review.workspace_ttl_days)
-        ctx.paths.workspaces.parent.joinpath("tmp").mkdir(parents=True, exist_ok=True)
-        queue: asyncio.Queue = asyncio.Queue(maxsize=100)
-        poller = Poller(ctx.conn, ctx.api, ctx.config, ctx.project_ids, queue)
+        cleanup_old_review_logs(ctx.paths.logs, ctx.config.review.log_ttl_days)
+        tmp_dir = ctx.paths.workspaces.parent / "tmp"
+        tmp_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+        cleanup_stale_askpass(tmp_dir)
+        work_event = asyncio.Event()
+        poller = Poller(ctx.conn, ctx.api, ctx.config, ctx.project_ids, work_event)
         app.state.poller = poller
+        app.state.work_event = work_event
+        worker_count = ctx.config.review.max_parallel
+        app.state.worker_count = worker_count
         tasks = [asyncio.create_task(poller.run(), name="mrwatch-poller")]
         tasks.extend(start_workers(
-            ctx.config.review.max_parallel, ctx.conn, ctx.api, ctx.config,
-            ctx.paths, queue,
+            worker_count, ctx.conn, ctx.api, ctx.config,
+            ctx.paths, work_event, config_provider=lambda: ctx.config,
         ))
         tasks.append(asyncio.create_task(_backup_loop(ctx), name="mrwatch-backup"))
+        for task in tasks:
+            _supervise(task)
+        app.state.tasks = tasks
         logger.info("started: %s workers, poll interval %ss",
-                    ctx.config.review.max_parallel, ctx.config.gitlab.poll_interval_sec)
+                    worker_count, ctx.config.gitlab.poll_interval_sec)
         yield
         for task in tasks:
             task.cancel()
@@ -140,12 +176,19 @@ def create_app(ctx: AppContext, port: int = DEFAULT_PORT) -> FastAPI:
     async def healthz() -> JSONResponse:
         last_ok = poll_state_get(ctx.conn, "poll_last_ok")
         last_error = poll_state_get(ctx.conn, "poll_last_error")
-        status = "degraded" if last_error else "ok"
-        return JSONResponse({
-            "status": status,
-            "last_poll": last_ok,
-            "last_error": last_error,
-        })
+        dead_tasks = [
+            task.get_name() for task in getattr(app.state, "tasks", []) if task.done()
+        ]
+        degraded = bool(last_error) or bool(dead_tasks)
+        return JSONResponse(
+            {
+                "status": "degraded" if degraded else "ok",
+                "last_poll": last_ok,
+                "last_error": last_error,
+                "dead_tasks": dead_tasks,
+            },
+            status_code=503 if degraded else 200,
+        )
 
     app.add_middleware(NoStoreHtmlMiddleware)
     app.add_middleware(HostCheckMiddleware, allowed_hosts={

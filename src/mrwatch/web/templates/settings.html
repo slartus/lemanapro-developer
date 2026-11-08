@@ -1,64 +1,51 @@
-<!DOCTYPE html>
-<html lang="ru">
-<head>
-<meta charset="utf-8">
-<title>mr-watch — настройки</title>
-<style>
-  body { font-family: -apple-system, sans-serif; margin: 2rem; color: #1a1a1a; background: #fff; }
-  h1, h2 { font-size: 1.2rem; }
-  table { border-collapse: collapse; margin-bottom: 1rem; }
-  th, td { text-align: left; padding: 0.3rem 0.6rem; border-bottom: 1px solid #ddd; vertical-align: middle; }
-  th { color: #666; font-weight: 500; }
-  input[type="text"], input[type="number"] { padding: 0.3rem 0.5rem; border: 1px solid #ccc; border-radius: 4px; width: 100px; }
-  input.wide { width: 280px; }
-  button { padding: 0.35rem 0.9rem; cursor: pointer; border-radius: 4px; border: 1px solid #ccc; background: #f6f8fa; }
-  button.primary { background: #1a7f37; color: #fff; border-color: #1a7f37; }
-  button.danger { background: #f6f8fa; color: #b02a37; }
-  a { color: #0366d6; text-decoration: none; }
-  .flash { padding: 0.5rem 1rem; border-radius: 4px; margin-bottom: 1rem; }
-  .flash.ok { background: #d4edda; }
-  .flash.warn { background: #fff3cd; }
-  .muted { color: #666; font-size: 0.85rem; }
-  dl { display: grid; grid-template-columns: auto auto; gap: 0.2rem 1rem; font-size: 0.9rem; }
-  dt { color: #666; }
-  @media (prefers-color-scheme: dark) {
-    body { color: #e6e6e6; background: #1e1e1e; }
-    th { color: #aaa; } th, td { border-color: #333; }
-    input, button { background: #2a2a2a; color: #e6e6e6; border-color: #444; }
-    button.primary { background: #2ea043; border-color: #2ea043; }
-    .flash.ok { background: #1e3a24; }
-    .flash.warn { background: #4a3b12; }
-    .muted { color: #999; }
-    body { color-scheme: dark; }
-  }
-</style>
-</head>
-<body>
-<a href="/">← назад</a>
+{% extends "base.html" %}
+{% set active = "settings" %}
+{% block title %}mr-watch — настройки{% endblock %}
+{% block style %}
+  .form-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 1rem; }
+  .field label { display: block; font-size: 0.85rem; color: var(--muted); margin-bottom: 0.25rem; }
+  .field input { width: 100%; }
+  .field .err { color: var(--err-fg); font-size: 0.8rem; min-height: 1.1em; }
+  td input.wslug { width: 100%; min-width: 240px; }
+  td select.wagent { min-width: 180px; }
+  .agent-cell { display: flex; gap: 0.4rem; align-items: center; }
+  .save-bar { display: flex; flex-wrap: wrap; gap: 0.8rem; align-items: center; margin-top: 1.25rem; }
+  #status.err { color: var(--err-fg); }
+  #status.ok { color: var(--ok-fg); }
+  dl.ro { display: grid; grid-template-columns: max-content 1fr; gap: 0.3rem 1.2rem; font-size: 0.9rem; margin: 0; }
+  dl.ro dt { color: var(--muted); }
+  dl.ro dd { margin: 0; overflow-wrap: anywhere; }
+  .center { text-align: center; }
+{% endblock %}
+{% block content %}
 <h1>Настройки</h1>
 
-{% if saved %}<div class="flash ok">Сохранено и применено</div>{% endif %}
+{% if saved %}<div class="flash ok" role="status">Сохранено и применено{% if restart_needed %}. Число параллельных воркеров (max_parallel) изменится только после перезапуска сервиса{% endif %}</div>{% endif %}
 {% if invalid %}<div class="flash warn">Предыдущее сохранение не прошло валидацию</div>{% endif %}
 {% if config_error %}<div class="flash warn">{{ config_error }}</div>{% endif %}
 
 <h2>Обзор</h2>
-<table>
-  <tr><th>Интервал опроса, сек</th><td><input type="number" id="poll_interval_sec" value="{{ config.gitlab.poll_interval_sec }}" min="1"></td></tr>
-  <tr><th>Параллельных ревью</th><td><input type="number" id="max_parallel" value="{{ config.review.max_parallel }}" min="1"></td></tr>
-  <tr><th>Таймаут ревью, сек</th><td><input type="number" id="timeout_sec" value="{{ config.review.timeout_sec }}" min="1"></td></tr>
-  <tr><th>Глубина клона</th><td><input type="number" id="clone_depth" value="{{ config.review.clone_depth }}" min="1"></td></tr>
-  <tr><th>TTL workspace, дней</th><td><input type="number" id="workspace_ttl_days" value="{{ config.review.workspace_ttl_days }}" min="1"></td></tr>
-</table>
-<p class="muted">gitlab.url, pat_command и opencode.bin редактируются только в config.yaml (требуют рестарта). max_parallel тоже применится после рестарта.</p>
+<div class="card">
+<div class="form-grid">
+  <div class="field"><label for="poll_interval_sec">Интервал опроса, сек</label><input type="number" id="poll_interval_sec" value="{{ config.gitlab.poll_interval_sec }}" min="1" step="1"><div class="err"></div></div>
+  <div class="field"><label for="max_parallel">Параллельных ревью</label><input type="number" id="max_parallel" value="{{ config.review.max_parallel }}" min="1" step="1"><div class="err"></div></div>
+  <div class="field"><label for="timeout_sec">Таймаут ревью, сек</label><input type="number" id="timeout_sec" value="{{ config.review.timeout_sec }}" min="1" step="1"><div class="err"></div></div>
+  <div class="field"><label for="clone_depth">Глубина клона</label><input type="number" id="clone_depth" value="{{ config.review.clone_depth }}" min="1" step="1"><div class="err"></div></div>
+  <div class="field"><label for="workspace_ttl_days">TTL workspace, дней</label><input type="number" id="workspace_ttl_days" value="{{ config.review.workspace_ttl_days }}" min="1" step="1"><div class="err"></div></div>
+</div>
+<p class="muted small" style="margin-bottom:0">gitlab.url, pat_command и opencode.bin редактируются только в config.yaml (требуют рестарта). max_parallel тоже применится после рестарта.</p>
+</div>
 
 <h2>Проекты</h2>
+<div class="table-wrap">
 <table id="projects">
-  <tr><th>Проект (ссылка или slug)</th><th>Агент</th><th>Re-review на push</th><th></th></tr>
+  <thead><tr><th>Проект (ссылка или slug)</th><th>Агент</th><th class="center">Re-review на push</th><th></th></tr></thead>
+  <tbody>
   {% for p in config.projects %}
   <tr data-pid="{{ p.gitlab_project_id }}">
-    <td><input type="text" class="wslug wide" value="{{ p.slug }}"></td>
-    <td>
-      <select class="wagent" style="width: 200px">
+    <td><input type="text" class="wslug wide" value="{{ p.slug }}" aria-label="Проект"></td>
+    <td><div class="agent-cell">
+      <select class="wagent" aria-label="Агент">
         {% for a in agents %}
         <option value="{{ a }}" {% if a == p.agent %}selected{% endif %}>{{ a }}</option>
         {% endfor %}
@@ -66,134 +53,155 @@
         <option value="{{ p.agent }}" selected>{{ p.agent }}</option>
         {% endif %}
       </select>
-      <button type="button" class="pull-agents" title="подтянуть агенты из репо проекта" onclick="pullAgents(this)">⤵</button>
-    </td>
-    <td><input type="checkbox" class="wpush" {% if p.re_review_on_push %}checked{% endif %}></td>
-    <td><button class="danger" onclick="delRow(this)">удалить</button></td>
+    </div></td>
+    <td class="center"><input type="checkbox" class="wpush" aria-label="Re-review на push" {% if p.re_review_on_push %}checked{% endif %}></td>
+    <td><button type="button" class="danger" onclick="delRow(this)">удалить</button></td>
   </tr>
   {% endfor %}
+  </tbody>
 </table>
-<button onclick="addRow()">+ добавить проект</button>
+</div>
+<p><button type="button" onclick="addRow()">+ добавить проект</button></p>
 
-<p style="margin-top: 1.5rem">
+<div class="save-bar">
   <button class="primary" id="save" onclick="save()">Сохранить и применить</button>
-  <span id="status" class="muted"></span>
-</p>
+  <span id="status" class="small muted" role="status"></span>
+</div>
 
 <h2>Служебное (read-only)</h2>
-<dl>
+<div class="card">
+<dl class="ro">
   <dt>GitLab URL</dt><dd>{{ config.gitlab.url }}</dd>
   <dt>PAT</dt><dd>Keychain (pat_command)</dd>
   <dt>Резервная копия</dt><dd>config.yaml.bak (перезаписывается при каждом сохранении)</dd>
 </dl>
-
+</div>
+{% endblock %}
+{% block scripts %}
 <script>
 const AGENTS = {{ agents | tojson }};
+const statusEl = document.getElementById("status");
 
-function addOption(select, value) {
-  for (const opt of select.options) {
-    if (opt.value === value) return;
-  }
+function setStatus(text, kind) {
+  statusEl.textContent = text;
+  statusEl.className = "small " + (kind || "muted");
+}
+
+function makeOption(value) {
   const opt = document.createElement("option");
   opt.value = value;
   opt.textContent = value;
-  select.appendChild(opt);
+  return opt;
 }
 
-function rowHtml() {
-  const options = AGENTS.map(function (a) {
-    return '<option value="' + a + '">' + a + '</option>';
-  }).join("");
-  return '<td><input type="text" class="wslug wide" placeholder="ссылка на проект или group/project"></td>' +
-    '<td><select class="wagent" style="width: 200px">' + options + '</select>' +
-    '<button type="button" class="pull-agents" title="подтянуть агенты из репо проекта" onclick="pullAgents(this)">⤵</button></td>' +
-    '<td><input type="checkbox" class="wpush"></td>' +
-    '<td><button class="danger" onclick="delRow(this)">удалить</button></td>';
+function el(tag, props, children) {
+  const node = document.createElement(tag);
+  Object.assign(node, props || {});
+  (children || []).forEach(function (c) { node.appendChild(c); });
+  return node;
 }
 
-async function pullAgents(btn) {
-  const tr = btn.closest("tr");
-  const slug = tr.querySelector(".wslug").value.trim();
-  if (!slug) { alert("сначала укажите ссылку на проект"); return; }
-  btn.disabled = true;
-  try {
-    const resp = await fetch("/project-agents?slug=" + encodeURIComponent(slug));
-    const body = await resp.json();
-    const agents = body.agents || [];
-    document.querySelectorAll(".wagent").forEach(function (select) {
-      agents.forEach(function (a) { addOption(select, a); });
-    });
-    if (body.error) alert(body.error);
-    else if (!agents.length) alert("в репо проекта нет агентов");
-    else btn.textContent = "⤵ " + agents.length;
-  } catch (err) {
-    alert("ошибка: " + err);
-  } finally {
-    btn.disabled = false;
-  }
+function buildRow() {
+  const slug = el("input", {type: "text", className: "wslug wide", placeholder: "ссылка на проект или group/project"});
+  slug.setAttribute("aria-label", "Проект");
+  const select = el("select", {className: "wagent"}, AGENTS.map(makeOption));
+  select.setAttribute("aria-label", "Агент");
+  const push = el("input", {type: "checkbox", className: "wpush"});
+  push.setAttribute("aria-label", "Re-review на push");
+  const del = el("button", {type: "button", className: "danger", textContent: "удалить"});
+  del.addEventListener("click", function () { delRow(del); });
+  const tr = document.createElement("tr");
+  tr.appendChild(el("td", {}, [slug]));
+  tr.appendChild(el("td", {}, [el("div", {className: "agent-cell"}, [select])]));
+  tr.appendChild(el("td", {className: "center"}, [push]));
+  tr.appendChild(el("td", {}, [del]));
+  return tr;
 }
 
 function addRow() {
-  const t = document.getElementById("projects");
-  const tr = t.insertRow(-1);
-  tr.innerHTML = rowHtml();
+  document.querySelector("#projects tbody").appendChild(buildRow());
 }
 
 function delRow(btn) {
-  const t = document.getElementById("projects");
-  if (t.rows.length <= 2) { alert("нужен хотя бы один проект"); return; }
+  const rows = document.querySelectorAll("#projects tbody tr");
+  if (rows.length <= 1) { setStatus("Нужен хотя бы один проект", "err"); return; }
   btn.closest("tr").remove();
 }
 
-function intVal(id) { return parseInt(document.getElementById(id).value, 10); }
+function readInt(id) {
+  const input = document.getElementById(id);
+  const err = input.parentElement.querySelector(".err");
+  const raw = input.value.trim();
+  const n = Number(raw);
+  const ok = raw !== "" && Number.isInteger(n) && n >= 1;
+  input.classList.toggle("invalid", !ok);
+  err.textContent = ok ? "" : "целое число от 1";
+  return ok ? n : null;
+}
 
 async function save() {
   const btn = document.getElementById("save");
-  const status = document.getElementById("status");
-  btn.disabled = true;
-  status.textContent = "сохраняю…";
+  if (btn.disabled) return;
+  const ids = ["poll_interval_sec", "max_parallel", "timeout_sec", "clone_depth", "workspace_ttl_days"];
+  const values = {};
+  let valid = true;
+  ids.forEach(function (id) {
+    values[id] = readInt(id);
+    if (values[id] === null) valid = false;
+  });
   const projects = [];
-  let bad = false;
-  document.querySelectorAll("#projects tr:not(:first-child)").forEach((tr) => {
-    const slug = tr.querySelector(".wslug").value.trim();
-    if (!slug) { bad = true; return; }
-    const pid = tr.dataset.pid ? parseInt(tr.dataset.pid, 10) : null;
+  document.querySelectorAll("#projects tbody tr").forEach(function (tr) {
+    const slugInput = tr.querySelector(".wslug");
+    const slug = slugInput.value.trim();
+    slugInput.classList.toggle("invalid", !slug);
+    if (!slug) { valid = false; return; }
     projects.push({
-      gitlab_project_id: pid,
+      gitlab_project_id: tr.dataset.pid ? parseInt(tr.dataset.pid, 10) : null,
       slug: slug,
       agent: tr.querySelector(".wagent").value.trim() || "mr-watch-reviewer",
       re_review_on_push: tr.querySelector(".wpush").checked,
     });
   });
-  if (bad) { alert("строка без ссылки на проект будет пропущена"); }
+  if (!projects.length && valid) {
+    setStatus("Нужен хотя бы один проект", "err");
+    return;
+  }
+  if (!valid) {
+    setStatus("Исправьте выделенные поля: числа должны быть целыми от 1, проект не может быть пустым", "err");
+    return;
+  }
   const payload = {
-    gitlab: { poll_interval_sec: intVal("poll_interval_sec") },
+    gitlab: {poll_interval_sec: values.poll_interval_sec},
     review: {
-      max_parallel: intVal("max_parallel"),
-      timeout_sec: intVal("timeout_sec"),
-      clone_depth: intVal("clone_depth"),
-      workspace_ttl_days: intVal("workspace_ttl_days"),
+      max_parallel: values.max_parallel,
+      timeout_sec: values.timeout_sec,
+      clone_depth: values.clone_depth,
+      workspace_ttl_days: values.workspace_ttl_days,
     },
     projects: projects,
   };
+  btn.disabled = true;
+  setStatus("Сохраняю…");
   try {
     const resp = await fetch("/settings", {
       method: "POST",
-      headers: { "Content-Type": "application/json", "X-Requested-With": "mrwatch" },
+      headers: {"Content-Type": "application/json", "X-Requested-With": "mrwatch"},
       body: JSON.stringify(payload),
     });
     if (resp.ok) {
-      location.href = "/settings?saved=1";
-    } else {
-      const text = await resp.text();
-      status.textContent = "ошибка: " + text;
+      setStatus("Сохранено, обновляю страницу…", "ok");
+      location.href = resp.redirected ? resp.url : "/settings?saved=1";
+      return;
     }
+    setStatus("Ошибка " + resp.status + ": " + (await resp.text()), "err");
   } catch (err) {
-    status.textContent = "ошибка сети: " + err;
-  } finally {
-    btn.disabled = false;
+    setStatus("Ошибка сети: " + err, "err");
   }
+  btn.disabled = false;
 }
+
+document.addEventListener("input", function (e) {
+  if (e.target.classList && e.target.classList.contains("invalid")) e.target.classList.remove("invalid");
+});
 </script>
-</body>
-</html>
+{% endblock %}

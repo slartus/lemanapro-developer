@@ -1,67 +1,49 @@
-<!DOCTYPE html>
-<html lang="ru">
-<head>
-<meta charset="utf-8">
-<title>mr-watch</title>
-<style>
-  body { font-family: -apple-system, sans-serif; margin: 2rem; color: #1a1a1a; }
-  table { border-collapse: collapse; width: 100%; margin-bottom: 2rem; }
-  th, td { text-align: left; padding: 0.4rem 0.8rem; border-bottom: 1px solid #ddd; }
-  th { background: #f5f5f5; }
-  a { color: #0366d6; text-decoration: none; }
-  .status { padding: 0.1rem 0.5rem; border-radius: 4px; font-size: 0.85rem; }
-  .status.done { background: #d4edda; } .status.error { background: #f8d7da; }
-  .status.queued, .status.cloning, .status.reviewing { background: #fff3cd; }
-  .muted { color: #666; font-size: 0.85rem; }
-  .sev { display: inline-block; padding: 0.05rem 0.4rem; margin-right: 0.2rem;
-         border-radius: 4px; font-size: 0.8rem; }
-  .sev.crit { background: #f8d7da; color: #842029; }
-  .sev.major { background: #ffe5d0; color: #854a0e; }
-  .sev.minor { background: #fff3cd; color: #664d03; }
-  .sev.nit { background: #e2e3e5; color: #41464b; }
-  .sev.clean { background: #d4edda; color: #1e4620; }
+{% extends "base.html" %}
+{% set active = "index" %}
+{% block title %}mr-watch{% endblock %}
+{% block style %}
+  .toolbar { display: flex; flex-wrap: wrap; gap: 0.6rem; align-items: center; margin-bottom: 0.9rem; }
+  .toolbar input[type="search"] { flex: 1 1 220px; min-width: 0; }
+  .toolbar select { flex: none; }
+  .mr-title { font-weight: 600; }
+  .legend { margin-top: 0.8rem; }
+  td.nowrap { white-space: nowrap; }
+  .empty { text-align: center; padding: 2rem 1rem; }
+{% endblock %}
+{% block content %}
+<div class="toolbar">
+  <input type="search" id="q" placeholder="Поиск: проект, MR, автор, ветка" aria-label="Поиск">
+  <select id="sf" aria-label="Фильтр по статусу">
+    <option value="">Все статусы</option>
+    <option value="queued">queued</option>
+    <option value="cloning">cloning</option>
+    <option value="reviewing">reviewing</option>
+    <option value="done">done</option>
+    <option value="error">error</option>
+  </select>
+  <button id="fc-btn" onclick="forceCheck()">Проверить сейчас</button>
+  <span id="fc-status" class="muted small" role="status"></span>
+</div>
 
-  @media (prefers-color-scheme: dark) {
-    body { background: #16181d; color: #d6d9de; color-scheme: dark; }
-    a { color: #6cb2ff; }
-    th { background: #22262e; }
-    th, td { border-bottom: 1px solid #2c313a; }
-    .muted { color: #8b919c; }
-    .status.done { background: #173425; color: #9be3b2; }
-    .status.error { background: #3b1d21; color: #f08e97; }
-    .status.queued, .status.cloning, .status.reviewing { background: #3a3016; color: #e8c96a; }
-    .sev.crit { background: #3d1c20; color: #f199a2; }
-    .sev.major { background: #3d2817; color: #f0b077; }
-    .sev.minor { background: #3a3014; color: #e5cd6f; }
-    .sev.nit { background: #2b2e33; color: #b4bac2; }
-    .sev.clean { background: #173425; color: #9be3b2; }
-    pre { background: #1d212a; }
-    button { background: #22262e; color: #d6d9de; border: 1px solid #3a4150; }
-    .error-text { color: #f08e97; }
-  }
-</style>
-</head>
-<body>
-<h1>mr-watch <a href="/settings" style="font-size: 0.9rem; margin-left: 1rem">настройки</a></h1>
-<p><button id="fc-btn" onclick="forceCheck()">Проверить сейчас</button>
-<span id="fc-status" class="muted"></span></p>
-
-<p class="muted">Находки: <span class="sev crit">●</span> крит · <span class="sev major">●</span> мажор · <span class="sev minor">●</span> минор · <span class="sev nit">●</span> нит · статус/находки — последнего ревью</p>
-
+<div class="table-wrap">
 <table>
+  <thead>
   <tr><th>Проект</th><th>MR</th><th>Автор</th><th>Ветка</th><th>Ревью</th><th>Находки</th><th>Обновлён</th></tr>
+  </thead>
+  <tbody id="mr-body">
   {% for m in mrs %}
-  <tr>
+  <tr data-status="{{ m["latest_review_status"] or "" }}">
     <td class="muted">{{ m["path_with_namespace"].split("/")[-1] }}</td>
-    <td><a href="{{ m["web_url"] }}">{{ m["title"] or ("!" ~ m["iid"]) }}</a></td>
+    {% set href = m["web_url"] | safe_url %}
+    <td>{% if href %}<a class="mr-title" href="{{ href }}">{{ m["title"] or ("!" ~ m["iid"]) }}</a>{% else %}<span class="mr-title">{{ m["title"] or ("!" ~ m["iid"]) }}</span>{% endif %}</td>
     <td>{{ m["author_name"] or m["author_username"] or "—" }}</td>
-    <td>{{ m["source_branch"] or "—" }}</td>
+    <td class="small">{{ m["source_branch"] or "—" }}</td>
     <td>
       {% if m["latest_review_id"] %}
-        <a href="/reviews/{{ m["latest_review_id"] }}"><span class="status {{ m["latest_review_status"] }}">{{ m["latest_review_status"] }}</span></a>
+        <a href="/reviews/{{ m["latest_review_id"] }}"><span class="badge status {{ m["latest_review_status"] }}">{{ m["latest_review_status"] }}</span></a>
       {% else %}<span class="muted">—</span>{% endif %}
     </td>
-    <td>
+    <td class="nowrap">
       {% if m["latest_done_review_id"] %}
         {% if m["crit_count"] %}<span class="sev crit">{{ m["crit_count"] }}</span>{% endif %}
         {% if m["major_count"] %}<span class="sev major">{{ m["major_count"] }}</span>{% endif %}
@@ -72,12 +54,116 @@
         {% endif %}
       {% else %}<span class="muted">—</span>{% endif %}
     </td>
-    <td class="muted">{{ m["updated_at"] }}</td>
+    <td class="muted small nowrap"><time data-ts="{{ m["updated_at"] }}">{{ m["updated_at"] }}</time></td>
   </tr>
   {% endfor %}
-  {% if not mrs %}<tr><td colspan="7" class="muted">нет MR</td></tr>{% endif %}
+  </tbody>
 </table>
+<div id="no-match" class="empty muted" {% if mrs %}hidden{% endif %}>{% if mrs %}Ничего не найдено{% else %}нет MR{% endif %}</div>
+</div>
+
+<p class="muted small legend">Находки: <span class="sev crit">●</span> крит · <span class="sev major">●</span> мажор · <span class="sev minor">●</span> минор · <span class="sev nit">●</span> нит · статус/находки — последнего ревью</p>
+{% endblock %}
+{% block scripts %}
 <script>
+const ACTIVE = ["queued", "cloning", "reviewing"];
+const q = document.getElementById("q");
+const sf = document.getElementById("sf");
+const hasMrs = {{ (mrs | length > 0) | tojson }};
+let timer = null;
+
+function applyFilter() {
+  const needle = q.value.trim().toLowerCase();
+  const status = sf.value;
+  let shown = 0;
+  document.querySelectorAll("#mr-body tr").forEach(function (tr) {
+    const ok = (!status || tr.dataset.status === status) &&
+      (!needle || tr.textContent.toLowerCase().includes(needle));
+    tr.hidden = !ok;
+    if (ok) shown++;
+  });
+  const empty = document.getElementById("no-match");
+  empty.hidden = shown > 0;
+  if (shown === 0 && hasMrs) empty.textContent = "Ничего не найдено";
+}
+
+function hasActive() {
+  return Array.from(document.querySelectorAll("#mr-body tr")).some(function (tr) {
+    return ACTIVE.includes(tr.dataset.status);
+  });
+}
+
+function safeHref(url) {
+  return /^https?:\/\//i.test(url || "") ? url : "#";
+}
+
+function el(tag, className, text) {
+  const node = document.createElement(tag);
+  if (className) node.className = className;
+  if (text !== undefined) node.textContent = text;
+  return node;
+}
+
+function renderRow(m) {
+  const tr = document.createElement("tr");
+  tr.dataset.status = m.latest_review_status || "";
+  tr.appendChild(el("td", "muted", (m.path_with_namespace || "").split("/").pop()));
+  const title = el("td");
+  const link = el("a", "mr-title", m.title || ("!" + m.iid));
+  link.href = safeHref(m.web_url);
+  title.appendChild(link);
+  tr.appendChild(title);
+  tr.appendChild(el("td", "", m.author_name || m.author_username || "—"));
+  tr.appendChild(el("td", "small", m.source_branch || "—"));
+  const review = el("td");
+  if (m.latest_review_id) {
+    const a = document.createElement("a");
+    a.href = "/reviews/" + m.latest_review_id;
+    a.appendChild(el("span", "badge status " + m.latest_review_status, m.latest_review_status));
+    review.appendChild(a);
+  } else {
+    review.appendChild(el("span", "muted", "—"));
+  }
+  tr.appendChild(review);
+  const sev = el("td", "nowrap");
+  if (m.latest_done_review_id) {
+    const kinds = [["crit", m.crit_count], ["major", m.major_count], ["minor", m.minor_count], ["nit", m.nit_count]];
+    let any = false;
+    kinds.forEach(function (k) {
+      if (k[1]) { any = true; sev.appendChild(el("span", "sev " + k[0], String(k[1]))); sev.append(" "); }
+    });
+    if (!any) sev.appendChild(el("span", "sev clean", "✓"));
+  } else {
+    sev.appendChild(el("span", "muted", "—"));
+  }
+  tr.appendChild(sev);
+  const updated = el("td", "muted small nowrap");
+  const time = el("time", "", m.updated_at);
+  time.dataset.ts = m.updated_at;
+  updated.appendChild(time);
+  tr.appendChild(updated);
+  return tr;
+}
+
+async function refresh() {
+  if (document.hidden) return;
+  try {
+    const r = await fetch("/api/mrs", {cache: "no-store"});
+    if (!r.ok) return;
+    const rows = await r.json();
+    document.getElementById("mr-body").replaceChildren(...rows.map(renderRow));
+    MRW.renderTimes();
+    applyFilter();
+  } catch (e) {}
+}
+
+function schedule() {
+  if (timer) clearInterval(timer);
+  timer = setInterval(function () {
+    if (hasActive()) refresh();
+  }, 5000);
+}
+
 async function forceCheck() {
   const btn = document.getElementById("fc-btn");
   const status = document.getElementById("fc-status");
@@ -90,7 +176,8 @@ async function forceCheck() {
       headers: {"X-Requested-With": "mrwatch"},
     });
     if (r.ok) {
-      location.reload();
+      status.textContent = "готово";
+      await refresh();
       return;
     }
     status.textContent = "ошибка: " + (await r.text());
@@ -100,6 +187,9 @@ async function forceCheck() {
     btn.disabled = false;
   }
 }
+
+q.addEventListener("input", applyFilter);
+sf.addEventListener("change", applyFilter);
+schedule();
 </script>
-</body>
-</html>
+{% endblock %}

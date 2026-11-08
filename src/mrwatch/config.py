@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import logging
 import os
+import re
+import stat
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
@@ -11,6 +14,10 @@ from pydantic import BaseModel, Field, ValidationError, field_validator
 DEFAULT_PAT_COMMAND = "security find-generic-password -s mr-watch -a gitlab -w"
 
 _PAT_TIMEOUT_SEC = 10
+AGENT_NAME_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
+PRIVATE_DIR_MODE = 0o700
+
+logger = logging.getLogger(__name__)
 
 
 class ConfigError(Exception):
@@ -42,6 +49,15 @@ class ProjectConfig(BaseModel):
     slug: str
     agent: str
     re_review_on_push: bool = False
+    model: str | None = None
+    variant: str | None = None
+
+    @field_validator("agent")
+    @classmethod
+    def valid_agent_name(cls, value: str) -> str:
+        if not AGENT_NAME_RE.fullmatch(value):
+            raise ValueError("agent name may contain only letters, digits, '_', '.', '-'")
+        return value
 
 
 class ReviewConfig(BaseModel):
@@ -51,12 +67,21 @@ class ReviewConfig(BaseModel):
     timeout_sec: int = Field(default=1800, ge=1)
     clone_depth: int = Field(default=50, ge=1)
     workspace_ttl_days: int = Field(default=3, ge=1)
+    log_ttl_days: int = Field(default=14, ge=1)
 
 
 class OpenCodeConfig(BaseModel):
     model_config = {"extra": "forbid"}
 
-    bin: str = "~/.opencode/bin/opencode"
+    bin: str = Field(default="~/.opencode/bin/opencode", validate_default=True)
+    model: str | None = None
+    variant: str | None = None
+    length_retry_variant: str | None = "low"
+
+    @field_validator("bin")
+    @classmethod
+    def expand_bin(cls, value: str) -> str:
+        return str(Path(value).expanduser())
 
 
 class PathsConfig(BaseModel):
@@ -98,9 +123,26 @@ def default_config_path() -> Path:
     return Path("~/.config/mr-watch/config.yaml").expanduser()
 
 
+def check_config_permissions(path: Path) -> None:
+    info = path.stat()
+    if info.st_uid != os.getuid():
+        raise ConfigError(f"config {path} is owned by another user (uid {info.st_uid}); refusing to start")
+    if info.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+        raise ConfigError(
+            f"config {path} is group/other-writable (mode {stat.S_IMODE(info.st_mode):o}); "
+            f"fix with: chmod 600 {path}"
+        )
+    if info.st_mode & (stat.S_IRGRP | stat.S_IROTH):
+        logger.warning(
+            "config %s is readable by others (mode %o); recommended: chmod 600",
+            path, stat.S_IMODE(info.st_mode),
+        )
+
+
 def load_config(path: Path) -> Config:
     if not path.is_file():
         raise ConfigError(f"config file not found: {path}")
+    check_config_permissions(path)
     try:
         raw = yaml.safe_load(path.read_text(encoding="utf-8"))
     except yaml.YAMLError as exc:
@@ -111,7 +153,6 @@ def load_config(path: Path) -> Config:
         config = Config.model_validate(raw)
     except ValidationError as exc:
         raise ConfigError(f"invalid config {path}: {exc}") from exc
-    config.opencode.bin = str(Path(config.opencode.bin).expanduser())
     return config
 
 
@@ -121,9 +162,8 @@ def resolve_paths(config: Config) -> ResolvedPaths:
         workspaces=Path(config.paths.workspaces).expanduser(),
         logs=Path(config.paths.logs).expanduser(),
     )
-    paths.db.parent.mkdir(parents=True, exist_ok=True)
-    paths.workspaces.mkdir(parents=True, exist_ok=True)
-    paths.logs.mkdir(parents=True, exist_ok=True)
+    for directory in (paths.db.parent, paths.workspaces, paths.logs):
+        directory.mkdir(parents=True, exist_ok=True, mode=PRIVATE_DIR_MODE)
     return paths
 
 
