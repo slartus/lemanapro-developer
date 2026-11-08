@@ -202,10 +202,7 @@ async def clone_for_review(
 
 
 async def _discard_workspace(workspace: Path) -> None:
-    try:
-        await asyncio.shield(asyncio.to_thread(remove_workspace, workspace))
-    except asyncio.CancelledError:
-        pass
+    await asyncio.shield(asyncio.to_thread(remove_workspace, workspace))
 
 
 async def _pin_fetch_head(

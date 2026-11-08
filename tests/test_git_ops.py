@@ -254,3 +254,37 @@ async def test_clone_cancel_during_sanitize_removes_workspace_in_thread(origin, 
         await clone_for_review(workspace, str(origin), 1, "main", 5, NO_ENV, tmpdir, harden=False)
     assert not workspace.exists()
     assert removal_threads and removal_threads[0] != threading.get_ident()
+
+
+async def test_clone_failure_then_cancel_during_discard_propagates_cancel(tmp_path, monkeypatch):
+    import asyncio
+    import threading
+    import time
+
+    from mrwatch import git_ops
+
+    removing = threading.Event()
+    removed = threading.Event()
+
+    def slow_remove(path, *args, **kwargs):
+        removing.set()
+        time.sleep(0.3)
+        removed.set()
+
+    async def failing_run_git(*args, **kwargs):
+        raise git_ops.GitOpsError("clone failed")
+
+    monkeypatch.setattr(git_ops, "remove_workspace", slow_remove)
+    monkeypatch.setattr(git_ops, "run_git", failing_run_git)
+
+    task = asyncio.create_task(
+        clone_for_review(tmp_path / "ws", "u", 1, None, 1, NO_ENV, tmp_path, harden=False)
+    )
+    while not removing.is_set():
+        await asyncio.sleep(0.01)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert task.cancelled()
+    await asyncio.to_thread(removed.wait, 2)
+    assert removed.is_set()
