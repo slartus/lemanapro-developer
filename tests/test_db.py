@@ -543,3 +543,35 @@ def test_verdict_backfill_skips_truncated_review_md(tmp_path):
     assert len(truncated) > MAX_REVIEW_MD_LENGTH
     assert conn.execute("SELECT verdict FROM review").fetchone()[0] is None
     conn.close()
+
+
+def test_retry_review_uses_current_project_agent(conn):
+    project_id = _sync_projects(conn, "agent-a")[10]
+    mr_id = _upsert_mr(conn, project_id).mr_id
+    review_id = create_review(conn, mr_id, "new", "a" * 40, "agent-a")
+    claim_next_review(conn)
+    finish_review(conn, review_id, "error", error="fail")
+
+    _sync_projects(conn, "agent-b")
+    assert retry_review(conn, review_id) is True
+    assert get_review(conn, review_id)["agent"] == "agent-b"
+
+    claim_next_review(conn)
+    finish_review(conn, review_id, "done", review_md="ok")
+    assert retry_review(conn, review_id) is True
+    assert get_review(conn, review_id)["agent"] == "agent-b"
+
+
+def test_retry_review_keeps_agent_when_project_missing(conn):
+    project_id = _sync_projects(conn, "agent-a")[10]
+    mr_id = _upsert_mr(conn, project_id).mr_id
+    review_id = create_review(conn, mr_id, "new", "a" * 40, "agent-a")
+    claim_next_review(conn)
+    finish_review(conn, review_id, "error", error="fail")
+
+    conn.execute("PRAGMA foreign_keys = OFF")
+    conn.execute("DELETE FROM project WHERE id = ?", (project_id,))
+    conn.commit()
+
+    assert retry_review(conn, review_id) is True
+    assert get_review(conn, review_id)["agent"] == "agent-a"
