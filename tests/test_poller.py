@@ -839,3 +839,14 @@ async def test_mention_url_outside_gitlab_subpath_rejected(conn):
     url = "https://gitlab.example.com/other/g/p/-/merge_requests/5"
     await _subpath_tick(conn, url, url + "#note_1")
     assert _mention_url(conn) is None
+
+
+async def test_todo_with_bool_id_is_skipped(conn):
+    api = StubApi()
+    api.details[(10, 5)] = _detail(10, 5)
+    api.todos = [
+        {"id": True, "target_type": "MergeRequest", "action_name": "mentioned",
+         "target_url": MR_URL + "#note_1", "target": {"project_id": 10, "iid": 5}},
+    ]
+    await _make_poller(conn, api).tick()
+    assert conn.execute("SELECT COUNT(*) FROM mr").fetchone()[0] == 0

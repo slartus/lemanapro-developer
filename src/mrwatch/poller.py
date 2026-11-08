@@ -186,7 +186,7 @@ class Poller:
         todos = await self._api.get_todos()
         for todo in sorted(todos, key=_todo_sort_key):
             todo_id = todo.get("id")
-            if not isinstance(todo_id, int) or todo_id in seen:
+            if not _is_todo_id(todo_id) or todo_id in seen:
                 continue
             target = todo.get("target") or {}
             if todo.get("target_type") != "MergeRequest":
@@ -408,9 +408,13 @@ def derive_roles(mr: dict[str, Any], username: str) -> frozenset[str]:
     return frozenset(roles)
 
 
+def _is_todo_id(value: object) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
 def _todo_sort_key(todo: dict[str, Any]) -> int:
     todo_id = todo.get("id")
-    if isinstance(todo_id, int) and not isinstance(todo_id, bool):
+    if _is_todo_id(todo_id):
         return todo_id
     return 0
 

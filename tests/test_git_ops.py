@@ -206,3 +206,51 @@ async def test_clone_cancelled_during_sanitize_removes_workspace(origin, tmp_pat
     with pytest.raises(asyncio.CancelledError):
         await clone_for_review(workspace, str(origin), 1, "main", 5, NO_ENV, tmpdir, harden=False)
     assert not workspace.exists()
+
+
+async def test_clone_cancelled_during_remote_remove_removes_workspace(origin, tmp_path, monkeypatch):
+    import asyncio
+
+    from mrwatch import git_ops
+
+    tmpdir = tmp_path / "tmp"
+    tmpdir.mkdir()
+    workspace = tmp_path / "ws"
+    real_run_git = git_ops.run_git
+
+    async def run_git(args, *a, **kw):
+        if args[:3] == ["git", "remote", "remove"]:
+            raise asyncio.CancelledError()
+        return await real_run_git(args, *a, **kw)
+
+    monkeypatch.setattr(git_ops, "run_git", run_git)
+    with pytest.raises(asyncio.CancelledError):
+        await clone_for_review(workspace, str(origin), 1, "main", 5, NO_ENV, tmpdir, harden=False)
+    assert not workspace.exists()
+
+
+async def test_clone_cancel_during_sanitize_removes_workspace_in_thread(origin, tmp_path, monkeypatch):
+    import asyncio
+    import threading
+
+    from mrwatch import git_ops
+
+    tmpdir = tmp_path / "tmp"
+    tmpdir.mkdir()
+    workspace = tmp_path / "ws"
+    removal_threads: list[int] = []
+    real_remove = git_ops.remove_workspace
+
+    def cancelled(_workspace):
+        raise asyncio.CancelledError()
+
+    def tracking_remove(path):
+        removal_threads.append(threading.get_ident())
+        real_remove(path)
+
+    monkeypatch.setattr(git_ops, "sanitize_clone", cancelled)
+    monkeypatch.setattr(git_ops, "remove_workspace", tracking_remove)
+    with pytest.raises(asyncio.CancelledError):
+        await clone_for_review(workspace, str(origin), 1, "main", 5, NO_ENV, tmpdir, harden=False)
+    assert not workspace.exists()
+    assert removal_threads and removal_threads[0] != threading.get_ident()
