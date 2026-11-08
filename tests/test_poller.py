@@ -10,7 +10,6 @@ from helpers import list_reviews
 from mrwatch.config import Config, GitlabConfig, ProjectConfig, ReviewConfig
 from mrwatch.db import (
     claim_next_review,
-    connect,
     get_review,
     init_schema,
     poll_state_get,
@@ -102,14 +101,6 @@ def _config(re_review_on_push=False):
         ],
         review=ReviewConfig(),
     )
-
-
-@pytest.fixture
-def conn(tmp_path):
-    c = connect(tmp_path / "test.db")
-    init_schema(c)
-    yield c
-    c.close()
 
 
 def _make_poller(conn, api, config=None, work_event=None):

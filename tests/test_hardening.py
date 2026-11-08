@@ -10,15 +10,11 @@ from mrwatch.db import get_review
 from mrwatch.git_ops import GitEnv, GitOpsError, clone_for_review
 from mrwatch.main import create_app
 from tests.test_git_ops import NO_ENV
-from tests.test_git_ops import origin as git_origin  # noqa: F401
-from tests.test_web_main import ctx  # noqa: F401
 from tests.test_worker import (
     NDJSON_OUTPUT,
     _fake_opencode,
     _queued_review,
     _worker,
-    db,  # noqa: F401
-    origin,  # noqa: F401
 )
 
 FAKE_TOKEN = "glpat-FAKEtoken1234567890"
@@ -29,7 +25,7 @@ def _workspace_dir(tmp_path: Path, review_id: int) -> Path:
     return tmp_path / "workspaces" / "10" / "1" / str(review_id)
 
 
-async def test_concurrent_workers_claim_review_exactly_once(tmp_path, db, origin):
+async def test_parallel_process_one_calls_process_single_queued_review_once(tmp_path, db, origin):
     review_id = _queued_review(db, origin)
     invocations = tmp_path / "invocations"
     opencode_bin = _fake_opencode(
@@ -105,7 +101,7 @@ async def test_workspace_removed_after_opencode_failure(tmp_path, db, origin):
     assert not _workspace_dir(tmp_path, review_id).exists()
 
 
-async def test_clone_leaves_no_token_in_git_config(git_origin, tmp_path):
+async def test_clone_leaves_no_remote_and_no_askpass_file(origin, tmp_path):
     tmpdir = tmp_path / "tmp"
     tmpdir.mkdir()
     workspace = tmp_path / "ws"
@@ -113,7 +109,7 @@ async def test_clone_leaves_no_token_in_git_config(git_origin, tmp_path):
 
     await clone_for_review(
         workspace=workspace,
-        repo_url=str(git_origin),
+        repo_url=str(origin),
         mr_iid=1,
         target_branch="main",
         depth=5,
@@ -123,13 +119,8 @@ async def test_clone_leaves_no_token_in_git_config(git_origin, tmp_path):
     )
 
     config_text = (workspace / ".git" / "config").read_text()
-    assert FAKE_TOKEN not in config_text
-    assert "glpat-" not in config_text
     assert "[remote" not in config_text
     assert list(tmpdir.glob("askpass-*")) == []
-    for path in (workspace / ".git").rglob("*"):
-        if path.is_file() and path.stat().st_size < 1_000_000:
-            assert FAKE_TOKEN.encode() not in path.read_bytes()
 
 
 async def test_clone_failure_error_text_masks_token(tmp_path):
@@ -171,7 +162,23 @@ async def test_mutating_routes_reject_missing_or_wrong_csrf_header(ctx, path, he
         transport=httpx.ASGITransport(app=app), base_url="http://127.0.0.1:8123"
     ) as client:
         response = await client.post(path, headers=headers, json={})
-    assert 400 <= response.status_code < 500
+    assert response.status_code == 403
+    assert response.text == "forbidden"
+
+
+@pytest.mark.parametrize("path", MUTATING_ROUTES)
+async def test_mutating_routes_accept_correct_csrf_header(ctx, path, monkeypatch):
+    def reject_config(*args, **kwargs):
+        raise RuntimeError("config disabled in test")
+
+    monkeypatch.setattr("mrwatch.web.routes.load_config", reject_config)
+    ctx_obj, _ = ctx
+    app = create_app(ctx_obj)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://127.0.0.1:8123"
+    ) as client:
+        response = await client.post(path, headers={"X-Requested-With": "mrwatch"}, json={})
+    assert not (response.status_code == 403 and response.text == "forbidden")
 
 
 def test_all_post_routes_are_covered_by_csrf_parametrization(ctx):

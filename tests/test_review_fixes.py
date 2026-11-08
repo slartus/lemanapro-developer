@@ -19,9 +19,9 @@ from mrwatch.git_ops import GitEnv, sanitize_clone
 from mrwatch.opencode_runner import _build_env
 from mrwatch.web.routes import safe_url
 
-from tests.test_poller import CURSOR_KEY, StubApi, _config, _make_poller, _mr, conn  # noqa: F401
-from tests.test_web_main import _client, ctx  # noqa: F401
-from tests.test_worker import _git, _worker, _queued_review, db, origin  # noqa: F401
+from tests.test_poller import CURSOR_KEY, StubApi, _config, _make_poller, _mr
+from tests.test_web_main import _client
+from tests.test_worker import _git, _worker
 
 
 def test_sanitize_removes_nested_context_files(tmp_path):

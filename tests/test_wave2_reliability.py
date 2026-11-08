@@ -64,7 +64,6 @@ from tests.test_worker import (
     _git,
     _queued_review,
     _worker,
-    origin,  # noqa: F401
 )
 
 USER_ENV = {"PATH": "/usr/bin:/bin", "HOME": str(Path.home())}
