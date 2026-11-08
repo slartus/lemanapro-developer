@@ -8,23 +8,31 @@ from typing import Any
 
 from mrwatch.config import Config
 from mrwatch.db import (
+    MR_CURSOR_KEY,
     SCAN_DONE_KEY,
+    MrUpsertResult,
     create_review,
     poll_state_delete,
     poll_state_get,
     poll_state_set,
+    todo_mark_seen,
+    todo_seen_ids,
     upsert_mr,
 )
 from mrwatch.gitlab_client import GitLabClient
 
 logger = logging.getLogger(__name__)
 
-CURSOR_KEY = "mr_cursor"
 CURSOR_OVERLAP_SEC = 120
+ERROR_PAUSE_SEC = 5.0
 
 
 def get_project_row(conn: sqlite3.Connection, project_db_id: int) -> sqlite3.Row | None:
     return conn.execute("SELECT * FROM project WHERE id = ?", (project_db_id,)).fetchone()
+
+
+def _author(mr: dict[str, Any]) -> dict[str, Any]:
+    return mr.get("author") or {}
 
 
 class Poller:
@@ -34,13 +42,13 @@ class Poller:
         api: GitLabClient,
         config: Config,
         project_ids: dict[int, int],
-        queue: asyncio.Queue | None = None,
+        work_event: asyncio.Event | None = None,
     ) -> None:
         self._conn = conn
         self._api = api
         self._config = config
         self._project_ids = project_ids
-        self._queue = queue
+        self._work_event = work_event
         self._me: dict[str, Any] | None = None
         self._wake = asyncio.Event()
 
@@ -51,11 +59,13 @@ class Poller:
                 await self.tick()
                 poll_state_set(self._conn, "poll_last_ok", datetime.now(UTC).isoformat())
                 poll_state_delete(self._conn, "poll_last_error")
-            except asyncio.CancelledError:
-                raise
             except Exception as exc:
                 logger.exception("poll tick failed")
-                poll_state_set(self._conn, "poll_last_error", f"{type(exc).__name__}: {exc}")
+                try:
+                    poll_state_set(self._conn, "poll_last_error", f"{type(exc).__name__}: {exc}")
+                except Exception:
+                    logger.exception("failed to record poll error")
+                    await asyncio.sleep(ERROR_PAUSE_SEC)
             if self._wake.is_set():
                 continue
             try:
@@ -76,17 +86,18 @@ class Poller:
         if self._me is None:
             self._me = await self._api.get_user()
         created = 0
-        created += await self._process_todos()
-        created += await self._full_scan()
-        if poll_state_get(self._conn, CURSOR_KEY) is None:
-            poll_state_set(
-                self._conn, CURSOR_KEY,
-                (datetime.now(UTC) - timedelta(seconds=CURSOR_OVERLAP_SEC)).isoformat(),
-            )
-        else:
-            created += await self._sweep_merge_requests()
-        if created and self._queue is not None:
-            self._queue.put_nowait(created)
+        sweep_error: Exception | None = None
+        try:
+            created += await self._process_todos()
+            scanned: set[int] = set()
+            created += await self._full_scan(scanned)
+            swept, sweep_error = await self._sweep_merge_requests(scanned)
+            created += swept
+        finally:
+            if created and self._work_event is not None:
+                self._work_event.set()
+        if sweep_error is not None:
+            raise sweep_error
         return created
 
     def _agent_for(self, project_db_id: int) -> str:
@@ -99,9 +110,39 @@ class Poller:
         row = get_project_row(self._conn, project_db_id)
         return bool(row["re_review_on_push"]) if row is not None else False
 
+    def _upsert(self, project_db_id: int, mr: dict[str, Any]) -> MrUpsertResult | None:
+        head_sha = mr.get("sha")
+        if not head_sha:
+            logger.warning("MR %s in project %s skipped: no head sha", mr.get("iid"), project_db_id)
+            return None
+        author = _author(mr)
+        return upsert_mr(
+            self._conn,
+            project_db_id=project_db_id,
+            iid=mr["iid"],
+            title=mr.get("title"),
+            author_username=author.get("username"),
+            author_name=author.get("name"),
+            source_branch=mr.get("source_branch"),
+            web_url=mr.get("web_url"),
+            state=mr.get("state"),
+            head_sha=head_sha,
+            updated_at=mr.get("updated_at"),
+        )
+
+    def _enqueue(self, mr_id: int, trigger: str, mr: dict[str, Any], project_db_id: int) -> int:
+        review_id = create_review(
+            self._conn, mr_id, trigger, mr["sha"], self._agent_for(project_db_id)
+        )
+        return 1 if review_id is not None else 0
+
     async def _process_todos(self) -> int:
         created = 0
+        seen = todo_seen_ids(self._conn)
         for todo in await self._api.get_todos():
+            todo_id = todo.get("id")
+            if todo_id is None or todo_id in seen:
+                continue
             target = todo.get("target") or {}
             if todo.get("target_type") != "MergeRequest":
                 continue
@@ -114,38 +155,27 @@ class Poller:
             except Exception:
                 logger.exception("failed to fetch MR %s/%s, todo kept", gitlab_pid, iid)
                 continue
-            result = upsert_mr(
-                self._conn,
-                project_db_id=self._project_ids[gitlab_pid],
-                iid=detail["iid"],
-                title=detail.get("title"),
-                author_username=(detail.get("author") or {}).get("username"),
-                author_name=(detail.get("author") or {}).get("name"),
-                source_branch=detail.get("source_branch"),
-                web_url=detail.get("web_url"),
-                state=detail.get("state"),
-                head_sha=detail.get("sha"),
-                updated_at=detail.get("updated_at"),
-            )
-            action = todo.get("action_name")
-            mentioned = action in ("mentioned", "directly_addressed")
-            is_reviewer = self._username() in _reviewer_usernames(detail)
-            if result.inserted or mentioned or is_reviewer:
-                review_id = create_review(
-                    self._conn,
-                    result.mr_id,
-                    "new",
-                    detail.get("sha"),
-                    self._agent_for(self._project_ids[gitlab_pid]),
-                )
-                if review_id is not None:
-                    created += 1
-            await self._api.mark_todo_done(todo["id"])
+            try:
+                created += self._handle_todo(todo, detail, gitlab_pid)
+            except Exception:
+                logger.exception("todo %s (MR %s/%s) failed", todo_id, gitlab_pid, iid)
+                continue
+            todo_mark_seen(self._conn, todo_id)
         return created
 
-    async def _full_scan(self) -> int:
+    def _handle_todo(self, todo: dict[str, Any], detail: dict[str, Any], gitlab_pid: int) -> int:
+        project_db_id = self._project_ids[gitlab_pid]
+        result = self._upsert(project_db_id, detail)
+        if result is None or detail.get("state") != "opened":
+            return 0
+        mentioned = todo.get("action_name") in ("mentioned", "directly_addressed")
+        is_reviewer = self._username() in _reviewer_usernames(detail)
+        if result.inserted or mentioned or is_reviewer:
+            return self._enqueue(result.mr_id, "new", detail, project_db_id)
+        return 0
+
+    async def _full_scan(self, scanned: set[int]) -> int:
         created = 0
-        max_updated: datetime | None = None
         username = self._username()
         for gitlab_pid, project_db_id in self._project_ids.items():
             if poll_state_get(self._conn, SCAN_DONE_KEY.format(gitlab_pid)) is not None:
@@ -156,48 +186,44 @@ class Poller:
                 logger.exception("full scan failed for project %s", gitlab_pid)
                 continue
             for mr in mrs:
-                result = upsert_mr(
-                    self._conn,
-                    project_db_id=project_db_id,
-                    iid=mr["iid"],
-                    title=mr.get("title"),
-                    author_username=(mr.get("author") or {}).get("username"),
-                    author_name=(mr.get("author") or {}).get("name"),
-                    source_branch=mr.get("source_branch"),
-                    web_url=mr.get("web_url"),
-                    state=mr.get("state"),
-                    head_sha=mr.get("sha"),
-                    updated_at=mr.get("updated_at"),
-                )
-                updated_at = _parse_iso(mr.get("updated_at"))
-                if updated_at is not None and (max_updated is None or updated_at > max_updated):
-                    max_updated = updated_at
-                mine = mr.get("author", {}).get("username") == username or (
-                    username in _reviewer_usernames(mr)
-                )
-                mentioned = False
-                if not mine:
-                    mentioned = await self._mentioned_in_mr(
-                        gitlab_pid, mr["iid"], username, mr.get("description")
-                    )
-                if (mine or mentioned) and mr.get("state") in (None, "opened"):
-                    review_id = create_review(
-                        self._conn,
-                        result.mr_id,
-                        "new",
-                        mr.get("sha"),
-                        self._agent_for(project_db_id),
-                    )
-                    if review_id is not None:
-                        created += 1
+                try:
+                    created += await self._scan_one(gitlab_pid, project_db_id, mr, username)
+                except Exception:
+                    logger.exception("full scan: MR %s/%s failed", gitlab_pid, mr.get("iid"))
+            self._advance_cursor(gitlab_pid, mrs)
             poll_state_set(
                 self._conn, SCAN_DONE_KEY.format(gitlab_pid),
                 datetime.now(UTC).isoformat(),
             )
-        if max_updated is not None:
-            new_cursor = (max_updated - timedelta(seconds=CURSOR_OVERLAP_SEC)).isoformat()
-            poll_state_set(self._conn, CURSOR_KEY, new_cursor)
+            scanned.add(gitlab_pid)
         return created
+
+    async def _scan_one(
+        self, gitlab_pid: int, project_db_id: int, mr: dict[str, Any], username: str
+    ) -> int:
+        result = self._upsert(project_db_id, mr)
+        if result is None:
+            return 0
+        mine = _author(mr).get("username") == username or username in _reviewer_usernames(mr)
+        mentioned = False
+        if not mine:
+            mentioned = await self._mentioned_in_mr(
+                gitlab_pid, mr["iid"], username, mr.get("description")
+            )
+        if (mine or mentioned) and mr.get("state") in (None, "opened"):
+            return self._enqueue(result.mr_id, "new", mr, project_db_id)
+        return 0
+
+    def _advance_cursor(self, gitlab_pid: int, mrs: list[dict[str, Any]]) -> None:
+        stamps = [t for t in (_parse_iso(mr.get("updated_at")) for mr in mrs) if t is not None]
+        if not stamps:
+            return
+        new_cursor = max(stamps) - timedelta(seconds=CURSOR_OVERLAP_SEC)
+        key = MR_CURSOR_KEY.format(gitlab_pid)
+        old_cursor = _parse_iso(poll_state_get(self._conn, key))
+        if old_cursor is not None and old_cursor >= new_cursor:
+            return
+        poll_state_set(self._conn, key, new_cursor.isoformat())
 
     async def _mentioned_in_mr(
         self, gitlab_pid: int, iid: int, username: str, description: str | None
@@ -211,66 +237,54 @@ class Poller:
             return False
         return any(f"@{username}" in (note.get("body") or "") for note in notes)
 
-    async def _sweep_merge_requests(self) -> int:
-        cursor = poll_state_get(self._conn, CURSOR_KEY)
-        if cursor is None:
-            return 0
-        mrs = await self._api.get_merge_requests(cursor)
+    async def _sweep_merge_requests(self, scanned: set[int]) -> tuple[int, Exception | None]:
         created = 0
-        max_updated: datetime | None = None
-        for mr in mrs:
-            gitlab_pid = mr.get("project_id")
-            if gitlab_pid not in self._project_ids:
+        first_error: Exception | None = None
+        for gitlab_pid, project_db_id in self._project_ids.items():
+            if gitlab_pid in scanned:
                 continue
-            result = upsert_mr(
-                self._conn,
-                project_db_id=self._project_ids[gitlab_pid],
-                iid=mr["iid"],
-                title=mr.get("title"),
-                author_username=(mr.get("author") or {}).get("username"),
-                author_name=(mr.get("author") or {}).get("name"),
-                source_branch=mr.get("source_branch"),
-                web_url=mr.get("web_url"),
-                state=mr.get("state"),
-                head_sha=mr.get("sha"),
-                updated_at=mr.get("updated_at"),
-            )
-            updated_at = _parse_iso(mr.get("updated_at"))
-            if updated_at is not None and (max_updated is None or updated_at > max_updated):
-                max_updated = updated_at
-            mine = mr.get("author", {}).get("username") == self._username() or (
-                self._username() in _reviewer_usernames(mr)
-            )
-            state = mr.get("state")
-            if result.inserted and mine and state in (None, "opened"):
-                review_id = create_review(
-                    self._conn,
-                    result.mr_id,
-                    "new",
-                    mr.get("sha"),
-                    self._agent_for(self._project_ids[gitlab_pid]),
+            key = MR_CURSOR_KEY.format(gitlab_pid)
+            cursor = poll_state_get(self._conn, key)
+            if cursor is None:
+                poll_state_set(
+                    self._conn, key,
+                    (datetime.now(UTC) - timedelta(seconds=CURSOR_OVERLAP_SEC)).isoformat(),
                 )
-                if review_id is not None:
-                    created += 1
-            elif (
-                not result.inserted
-                and result.head_sha_changed
-                and self._re_review_on_push(self._project_ids[gitlab_pid])
-                and mine
-            ):
-                review_id = create_review(
-                    self._conn,
-                    result.mr_id,
-                    "push",
-                    mr.get("sha"),
-                    self._agent_for(self._project_ids[gitlab_pid]),
+                continue
+            try:
+                mrs = await self._api.get_project_merge_requests(
+                    gitlab_pid, updated_after=cursor, state=None
                 )
-                if review_id is not None:
-                    created += 1
-        if max_updated is not None:
-            new_cursor = (max_updated - timedelta(seconds=CURSOR_OVERLAP_SEC)).isoformat()
-            poll_state_set(self._conn, CURSOR_KEY, new_cursor)
-        return created
+            except Exception as exc:
+                logger.exception("sweep failed for project %s", gitlab_pid)
+                first_error = first_error or exc
+                continue
+            for mr in mrs:
+                try:
+                    created += self._sweep_one(project_db_id, mr)
+                except Exception:
+                    logger.exception("sweep: MR %s/%s failed", gitlab_pid, mr.get("iid"))
+            self._advance_cursor(gitlab_pid, mrs)
+        return created, first_error
+
+    def _sweep_one(self, project_db_id: int, mr: dict[str, Any]) -> int:
+        result = self._upsert(project_db_id, mr)
+        if result is None:
+            return 0
+        username = self._username()
+        mine = _author(mr).get("username") == username or username in _reviewer_usernames(mr)
+        opened = mr.get("state") in (None, "opened")
+        if result.inserted and mine and opened:
+            return self._enqueue(result.mr_id, "new", mr, project_db_id)
+        if (
+            not result.inserted
+            and result.head_sha_changed
+            and self._re_review_on_push(project_db_id)
+            and mine
+            and opened
+        ):
+            return self._enqueue(result.mr_id, "push", mr, project_db_id)
+        return 0
 
     def _username(self) -> str:
         if self._me is None:
@@ -286,6 +300,7 @@ def _parse_iso(value: str | None) -> datetime | None:
     if not value:
         return None
     try:
-        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
     except ValueError:
         return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)

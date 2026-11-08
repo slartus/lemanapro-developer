@@ -53,6 +53,11 @@ def origin(tmp_path: Path) -> Path:
     return origin
 
 
+READONLY_AGENT = (
+    "---\ndescription: r\ntools:\n  edit: false\n  bash: false\n  webfetch: false\n---\nbody\n"
+)
+
+
 def _fake_opencode(tmp_path: Path, script: str) -> str:
     bin_path = tmp_path / "fake-opencode"
     bin_path.write_text(script)
@@ -136,7 +141,12 @@ def _worker(tmp_path: Path, db_conn, origin: Path, opencode_bin: str) -> Worker:
         def _repo_url(self, mr) -> str:
             return str(origin)
 
-    return LocalWorker(0, db_conn, api, config, paths, clone_harden=False)
+    agents_dir = tmp_path / "agents"
+    agents_dir.mkdir(exist_ok=True)
+    (agents_dir / "agent-a.md").write_text(READONLY_AGENT)
+    return LocalWorker(
+        0, db_conn, api, config, paths, clone_harden=False, agents_dirs=(agents_dir,)
+    )
 
 
 async def test_worker_full_success(tmp_path, db, origin):
@@ -160,7 +170,8 @@ async def test_worker_full_success(tmp_path, db, origin):
     assert await worker.process_one() is False
 
 
-async def test_worker_clone_failure_retries_then_error(tmp_path, db, origin):
+async def test_worker_clone_failure_retries_then_error(tmp_path, db, origin, monkeypatch):
+    monkeypatch.setattr("mrwatch.worker.CLONE_RETRY_BACKOFF_SEC", 0.0)
     review_id = _queued_review(db, origin)
     opencode_bin = _fake_opencode(tmp_path, "#!/bin/sh\ntrue\n")
     worker = _worker(tmp_path, db, origin, opencode_bin)
@@ -207,3 +218,49 @@ async def test_worker_counts_severities(tmp_path, db, origin):
     assert review["major_count"] == 1
     assert review["minor_count"] == 0
     assert review["nit_count"] == 1
+
+
+async def test_worker_rejects_unsafe_agent(tmp_path, db, origin):
+    review_id = _queued_review(db, origin)
+    marker = tmp_path / "ran"
+    opencode_bin = _fake_opencode(tmp_path, f"#!/bin/sh\ntouch {marker}\n")
+    worker = _worker(tmp_path, db, origin, opencode_bin)
+    (tmp_path / "agents" / "agent-a.md").write_text(
+        "---\ntools:\n  edit: true\n  bash: false\n---\n"
+    )
+
+    await worker.process_one()
+
+    review = get_review(db, review_id)
+    assert review["status"] == "error"
+    assert "agent rejected" in review["error"]
+    assert not marker.exists()
+
+
+async def test_worker_passes_model_variant_and_retries_on_length(tmp_path, db, origin):
+    review_id = _queued_review(db, origin)
+    argv_log = tmp_path / "argv.txt"
+    length = (
+        '{"type":"step_finish","part":{"type":"step-finish","reason":"length",'
+        '"tokens":{"output":0,"reasoning":8192}}}'
+    )
+    ok = '{"sessionID":"s2","part":{"type":"text","text":"ОК"}}'
+    script = (
+        "#!/bin/sh\n"
+        f"printf '%s\\n' \"$@\" | grep -A1 -E '^--(model|variant)$' | tr '\\n' ' ' >> {argv_log}; echo >> {argv_log}\n"
+        'case "$*" in *"--variant low"*) '
+        f"printf '%s' '{ok}';; *) printf '%s' '{length}';; esac\n"
+    )
+    opencode_bin = _fake_opencode(tmp_path, script)
+    worker = _worker(tmp_path, db, origin, opencode_bin)
+    worker._config.opencode.model = "prov/model"
+
+    await worker.process_one()
+
+    review = get_review(db, review_id)
+    assert review["status"] == "done"
+    lines = argv_log.read_text().splitlines()
+    assert len(lines) == 2
+    assert all("--model prov/model" in line for line in lines)
+    assert "--variant" not in lines[0]
+    assert "--variant low" in lines[1]

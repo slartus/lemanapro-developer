@@ -1,5 +1,5 @@
 # Пример конфига mr-watch.
-# Скопируйте в ~/.config/mr-watch/config.yaml (chmod 600).
+# Скопируйте в ~/.config/mr-watch/config.yaml (chmod 600; при group/other-writable сервис не стартует).
 # Секретов здесь нет: GitLab PAT читается через pat_command (macOS Keychain).
 
 gitlab:
@@ -21,6 +21,9 @@ projects:
     agent: mr-watch-reviewer
     # Перезапускать ревью при смене head_sha (push в MR).
     re_review_on_push: false
+    # Необязательно: модель/вариант только для этого проекта (переопределяют opencode.*).
+    # model: provider/model
+    # variant: low
 
 review:
   # Параллельных воркеров ревью.
@@ -32,10 +35,19 @@ review:
   # Сколько часов назад смотреть MR при первом запуске (0 = только новые).
   # Удалять рабочие каталоги старше N дней (страховка на случай краха).
   workspace_ttl_days: 3
+  # Удалять логи ревью (logs/review-*.log) старше N дней при старте.
+  log_ttl_days: 14
 
 opencode:
   # Путь до бинаря opencode.
   bin: ~/.opencode/bin/opencode
+  # Модель в формате provider/model (по умолчанию - из opencode.json).
+  # model: provider/model
+  # Вариант модели (уровень reasoning: low, high, max ...).
+  # variant: medium
+  # Вариант для автоповтора, если модель упёрлась в лимит вывода (reason=length)
+  # и не выдала текста. null отключает повтор.
+  length_retry_variant: low
 
 paths:
   # Файл базы SQLite (каталог создаётся автоматически).

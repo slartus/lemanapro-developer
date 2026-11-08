@@ -62,6 +62,7 @@ async def test_healthz_degraded_on_error(ctx):
     poll_state_set(ctx_obj.conn, "poll_last_error", "boom: 1")
     async with _client(ctx_obj) as client:
         response = await client.get("/healthz")
+    assert response.status_code == 503
     assert response.json()["status"] == "degraded"
 
 
@@ -372,28 +373,14 @@ class _TreeApi:
         return self._tree.get(path, [])
 
 
-async def test_project_agents_merges_dirs(ctx, monkeypatch):
+async def test_project_agents_returns_only_global_readonly(ctx, monkeypatch):
     ctx_obj, _ = ctx
-    ctx_obj.api = _TreeApi({
-        ".opencode/agents": [
-            {"type": "blob", "name": "b.md"},
-            {"type": "tree", "name": "sub"},
-        ],
-        ".opencode/agent": [{"type": "blob", "name": "a.md"}],
-    })
+    monkeypatch.setattr("mrwatch.web.routes.list_readonly_agents", lambda: ["glob"])
+    ctx_obj.api = _TreeApi({".opencode/agents": [{"type": "blob", "name": "evil.md"}]})
     async with _client(ctx_obj) as client:
         resp = await client.get("/project-agents", params={"slug": "g/p"})
     assert resp.status_code == 200
-    assert resp.json()["agents"] == ["a", "b"]
-
-
-async def test_project_agents_unknown_project_400(ctx, monkeypatch):
-    ctx_obj, _ = ctx
-    ctx_obj.api = _TreeApi({})
-    async with _client(ctx_obj) as client:
-        resp = await client.get("/project-agents", params={"slug": "no/such"})
-    assert resp.status_code == 400
-    assert resp.json()["agents"] == []
+    assert resp.json()["agents"] == ["glob"]
 
 
 async def test_settings_save_preserves_unknown_sections(ctx, tmp_path, monkeypatch):

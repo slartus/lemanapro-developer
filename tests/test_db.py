@@ -306,7 +306,7 @@ def test_backup_creates_file(conn, tmp_path):
     review_id = create_review(conn, mr_id, "new", "a" * 40, "agent-a")
     finish_review(conn, review_id, "done", review_md="ok")
 
-    dest = backup(conn, tmp_path / "backups")
+    dest = backup(tmp_path / "test.db", tmp_path / "backups")
     assert isinstance(dest, Path)
     assert dest.is_file()
     assert dest.name.startswith("mrwatch-")
@@ -372,7 +372,7 @@ def test_migration_v1_to_v2_adds_severity_columns(tmp_path):
     assert {"crit_count", "major_count", "minor_count", "nit_count"} <= columns
     mr_columns = {r[1] for r in conn.execute("PRAGMA table_info(mr)")}
     assert "author_name" in mr_columns
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == 3
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 4
     conn.close()
 
 

@@ -1,60 +1,33 @@
-<!DOCTYPE html>
-<html lang="ru">
-<head>
-<meta charset="utf-8">
-<title>mr-watch — ревью #{{ review["id"] }}</title>
-<style>
-  body { font-family: -apple-system, sans-serif; margin: 2rem; color: #1a1a1a; }
-  h1 { font-size: 1.3rem; }
-  pre { background: #f6f8fa; padding: 1rem; border-radius: 6px; overflow-x: auto;
-        white-space: pre-wrap; word-wrap: break-word; }
-  table { border-collapse: collapse; margin-bottom: 1.5rem; }
-  th, td { text-align: left; padding: 0.3rem 0.8rem; border-bottom: 1px solid #ddd; }
-  th { color: #666; font-weight: 500; }
-  .status { padding: 0.1rem 0.5rem; border-radius: 4px; }
-  .status.done { background: #d4edda; } .status.error { background: #f8d7da; }
-  .status.queued, .status.cloning, .status.reviewing { background: #fff3cd; }
-  button { padding: 0.4rem 1rem; cursor: pointer; }
-  a { color: #0366d6; text-decoration: none; }
-  .error-text { color: #b02a37; font-family: monospace; }
-  .sev { display: inline-block; padding: 0.05rem 0.4rem; margin-right: 0.2rem;
-         border-radius: 4px; font-size: 0.8rem; }
-  .sev.crit { background: #f8d7da; color: #842029; }
-  .sev.major { background: #ffe5d0; color: #854a0e; }
-  .sev.minor { background: #fff3cd; color: #664d03; }
-  .sev.nit { background: #e2e3e5; color: #41464b; }
-  .sev.clean { background: #d4edda; color: #1e4620; }
-
-  @media (prefers-color-scheme: dark) {
-    body { background: #16181d; color: #d6d9de; color-scheme: dark; }
-    a { color: #6cb2ff; }
-    th { background: #22262e; }
-    th, td { border-bottom: 1px solid #2c313a; }
-    .muted { color: #8b919c; }
-    .status.done { background: #173425; color: #9be3b2; }
-    .status.error { background: #3b1d21; color: #f08e97; }
-    .status.queued, .status.cloning, .status.reviewing { background: #3a3016; color: #e8c96a; }
-    .sev.crit { background: #3d1c20; color: #f199a2; }
-    .sev.major { background: #3d2817; color: #f0b077; }
-    .sev.minor { background: #3a3014; color: #e5cd6f; }
-    .sev.nit { background: #2b2e33; color: #b4bac2; }
-    .sev.clean { background: #173425; color: #9be3b2; }
-    pre { background: #1d212a; }
-    button { background: #22262e; color: #d6d9de; border: 1px solid #3a4150; }
-    .error-text { color: #f08e97; }
-  }
-</style>
-</head>
-<body>
-<a href="/">← назад</a>
+{% extends "base.html" %}
+{% set active = "" %}
+{% block title %}mr-watch — ревью #{{ review["id"] }}{% endblock %}
+{% block style %}
+  .crumbs { margin-bottom: 0.6rem; }
+  .meta { display: grid; grid-template-columns: max-content 1fr; gap: 0.35rem 1.2rem; margin: 0; }
+  .meta dt { color: var(--muted); }
+  .meta dd { margin: 0; overflow-wrap: anywhere; }
+  .actions { display: flex; flex-wrap: wrap; gap: 0.7rem; align-items: center; margin: 1rem 0; }
+  .error-block { border: 1px solid var(--err-fg); background: var(--err-bg); color: var(--err-fg); border-radius: var(--radius); padding: 0.8rem 1rem; margin: 1rem 0; }
+  .error-block strong { display: block; margin-bottom: 0.3rem; }
+  .error-block pre { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; font-family: var(--mono); font-size: 0.85rem; }
+  .review-text { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 0.8rem 0; font-family: var(--mono); font-size: 0.88rem; line-height: 1.55; overflow-x: auto; }
+  .review-text .ln { display: block; white-space: pre-wrap; overflow-wrap: anywhere; padding: 0 1rem; min-height: 1.55em; border-left: 3px solid transparent; }
+  .review-text .ln.crit { background: var(--err-bg); color: var(--err-fg); border-left-color: var(--err-fg); }
+  .review-text .ln.major { background: var(--major-bg); color: var(--major-fg); border-left-color: var(--major-fg); }
+  .review-text .ln.minor { background: var(--warn-bg); color: var(--warn-fg); border-left-color: var(--warn-fg); }
+  .review-text .ln.nit { background: var(--neutral-bg); color: var(--neutral-fg); border-left-color: var(--neutral-fg); }
+  .siblings a, .siblings strong { margin-right: 0.6rem; white-space: nowrap; }
+  #retry-msg { min-height: 1.2em; }
+{% endblock %}
+{% block content %}
+<p class="crumbs small"><a href="/">← к списку MR</a></p>
 <h1>{{ mr["path_with_namespace"] }} !{{ mr["iid"] }} — {{ mr["title"] or "без названия" }}</h1>
 
-<table>
-  <tr><th>Ревью</th><td>#{{ review["id"] }} ({{ review["trigger"] }}), агент {{ review["agent"] }}</td></tr>
-  <tr><th>Статус</th><td><span class="status {{ review["status"] }}">{{ review["status"] }}</span></td></tr>
-  <tr><th>head_sha</th><td class="muted">{{ review["head_sha"] }}</td></tr>
-  <tr><th>Попыток</th><td>{{ review["attempt"] }}</td></tr>
-  <tr><th>Находки</th><td>
+<div class="card">
+<dl class="meta">
+  <dt>Статус</dt><dd><span class="badge status {{ review["status"] }}" id="st">{{ review["status"] }}</span></dd>
+  <dt>Ревью</dt><dd>#{{ review["id"] }} ({{ review["trigger"] }}), агент {{ review["agent"] }}</dd>
+  <dt>Находки</dt><dd>
     {% if review["status"] == "done" %}
       {% if review["crit_count"] %}<span class="sev crit">{{ review["crit_count"] }}</span>{% endif %}
       {% if review["major_count"] %}<span class="sev major">{{ review["major_count"] }}</span>{% endif %}
@@ -64,19 +37,29 @@
         <span class="sev clean">✓</span>
       {% endif %}
     {% else %}<span class="muted">—</span>{% endif %}
-  </td></tr>
-  <tr><th>Создано</th><td>{{ review["created_at"] }}</td></tr>
-  <tr><th>Завершено</th><td>{{ review["finished_at"] or "—" }}</td></tr>
-  <tr><th>MR</th><td><a href="{{ mr["web_url"] }}">{{ mr["web_url"] }}</a></td></tr>
-  {% if review["session_id"] %}<tr><th>Сессия opencode</th><td class="muted">{{ review["session_id"] }}</td></tr>{% endif %}
-</table>
+  </dd>
+  <dt>head_sha</dt><dd class="muted small">{{ review["head_sha"] }}</dd>
+  <dt>Попыток</dt><dd>{{ review["attempt"] }}</dd>
+  <dt>Создано</dt><dd><time data-ts="{{ review["created_at"] }}">{{ review["created_at"] }}</time></dd>
+  <dt>Завершено</dt><dd>{% if review["finished_at"] %}<time data-ts="{{ review["finished_at"] }}">{{ review["finished_at"] }}</time>{% else %}—{% endif %}</dd>
+  <dt>MR</dt><dd><a href="{{ mr["web_url"] }}">{{ mr["web_url"] }}</a></dd>
+  {% if review["session_id"] %}<dt>Сессия opencode</dt><dd class="muted small">{{ review["session_id"] }}</dd>{% endif %}
+</dl>
+</div>
 
-{% if review["status"] in ("error", "done") %}
-<button onclick="retry()">Re-review</button>
+{% if review["error"] %}
+<div class="error-block" role="alert"><strong>Ревью завершилось ошибкой</strong><pre>{{ review["error"] }}</pre></div>
 {% endif %}
 
+<div class="actions">
+{% if review["status"] in ("error", "done") %}
+<button id="retry-btn" class="primary" onclick="retry()">Re-review</button>
+{% endif %}
+<span id="retry-msg" class="small" role="status"></span>
+</div>
+
 {% if siblings | length > 1 %}
-<p class="muted">Ревью этого MR:
+<p class="muted small siblings">Ревью этого MR:
   {% for s in siblings %}
     {% if s["id"] == review["id"] %}
       <strong>#{{ s["id"] }} ({{ s["status"] }})</strong>
@@ -87,25 +70,58 @@
 </p>
 {% endif %}
 
-{% if review["error"] %}<p class="error-text">{{ review["error"] }}</p>{% endif %}
-
 <h2>Результат ревью</h2>
 {% if review["review_md"] %}
-<pre>{{ review["review_md"] }}</pre>
+<div class="review-text" id="rt">{% for line in review["review_md"].splitlines() %}<span class="ln{% if "[BLOCKER]" in line %} crit{% elif "[MAJOR]" in line %} major{% elif "[MINOR]" in line %} minor{% elif "[NIT]" in line %} nit{% endif %}">{{ line }}</span>{% endfor %}</div>
 {% elif review["status"] in ("queued", "cloning", "reviewing") %}
-<p>ревью выполняется…</p>
+<p class="muted">ревью выполняется… страница обновится автоматически</p>
 {% else %}
-<p>результата нет</p>
+<p class="muted">результата нет</p>
 {% endif %}
-
+{% endblock %}
+{% block scripts %}
 <script>
+const ACTIVE_STATUS = ["queued", "cloning", "reviewing"];
+const CURRENT = {{ review["status"] | tojson }};
+
 async function retry() {
-  await fetch("/reviews/{{ review["id"] }}/retry", {
-    method: "POST",
-    headers: {"X-Requested-With": "mrwatch"},
-  });
-  location.reload();
+  const btn = document.getElementById("retry-btn");
+  const msg = document.getElementById("retry-msg");
+  if (btn.disabled) return;
+  btn.disabled = true;
+  msg.className = "small muted";
+  msg.textContent = "отправляю…";
+  try {
+    const r = await fetch("/reviews/{{ review["id"] }}/retry", {
+      method: "POST",
+      headers: {"X-Requested-With": "mrwatch"},
+    });
+    if (!r.ok) {
+      msg.className = "small";
+      msg.style.color = "var(--err-fg)";
+      msg.textContent = "ошибка " + r.status + ": " + (await r.text());
+      btn.disabled = false;
+      return;
+    }
+    location.reload();
+  } catch (e) {
+    msg.className = "small";
+    msg.style.color = "var(--err-fg)";
+    msg.textContent = "ошибка сети";
+    btn.disabled = false;
+  }
+}
+
+if (ACTIVE_STATUS.includes(CURRENT)) {
+  setInterval(async function () {
+    if (document.hidden) return;
+    try {
+      const r = await fetch("/api/reviews/{{ review["id"] }}", {cache: "no-store"});
+      if (!r.ok) return;
+      const data = await r.json();
+      if (data.status !== CURRENT) location.reload();
+    } catch (e) {}
+  }, 4000);
 }
 </script>
-</body>
-</html>
+{% endblock %}

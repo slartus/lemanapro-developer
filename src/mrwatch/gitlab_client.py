@@ -5,7 +5,7 @@ import logging
 from typing import Any
 
 import httpx
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit
 
 logger = logging.getLogger(__name__)
 
@@ -22,6 +22,13 @@ class GitlabApiError(Exception):
         self.message = message
 
 
+def _origin(url: str) -> tuple[str, str, int | None]:
+    parts = urlsplit(url)
+    scheme = parts.scheme.lower()
+    port = parts.port or {"http": 80, "https": 443}.get(scheme)
+    return (scheme, (parts.hostname or "").lower(), port)
+
+
 class GitLabClient:
     def __init__(
         self,
@@ -29,6 +36,7 @@ class GitLabClient:
         token: str,
         transport: httpx.AsyncBaseTransport | None = None,
     ) -> None:
+        self._origin = _origin(base_url)
         self._client = httpx.AsyncClient(
             base_url=base_url,
             headers={"PRIVATE-TOKEN": token},
@@ -81,6 +89,18 @@ class GitLabClient:
             )
         raise GitlabApiError("unreachable retry loop")
 
+    def _next_url(self, response: httpx.Response) -> str | None:
+        next_url = response.links.get("next", {}).get("url")
+        if not next_url:
+            return None
+        parts = urlsplit(next_url)
+        if parts.scheme or parts.netloc:
+            candidate = _origin(next_url)
+            if candidate != self._origin:
+                logger.warning("pagination stopped: foreign next link host %s", candidate[1])
+                return None
+        return next_url
+
     async def get_user(self) -> dict[str, Any]:
         response = await self._get("/api/v4/user")
         return response.json()
@@ -92,7 +112,7 @@ class GitLabClient:
         for _ in range(_MAX_PAGES):
             response = await self._get(url, query)
             items.extend(response.json())
-            next_url = response.links.get("next", {}).get("url")
+            next_url = self._next_url(response)
             if not next_url:
                 return items
             url = next_url
@@ -100,24 +120,13 @@ class GitLabClient:
         logger.warning("todos pagination capped at %s pages", _MAX_PAGES)
         return items
 
-    async def mark_todo_done(self, todo_id: int) -> None:
-        try:
-            response = await self._client.post(f"/api/v4/todos/{todo_id}/mark_as_done")
-        except httpx.HTTPError as exc:
-            logger.warning("mark_todo_done %s failed: %s", todo_id, type(exc).__name__)
-            return
-        if response.status_code not in (200, 201, 404):
-            logger.warning(
-                "mark_todo_done %s unexpected status %s", todo_id, response.status_code
-            )
-
     async def _paginated(self, url: str, params: dict[str, Any]) -> list[dict[str, Any]]:
         items: list[dict[str, Any]] = []
         query: dict[str, Any] | None = params
         for _ in range(_MAX_PAGES):
             response = await self._get(url, query)
             items.extend(response.json())
-            next_url = response.links.get("next", {}).get("url")
+            next_url = self._next_url(response)
             if not next_url:
                 return items
             url = next_url
@@ -137,14 +146,22 @@ class GitLabClient:
             params["updated_after"] = updated_after
         return await self._paginated("/api/v4/merge_requests", params)
 
-    async def get_project_merge_requests(self, project_id: int) -> list[dict[str, Any]]:
+    async def get_project_merge_requests(
+        self,
+        project_id: int,
+        updated_after: str | None = None,
+        state: str | None = "opened",
+    ) -> list[dict[str, Any]]:
         params: dict[str, Any] = {
-            "state": "opened",
             "order_by": "updated_at",
-            "sort": "desc",
+            "sort": "asc" if updated_after is not None else "desc",
             "per_page": 100,
             "pagination": "keyset",
         }
+        if state is not None:
+            params["state"] = state
+        if updated_after is not None:
+            params["updated_after"] = updated_after
         return await self._paginated(
             f"/api/v4/projects/{project_id}/merge_requests", params
         )
@@ -158,13 +175,15 @@ class GitLabClient:
         items: list[dict[str, Any]] = []
         url: str = f"/api/v4/projects/{project_id}/repository/tree"
         params: dict[str, Any] = {"path": path, "ref": ref, "per_page": 100}
-        while True:
+        for _ in range(_MAX_PAGES):
             response = await self._get(url, params=params)
             items.extend(response.json())
-            next_url = response.links.get("next", {}).get("url")
+            next_url = self._next_url(response)
             if not next_url:
                 return items
             url, params = next_url, None
+        logger.warning("tree pagination capped at %s pages", _MAX_PAGES)
+        return items
 
     async def get_project_mr(self, project_id: int, iid: int) -> dict[str, Any]:
         response = await self._get(f"/api/v4/projects/{project_id}/merge_requests/{iid}")

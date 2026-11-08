@@ -2,12 +2,12 @@ from __future__ import annotations
 
 import sqlite3
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 MAX_REVIEW_MD_LENGTH = 1_000_000
 TRUNCATION_MARKER = "...[truncated]"
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 
 SEVERITY_COLUMNS = ("crit_count", "major_count", "minor_count", "nit_count")
@@ -98,11 +98,42 @@ def init_schema(conn: sqlite3.Connection) -> None:
             )
     if version < 3:
         conn.execute("ALTER TABLE mr ADD COLUMN author_name TEXT")
+    if version < 4:
+        _migrate_to_v4(conn)
     conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
     conn.commit()
 
 
 SCAN_DONE_KEY = "mr_scan_done:{}"
+MR_CURSOR_KEY = "mr_cursor:{}"
+LEGACY_CURSOR_KEY = "mr_cursor"
+
+
+def _migrate_to_v4(conn: sqlite3.Connection) -> None:
+    conn.execute("ALTER TABLE review ADD COLUMN not_before TEXT")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_review_mr ON review(mr_id)")
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS todo_seen "
+        "(todo_id INTEGER PRIMARY KEY, seen_at TEXT NOT NULL)"
+    )
+    tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
+    if not {"poll_state", "project"} <= tables:
+        return
+    legacy = conn.execute(
+        "SELECT value FROM poll_state WHERE key = ?", (LEGACY_CURSOR_KEY,)
+    ).fetchone()
+    if legacy is not None:
+        for row in conn.execute("SELECT gitlab_project_id FROM project").fetchall():
+            gitlab_pid = row[0]
+            scanned = conn.execute(
+                "SELECT 1 FROM poll_state WHERE key = ?", (SCAN_DONE_KEY.format(gitlab_pid),)
+            ).fetchone()
+            if scanned is not None:
+                conn.execute(
+                    "INSERT OR IGNORE INTO poll_state (key, value) VALUES (?, ?)",
+                    (MR_CURSOR_KEY.format(gitlab_pid), legacy[0]),
+                )
+        conn.execute("DELETE FROM poll_state WHERE key = ?", (LEGACY_CURSOR_KEY,))
 
 
 def sync_projects(
@@ -126,6 +157,7 @@ def sync_projects(
         ).fetchone()
         if row is None:
             poll_state_delete(conn, SCAN_DONE_KEY.format(gitlab_project_id))
+            poll_state_delete(conn, MR_CURSOR_KEY.format(gitlab_project_id))
             cursor = conn.execute(
                 """
                 INSERT INTO project
@@ -144,6 +176,7 @@ def sync_projects(
         else:
             if enabled and not row["enabled"]:
                 poll_state_delete(conn, SCAN_DONE_KEY.format(gitlab_project_id))
+                poll_state_delete(conn, MR_CURSOR_KEY.format(gitlab_project_id))
             conn.execute(
                 """
                 UPDATE project
@@ -265,7 +298,15 @@ def claim_next_review(conn: sqlite3.Connection) -> sqlite3.Row | None:
     conn.execute("BEGIN IMMEDIATE")
     try:
         row = conn.execute(
-            "SELECT id FROM review WHERE status = 'queued' ORDER BY id LIMIT 1"
+            """
+            SELECT review.id FROM review
+            JOIN mr ON mr.id = review.mr_id
+            JOIN project ON project.id = mr.project_id
+            WHERE review.status = 'queued' AND project.enabled = 1
+                AND (review.not_before IS NULL OR review.not_before <= ?)
+            ORDER BY review.id LIMIT 1
+            """,
+            (utcnow_iso(),),
         ).fetchone()
         if row is None:
             conn.commit()
@@ -322,6 +363,7 @@ def retry_review(conn: sqlite3.Connection, review_id: int) -> bool:
         UPDATE review
         SET status = 'queued', review_md = NULL, session_id = NULL, exit_code = NULL,
             error = NULL, started_at = NULL, finished_at = NULL,
+            attempt = 0, not_before = NULL,
             crit_count = 0, major_count = 0, minor_count = 0, nit_count = 0
         WHERE id = ? AND status IN ('error', 'done')
         """,
@@ -329,6 +371,16 @@ def retry_review(conn: sqlite3.Connection, review_id: int) -> bool:
     )
     conn.commit()
     return cursor.rowcount > 0
+
+
+def rebase_review_head(conn: sqlite3.Connection, review_id: int, head_sha: str) -> bool:
+    try:
+        conn.execute("UPDATE review SET head_sha = ? WHERE id = ?", (head_sha, review_id))
+        conn.commit()
+    except sqlite3.IntegrityError:
+        conn.rollback()
+        return False
+    return True
 
 
 def mark_reviewing(conn: sqlite3.Connection, review_id: int) -> None:
@@ -339,14 +391,22 @@ def mark_reviewing(conn: sqlite3.Connection, review_id: int) -> None:
     conn.commit()
 
 
-def requeue_review(conn: sqlite3.Connection, review_id: int) -> None:
+def requeue_review(conn: sqlite3.Connection, review_id: int, delay_sec: float = 0.0) -> None:
+    not_before = None
+    if delay_sec > 0:
+        not_before = (
+            (datetime.now(UTC) + timedelta(seconds=delay_sec))
+            .isoformat(timespec="milliseconds")
+            .replace("+00:00", "Z")
+        )
     conn.execute(
         """
         UPDATE review
-        SET status = 'queued', error = NULL, started_at = NULL, finished_at = NULL
+        SET status = 'queued', error = NULL, started_at = NULL, finished_at = NULL,
+            not_before = ?
         WHERE id = ?
         """,
-        (review_id,),
+        (not_before, review_id),
     )
     conn.commit()
 
@@ -456,12 +516,29 @@ def poll_state_delete(conn: sqlite3.Connection, key: str) -> None:
     conn.commit()
 
 
-def backup(conn: sqlite3.Connection, backup_dir: Path) -> Path:
-    backup_dir.mkdir(parents=True, exist_ok=True)
+def todo_seen_ids(conn: sqlite3.Connection) -> set[int]:
+    return {row[0] for row in conn.execute("SELECT todo_id FROM todo_seen")}
+
+
+def todo_mark_seen(conn: sqlite3.Connection, todo_id: int) -> None:
+    conn.execute(
+        "INSERT OR IGNORE INTO todo_seen (todo_id, seen_at) VALUES (?, ?)",
+        (todo_id, utcnow_iso()),
+    )
+    conn.commit()
+
+
+def backup(db_path: Path, backup_dir: Path) -> Path:
+    backup_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
     dest = backup_dir / f"mrwatch-{datetime.now(UTC).strftime('%Y%m%d-%H%M%S')}.db"
-    dest_conn = sqlite3.connect(dest)
+    source = sqlite3.connect(db_path)
     try:
-        conn.backup(dest_conn)
+        dest_conn = sqlite3.connect(dest)
+        try:
+            source.backup(dest_conn)
+        finally:
+            dest_conn.close()
     finally:
-        dest_conn.close()
+        source.close()
+    dest.chmod(0o600)
     return dest
