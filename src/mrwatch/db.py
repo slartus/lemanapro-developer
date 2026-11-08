@@ -149,10 +149,11 @@ def _merge_roles(
     derived_roles: frozenset[str] | set[str] | None,
     signal_roles: frozenset[str] | set[str] | None,
     state: str | None,
+    derived_scope: frozenset[str] | set[str] = DERIVED_ROLES,
 ) -> str:
     roles = _parse_roles(existing)
     if derived_roles is not None:
-        roles = (roles - DERIVED_ROLES) | set(derived_roles)
+        roles = (roles - set(derived_scope)) | set(derived_roles)
     roles |= set(signal_roles or ())
     if state not in (None, "opened", "locked"):
         roles.discard(MENTIONED_ROLE)
@@ -161,6 +162,7 @@ def _merge_roles(
 
 SCAN_DONE_KEY = "mr_scan_done:{}"
 MR_CURSOR_KEY = "mr_cursor:{}"
+ROLES_BACKFILL_KEY = "roles_backfill_v5:{}"
 LEGACY_CURSOR_KEY = "mr_cursor"
 
 
@@ -189,6 +191,24 @@ def _migrate_to_v4(conn: sqlite3.Connection) -> None:
                     (MR_CURSOR_KEY.format(gitlab_pid), legacy[0]),
                 )
         conn.execute("DELETE FROM poll_state WHERE key = ?", (LEGACY_CURSOR_KEY,))
+
+
+def update_mr_roles(
+    conn: sqlite3.Connection,
+    project_db_id: int,
+    iid: int,
+    derived_roles: frozenset[str] | set[str],
+    derived_scope: frozenset[str] | set[str] = DERIVED_ROLES,
+) -> None:
+    row = conn.execute(
+        "SELECT id, state, my_roles FROM mr WHERE project_id = ? AND iid = ?",
+        (project_db_id, iid),
+    ).fetchone()
+    if row is None:
+        return
+    merged = _merge_roles(row["my_roles"], derived_roles, None, row["state"], derived_scope)
+    conn.execute("UPDATE mr SET my_roles = ? WHERE id = ?", (merged, row["id"]))
+    conn.commit()
 
 
 def sync_projects(
@@ -265,6 +285,7 @@ def upsert_mr(
     author_name: str | None = None,
     derived_roles: frozenset[str] | set[str] | None = None,
     signal_roles: frozenset[str] | set[str] | None = None,
+    derived_scope: frozenset[str] | set[str] = DERIVED_ROLES,
 ) -> MrUpsertResult:
     row = conn.execute(
         "SELECT id, head_sha, state, my_roles FROM mr WHERE project_id = ? AND iid = ?",
@@ -321,7 +342,8 @@ def upsert_mr(
             head_sha,
             updated_at or utcnow_iso(),
             _merge_roles(
-                row["my_roles"], derived_roles, signal_roles, state or row["state"]
+                row["my_roles"], derived_roles, signal_roles, state or row["state"],
+                derived_scope,
             ),
             row["id"],
         ),

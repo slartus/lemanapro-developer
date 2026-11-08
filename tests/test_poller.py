@@ -420,17 +420,17 @@ def _roles(conn, iid):
 
 
 @pytest.mark.parametrize(
-    "action,expected",
+    "action,reviewers,expected",
     [
-        ("mentioned", "mentioned"),
-        ("directly_addressed", "mentioned"),
-        ("review_requested", "reviewer"),
-        ("assigned", "assignee"),
+        ("mentioned", (), "mentioned"),
+        ("directly_addressed", (), "mentioned"),
+        ("review_requested", ("me",), "reviewer"),
+        ("review_requested", (), ""),
     ],
 )
-async def test_roles_from_todo_action(conn, action, expected):
+async def test_roles_from_todo_action(conn, action, reviewers, expected):
     api = StubApi()
-    api.details[(10, 5)] = _detail(10, 5)
+    api.details[(10, 5)] = _detail(10, 5, reviewers=reviewers)
     api.todos = [{"id": 1, "target_type": "MergeRequest", "action_name": action,
                   "target": {"project_id": 10, "iid": 5}}]
     await _make_poller(conn, api).tick()
@@ -465,3 +465,84 @@ async def test_mention_role_kept_while_open_and_union(conn):
                   "target": {"project_id": 10, "iid": 5}}]
     await poller.tick()
     assert _roles(conn, 5) == "mentioned,reviewer"
+
+
+async def test_assigned_todo_role_from_detail(conn):
+    api = StubApi()
+    detail = _detail(10, 5)
+    detail["assignees"] = [{"username": "me"}]
+    api.details[(10, 5)] = detail
+    api.todos = [{"id": 1, "target_type": "MergeRequest", "action_name": "assigned",
+                  "target": {"project_id": 10, "iid": 5}}]
+    await _make_poller(conn, api).tick()
+    assert _roles(conn, 5) == "assignee"
+
+
+@pytest.mark.parametrize(
+    "text,expected",
+    [
+        ("cc @me", True),
+        ("@me, please look", True),
+        ("@me2 look", False),
+        ("x@me.ru", False),
+        ("@me.ru", False),
+        ("@me-bot", False),
+        (None, False),
+    ],
+)
+def test_has_mention(text, expected):
+    from mrwatch.poller import _has_mention
+
+    assert _has_mention(text, "me") is expected
+
+
+async def test_missing_keys_keep_roles(conn):
+    api = StubApi()
+    mr = _mr(10, 1, author="other", reviewers=["me"])
+    mr["assignees"] = [{"username": "me"}]
+    api.mrs = [mr]
+    poller = _make_poller(conn, api)
+    await poller.tick()
+    assert _roles(conn, 1) == "assignee,reviewer"
+
+    partial = _mr(10, 1, author="other", updated_at="2026-01-02T12:00:00Z")
+    del partial["reviewers"]
+    api.mrs = [partial]
+    await poller.tick()
+    assert _roles(conn, 1) == "assignee,reviewer"
+
+    empty = _mr(10, 1, author="other", reviewers=[], updated_at="2026-01-03T12:00:00Z")
+    api.mrs = [empty]
+    await poller.tick()
+    assert _roles(conn, 1) == "assignee"
+
+
+async def test_mine_mention_uses_description_without_notes(conn):
+    api = StubApi()
+    api.mrs = [_mr(10, 1, author="me", description="cc @me")]
+    api.notes[(10, 1)] = []
+    await _make_poller(conn, api).tick()
+    assert "mentioned" in _roles(conn, 1).split(",")
+
+
+async def test_roles_backfill_once_without_reviews(conn):
+    api = StubApi()
+    mr = _mr(10, 1, author="other", reviewers=["me"])
+    api.mrs = [mr]
+    poller = _make_poller(conn, api)
+    await poller.tick()
+    conn.execute("UPDATE mr SET my_roles = ''")
+    conn.execute("DELETE FROM review")
+    conn.execute("DELETE FROM poll_state WHERE key LIKE 'roles_backfill_v5:%'")
+    conn.commit()
+    api.mrs = [_mr(10, 1, author="other", reviewers=["me"], updated_at="2026-01-01T00:00:00Z")]
+    api.project_calls.clear()
+
+    await poller.tick()
+    assert _roles(conn, 1) == "reviewer"
+    assert list_reviews(conn) == []
+    assert len([c for c in api.project_calls if c[2] == "opened" and c[1] is None]) == 1
+
+    api.project_calls.clear()
+    await poller.tick()
+    assert all(c[1] is not None for c in api.project_calls)
