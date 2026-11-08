@@ -7,7 +7,14 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from mrwatch.review_findings import MAX_PARSE_INPUT_CHARS, iter_findings
+from mrwatch.review_findings import (
+    FENCE_OPEN,
+    MAX_PARSE_INPUT_CHARS,
+    QUOTE_LINE,
+    _is_fence_close,
+    iter_findings,
+    split_review_lines,
+)
 from mrwatch.procutil import (
     OutputLimitExceeded,
     communicate_capped,
@@ -252,8 +259,6 @@ VERDICT_TOKEN = re.compile(r"(?<![A-Za-z0-9_])(APPROVE_WITH_NITS|REQUEST_CHANGES
 VERDICT_HEADING = re.compile(r"^[ \t]{0,3}#{1,6}[ \t]*verdict\b(.*)$", re.IGNORECASE)
 VERDICT_LINE = re.compile(r"^[ \t]*(?:[-+][ \t]*)?verdict[ \t]*:(.*)$", re.IGNORECASE)
 ANY_HEADING = re.compile(r"^[ \t]{0,3}#{1,6}[ \t]*\S")
-FENCE_OPEN = re.compile(r"^[ \t]{0,3}(`{3,}|~{3,})")
-QUOTE_LINE = re.compile(r"^[ \t]{0,3}>")
 
 
 def _single_token(tokens: set[str]) -> str | None:
@@ -268,10 +273,9 @@ def parse_verdict(review_md: str | None) -> str | None:
     section_tokens: set[str] = set()
     section_hit: tuple[str | None] | None = None
     line_hit: tuple[str | None] | None = None
-    for raw in review_md.splitlines():
+    for raw in split_review_lines(review_md):
         if fence is not None:
-            stripped = raw.strip()
-            if stripped and stripped[0] == fence[0] and len(stripped) >= len(fence) and not stripped.strip(fence[0]):
+            if _is_fence_close(raw, fence):
                 fence = None
             continue
         opening = FENCE_OPEN.match(raw)
