@@ -487,6 +487,13 @@ async def test_assigned_todo_role_from_detail(conn):
         ("x@me.ru", False),
         ("@me.ru", False),
         ("@me-bot", False),
+        ("thanks @me.", True),
+        ("@me.\nnext", True),
+        ("@me. ok", True),
+        ("@me...", True),
+        ("@ME", True),
+        ("@me_x", False),
+        ("x@me", False),
         (None, False),
     ],
 )
@@ -494,6 +501,20 @@ def test_has_mention(text, expected):
     from mrwatch.poller import _has_mention
 
     assert _has_mention(text, "me") is expected
+
+
+@pytest.mark.parametrize(
+    "text,username,expected",
+    [
+        ("cc @artem.slinkin", "artem.slinkin", True),
+        ("@username2", "username", False),
+        ("x@username.ru", "username", False),
+    ],
+)
+def test_has_mention_username(text, username, expected):
+    from mrwatch.poller import _has_mention
+
+    assert _has_mention(text, username) is expected
 
 
 async def test_missing_keys_keep_roles(conn):
@@ -546,3 +567,47 @@ async def test_roles_backfill_once_without_reviews(conn):
     api.project_calls.clear()
     await poller.tick()
     assert all(c[1] is not None for c in api.project_calls)
+
+
+def _reset_backfill(conn):
+    conn.execute("UPDATE mr SET my_roles = ''")
+    conn.execute("DELETE FROM poll_state WHERE key LIKE 'roles_backfill_v5:%'")
+    conn.commit()
+
+
+async def test_roles_backfill_sets_mentioned_from_description(conn):
+    api = StubApi()
+    api.mrs = [_mr(10, 1, author="other", description="cc @me")]
+    poller = _make_poller(conn, api)
+    await poller.tick()
+    _reset_backfill(conn)
+
+    await poller.tick()
+    assert "mentioned" in _roles(conn, 1)
+
+
+async def test_roles_backfill_api_error_retries_next_tick(conn):
+    api = StubApi()
+    api.mrs = [_mr(10, 1, author="other", description="cc @me")]
+    poller = _make_poller(conn, api)
+    await poller.tick()
+    _reset_backfill(conn)
+
+    original = api.get_project_merge_requests
+    fail = {"on": True}
+
+    async def flaky(project_id, updated_after=None, state="opened"):
+        if fail["on"] and updated_after is None:
+            raise GitlabApiError("down", status=500)
+        return await original(project_id, updated_after, state)
+
+    api.get_project_merge_requests = flaky
+    await poller.tick()
+    assert "mentioned" not in _roles(conn, 1)
+    assert conn.execute(
+        "SELECT 1 FROM poll_state WHERE key LIKE 'roles_backfill_v5:%'"
+    ).fetchone() is None
+
+    fail["on"] = False
+    await poller.tick()
+    assert "mentioned" in _roles(conn, 1)

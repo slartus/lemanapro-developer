@@ -168,9 +168,11 @@ class Poller:
             for mr in mrs:
                 if mr.get("iid") is None:
                     continue
+                roles = derive_roles(mr, username)
+                if _has_mention(mr.get("description"), username):
+                    roles = roles | {MENTIONED_ROLE}
                 update_mr_roles(
-                    self._conn, project_db_id, mr["iid"],
-                    derive_roles(mr, username), derived_scope(mr),
+                    self._conn, project_db_id, mr["iid"], roles, derived_scope(mr),
                 )
             poll_state_set(self._conn, key, datetime.now(UTC).isoformat())
 
@@ -359,7 +361,9 @@ def _assignee_usernames(mr: dict[str, Any]) -> set[str]:
 def _has_mention(text: str | None, username: str) -> bool:
     if not text:
         return False
-    return re.search(rf"(?<![\w.])@{re.escape(username)}(?![\w.-])", text) is not None
+    return re.search(
+        rf"(?<![\w.@])@{re.escape(username)}(?![\w]|[.-]\w)", text, re.IGNORECASE
+    ) is not None
 
 
 def derived_scope(mr: dict[str, Any]) -> frozenset[str]:
