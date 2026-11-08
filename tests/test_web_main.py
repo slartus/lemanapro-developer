@@ -378,7 +378,7 @@ async def test_project_agents_returns_only_global_readonly(ctx, monkeypatch):
     monkeypatch.setattr("mrwatch.web.routes.list_readonly_agents", lambda: ["glob"])
     ctx_obj.api = _TreeApi({".opencode/agents": [{"type": "blob", "name": "evil.md"}]})
     async with _client(ctx_obj) as client:
-        resp = await client.get("/project-agents", params={"slug": "g/p"})
+        resp = await client.get("/project-agents")
     assert resp.status_code == 200
     assert resp.json()["agents"] == ["glob"]
 

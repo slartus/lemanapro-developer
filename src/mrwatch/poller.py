@@ -13,6 +13,7 @@ from mrwatch.db import (
     MrUpsertResult,
     create_review,
     poll_state_delete,
+    review_exists_for_head,
     poll_state_get,
     poll_state_set,
     todo_mark_seen,
@@ -180,6 +181,7 @@ class Poller:
         for gitlab_pid, project_db_id in self._project_ids.items():
             if poll_state_get(self._conn, SCAN_DONE_KEY.format(gitlab_pid)) is not None:
                 continue
+            scan_started = datetime.now(UTC)
             try:
                 mrs = await self._api.get_project_merge_requests(gitlab_pid)
             except Exception:
@@ -190,7 +192,7 @@ class Poller:
                     created += await self._scan_one(gitlab_pid, project_db_id, mr, username)
                 except Exception:
                     logger.exception("full scan: MR %s/%s failed", gitlab_pid, mr.get("iid"))
-            self._advance_cursor(gitlab_pid, mrs)
+            self._advance_cursor(gitlab_pid, mrs, scan_started)
             poll_state_set(
                 self._conn, SCAN_DONE_KEY.format(gitlab_pid),
                 datetime.now(UTC).isoformat(),
@@ -214,11 +216,20 @@ class Poller:
             return self._enqueue(result.mr_id, "new", mr, project_db_id)
         return 0
 
-    def _advance_cursor(self, gitlab_pid: int, mrs: list[dict[str, Any]]) -> None:
+    def _advance_cursor(
+        self,
+        gitlab_pid: int,
+        mrs: list[dict[str, Any]],
+        scan_started: datetime | None = None,
+    ) -> None:
         stamps = [t for t in (_parse_iso(mr.get("updated_at")) for mr in mrs) if t is not None]
-        if not stamps:
+        if stamps:
+            base = max(stamps)
+        elif scan_started is not None:
+            base = scan_started
+        else:
             return
-        new_cursor = max(stamps) - timedelta(seconds=CURSOR_OVERLAP_SEC)
+        new_cursor = base - timedelta(seconds=CURSOR_OVERLAP_SEC)
         key = MR_CURSOR_KEY.format(gitlab_pid)
         old_cursor = _parse_iso(poll_state_get(self._conn, key))
         if old_cursor is not None and old_cursor >= new_cursor:
@@ -283,6 +294,8 @@ class Poller:
             and mine
             and opened
         ):
+            if review_exists_for_head(self._conn, result.mr_id, mr["sha"]):
+                return 0
             return self._enqueue(result.mr_id, "push", mr, project_db_id)
         return 0
 

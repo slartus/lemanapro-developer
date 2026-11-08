@@ -34,7 +34,8 @@
   {% for m in mrs %}
   <tr data-status="{{ m["latest_review_status"] or "" }}">
     <td class="muted">{{ m["path_with_namespace"].split("/")[-1] }}</td>
-    <td><a class="mr-title" href="{{ m["web_url"] }}">{{ m["title"] or ("!" ~ m["iid"]) }}</a></td>
+    {% set href = m["web_url"] | safe_url %}
+    <td>{% if href %}<a class="mr-title" href="{{ href }}">{{ m["title"] or ("!" ~ m["iid"]) }}</a>{% else %}<span class="mr-title">{{ m["title"] or ("!" ~ m["iid"]) }}</span>{% endif %}</td>
     <td>{{ m["author_name"] or m["author_username"] or "—" }}</td>
     <td class="small">{{ m["source_branch"] or "—" }}</td>
     <td>

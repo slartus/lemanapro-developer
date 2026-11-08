@@ -46,6 +46,8 @@ def _build_env(home: str, tmpdir: Path) -> dict[str, str]:
         "PATH": "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin",
         "HOME": home,
         "TMPDIR": str(tmpdir),
+        "OPENCODE_DISABLE_PROJECT_CONFIG": "1",
+        "OPENCODE_DISABLE_CLAUDE_CODE": "1",
     }
 
 

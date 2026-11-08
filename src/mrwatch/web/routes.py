@@ -3,9 +3,11 @@ from __future__ import annotations
 import logging
 import os
 from pathlib import Path
+from urllib.parse import urlsplit
 
 import yaml
 
+from jinja2 import pass_context
 from fastapi import APIRouter, Request
 from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
@@ -20,6 +22,26 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 templates = Jinja2Templates(directory=str(Path(__file__).parent / "templates"))
+
+
+def safe_url(value: str | None, gitlab_url: str) -> str:
+    if not value:
+        return ""
+    parsed = urlsplit(value)
+    allowed = urlsplit(gitlab_url)
+    if parsed.scheme not in ("http", "https") or not parsed.hostname:
+        return ""
+    if parsed.hostname.lower() != (allowed.hostname or "").lower():
+        return ""
+    return value
+
+
+@pass_context
+def _safe_url_filter(context, value: str | None) -> str:
+    return safe_url(value, context["request"].app.state.ctx.config.gitlab.url)
+
+
+templates.env.filters["safe_url"] = _safe_url_filter
 
 
 def _ctx(request: Request):
@@ -65,25 +87,13 @@ async def force_check(request: Request):
     ctx = _ctx(request)
     try:
         config = load_config(default_config_path())
-        mapping = sync_projects(
-            ctx.conn,
-            [
-                (p.gitlab_project_id, p.slug, p.agent, p.re_review_on_push, True)
-                for p in config.projects
-            ],
-        )
+        _warn_if_workers_changed(request, config)
+        _apply_config(request, config)
     except Exception:
         logger.exception("force-check: config reload failed")
         return PlainTextResponse(
             "config error (подробности в logs/app.log)", status_code=400
         )
-    _warn_if_workers_changed(request, config)
-    ctx.project_ids = mapping
-    ctx.config = config
-    poller = getattr(request.app.state, "poller", None)
-    if poller is not None:
-        poller.reload(config, mapping)
-        poller.wake()
     return RedirectResponse("/", status_code=303)
 
 
@@ -251,7 +261,7 @@ async def settings_page(request: Request):
 
 
 @router.get("/project-agents")
-async def project_agents(request: Request, slug: str = ""):
+async def project_agents(request: Request):
     return JSONResponse({"agents": _list_agents()})
 
 

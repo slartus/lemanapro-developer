@@ -32,9 +32,11 @@ SANITIZE_NAMES = (
     "opencode.jsonc",
     "AGENTS.md",
     "CLAUDE.md",
+    "CONTEXT.md",
     ".claude",
     ".agents",
 )
+NESTED_CONTEXT_NAMES = frozenset({"AGENTS.md", "CLAUDE.md", "CONTEXT.md"})
 _GLPAT_RE = re.compile(r"glpat-[A-Za-z0-9_\-]+")
 _BEARER_RE = re.compile(r"Bearer\s+\S+", re.IGNORECASE)
 
@@ -215,6 +217,10 @@ async def _pin_fetch_head(
         raise HeadMismatchError(expected_sha, fetched) from exc
 
 
+def _raise_walk_error(exc: OSError) -> None:
+    raise exc
+
+
 def sanitize_clone(workspace: Path) -> None:
     for name in SANITIZE_NAMES:
         path = workspace / name
@@ -224,7 +230,22 @@ def sanitize_clone(workspace: Path) -> None:
             shutil.rmtree(path)
         elif os.path.lexists(path):
             path.unlink()
+    for root, dirs, files in os.walk(workspace, followlinks=False, onerror=_raise_walk_error):
+        if ".git" in dirs:
+            dirs.remove(".git")
+        for name in [n for n in dirs + files if n in NESTED_CONTEXT_NAMES]:
+            path = Path(root) / name
+            if path.is_dir() and not path.is_symlink():
+                shutil.rmtree(path)
+            else:
+                path.unlink()
+            if name in dirs:
+                dirs.remove(name)
     leftovers = [name for name in SANITIZE_NAMES if os.path.lexists(workspace / name)]
+    for root, dirs, files in os.walk(workspace, followlinks=False, onerror=_raise_walk_error):
+        if ".git" in dirs:
+            dirs.remove(".git")
+        leftovers.extend(str(Path(root, n)) for n in dirs + files if n in NESTED_CONTEXT_NAMES)
     if leftovers:
         raise GitOpsError(f"sanitize left forbidden paths: {', '.join(leftovers)}")
 

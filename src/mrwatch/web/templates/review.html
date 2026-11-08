@@ -42,7 +42,7 @@
   <dt>Попыток</dt><dd>{{ review["attempt"] }}</dd>
   <dt>Создано</dt><dd><time data-ts="{{ review["created_at"] }}">{{ review["created_at"] }}</time></dd>
   <dt>Завершено</dt><dd>{% if review["finished_at"] %}<time data-ts="{{ review["finished_at"] }}">{{ review["finished_at"] }}</time>{% else %}—{% endif %}</dd>
-  <dt>MR</dt><dd><a href="{{ mr["web_url"] }}">{{ mr["web_url"] }}</a></dd>
+  <dt>MR</dt><dd>{% set href = mr["web_url"] | safe_url %}{% if href %}<a href="{{ href }}">{{ href }}</a>{% else %}—{% endif %}</dd>
   {% if review["session_id"] %}<dt>Сессия opencode</dt><dd class="muted small">{{ review["session_id"] }}</dd>{% endif %}
 </dl>
 </div>

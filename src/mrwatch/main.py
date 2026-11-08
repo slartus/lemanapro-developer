@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import sqlite3
+import time
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from logging.handlers import RotatingFileHandler
@@ -90,9 +91,20 @@ def setup_logging(logs_dir: Path) -> None:
     root.addHandler(console)
 
 
+def _backup_due(backup_dir: Path, interval_sec: float, now: float | None = None) -> bool:
+    mtimes = [p.stat().st_mtime for p in backup_dir.glob("mrwatch-*.db") if p.is_file()]
+    if not mtimes:
+        return True
+    return (time.time() if now is None else now) - max(mtimes) >= interval_sec
+
+
 async def _backup_loop(ctx: AppContext) -> None:
+    backup_dir = ctx.paths.db.parent / "backups"
+    first = True
     while True:
-        await asyncio.sleep(BACKUP_INTERVAL_SEC)
+        if not (first and await asyncio.to_thread(_backup_due, backup_dir, BACKUP_INTERVAL_SEC)):
+            await asyncio.sleep(BACKUP_INTERVAL_SEC)
+        first = False
         try:
             dest = await asyncio.to_thread(backup, ctx.paths.db, ctx.paths.db.parent / "backups")
             _prune_backups(dest.parent, BACKUP_KEEP)

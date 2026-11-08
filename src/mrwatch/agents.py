@@ -25,11 +25,14 @@ def _frontmatter(path: Path) -> dict:
     text = path.read_text(encoding="utf-8")
     if not text.startswith("---"):
         raise AgentError(f"agent {path.stem}: frontmatter not found")
-    parts = text.split("---", 2)
-    if len(parts) < 3:
+    lines = text.splitlines()
+    if lines[0].rstrip() != "---":
+        raise AgentError(f"agent {path.stem}: frontmatter not found")
+    end = next((i for i, line in enumerate(lines[1:], 1) if line.rstrip() == "---"), None)
+    if end is None:
         raise AgentError(f"agent {path.stem}: frontmatter not closed")
     try:
-        data = yaml.safe_load(parts[1])
+        data = yaml.safe_load("\n".join(lines[1:end]))
     except yaml.YAMLError as exc:
         raise AgentError(f"agent {path.stem}: invalid frontmatter: {exc}") from exc
     if not isinstance(data, dict):
@@ -39,16 +42,18 @@ def _frontmatter(path: Path) -> dict:
 
 def _denied(frontmatter: dict, tool: str) -> bool:
     tools = frontmatter.get("tools")
-    if isinstance(tools, dict) and tools.get(tool) is False:
-        return True
+    tool_disabled = isinstance(tools, dict) and tools.get(tool) is False
     permission = frontmatter.get("permission")
+    permission_denied = False
     if isinstance(permission, dict):
         value = permission.get(tool)
         if value == "deny":
-            return True
-        if isinstance(value, dict) and value and all(v == "deny" for v in value.values()):
-            return True
-    return False
+            permission_denied = True
+        elif isinstance(value, dict) and value and all(v == "deny" for v in value.values()):
+            permission_denied = True
+        elif value is not None:
+            return False
+    return tool_disabled or permission_denied
 
 
 def resolve_agent_file(name: str, agents_dirs: tuple[Path, ...] | None = None) -> Path:

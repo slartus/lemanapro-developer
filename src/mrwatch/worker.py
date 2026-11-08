@@ -18,11 +18,14 @@ from mrwatch.db import (
 )
 from mrwatch.git_ops import (
     GitEnv,
+    GitOpsError,
     HeadMismatchError,
     clone_for_review,
     diff_for_review,
+    is_safe_branch,
     make_git_env,
     remove_workspace,
+    run_git,
 )
 from mrwatch.gitlab_client import GitLabClient
 from mrwatch.opencode_runner import (
@@ -147,6 +150,31 @@ class Worker:
                 error=f"MR head moved to {exc.actual[:12]}; a review for it already exists",
             )
 
+    async def _resolve_base_sha(
+        self, workspace: Path, detail: dict, diff_refs: dict, head_sha: str
+    ) -> str | None:
+        if detail.get("sha") == head_sha:
+            return diff_refs.get("base_sha")
+        target = detail.get("target_branch")
+        if not target or not is_safe_branch(target):
+            return None
+        env = GitEnv(
+            pat_command="",
+            base_env={
+                "PATH": "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin",
+                "HOME": str(Path.home()),
+            },
+        )
+        try:
+            out = await run_git(
+                ["git", "merge-base", f"refs/remotes/origin/{target}", head_sha],
+                workspace, env,
+            )
+        except GitOpsError as exc:
+            logger.warning("merge-base failed in %s: %s", workspace.name, exc)
+            return None
+        return out.strip() or None
+
     async def _process_review(self, review: sqlite3.Row) -> None:
         review_id = review["id"]
         config = self._config
@@ -203,9 +231,10 @@ class Worker:
         diff_refs = detail.get("diff_refs") or {}
         mark_reviewing(self._conn, review_id)
         try:
-            diff = await diff_for_review(
-                workspace, diff_refs.get("base_sha"), review["head_sha"]
+            base_sha = await self._resolve_base_sha(
+                workspace, detail, diff_refs, review["head_sha"]
             )
+            diff = await diff_for_review(workspace, base_sha, review["head_sha"])
             prompt = build_review_prompt(
                 title=mr["title"] or "",
                 author=mr["author_username"],

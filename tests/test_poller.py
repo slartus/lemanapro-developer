@@ -243,6 +243,7 @@ async def test_cursor_written_with_overlap(conn):
 async def test_cursor_kept_when_nothing_new(conn):
     api = StubApi()
     poller = _make_poller(conn, api)
+    poll_state_set(conn, SCAN_DONE_KEY.format(10), "2026-01-01T00:00:00+00:00")
     poll_state_set(conn, CURSOR_KEY, "2026-01-01T00:00:00+00:00")
 
     await poller.tick()

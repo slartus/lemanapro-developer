@@ -91,17 +91,44 @@ def init_schema(conn: sqlite3.Connection) -> None:
         CREATE INDEX IF NOT EXISTS idx_mr_project_iid ON mr(project_id, iid);
         """
     )
+        conn.execute("PRAGMA user_version = 1")
+        conn.commit()
     if version < 2:
-        for column in SEVERITY_COLUMNS:
-            conn.execute(
-                f"ALTER TABLE review ADD COLUMN {column} INTEGER NOT NULL DEFAULT 0"
-            )
+        _run_migration(conn, 2, _migrate_to_v2)
     if version < 3:
-        conn.execute("ALTER TABLE mr ADD COLUMN author_name TEXT")
+        _run_migration(conn, 3, _migrate_to_v3)
     if version < 4:
-        _migrate_to_v4(conn)
+        _run_migration(conn, 4, _migrate_to_v4)
     conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
     conn.commit()
+
+
+def _run_migration(conn: sqlite3.Connection, target: int, migrate) -> None:
+    if conn.in_transaction:
+        conn.commit()
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        migrate(conn)
+        conn.execute(f"PRAGMA user_version = {target}")
+    except BaseException:
+        conn.rollback()
+        raise
+    conn.commit()
+
+
+def _add_column(conn: sqlite3.Connection, table: str, column: str, ddl: str) -> None:
+    existing = {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
+    if column not in existing:
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}")
+
+
+def _migrate_to_v2(conn: sqlite3.Connection) -> None:
+    for column in SEVERITY_COLUMNS:
+        _add_column(conn, "review", column, "INTEGER NOT NULL DEFAULT 0")
+
+
+def _migrate_to_v3(conn: sqlite3.Connection) -> None:
+    _add_column(conn, "mr", "author_name", "TEXT")
 
 
 SCAN_DONE_KEY = "mr_scan_done:{}"
@@ -110,7 +137,7 @@ LEGACY_CURSOR_KEY = "mr_cursor"
 
 
 def _migrate_to_v4(conn: sqlite3.Connection) -> None:
-    conn.execute("ALTER TABLE review ADD COLUMN not_before TEXT")
+    _add_column(conn, "review", "not_before", "TEXT")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_review_mr ON review(mr_id)")
     conn.execute(
         "CREATE TABLE IF NOT EXISTS todo_seen "
@@ -292,6 +319,13 @@ def create_review(
     if cursor.rowcount == 0:
         return None
     return int(cursor.lastrowid)
+
+
+def review_exists_for_head(conn: sqlite3.Connection, mr_id: int, head_sha: str) -> bool:
+    row = conn.execute(
+        "SELECT 1 FROM review WHERE mr_id = ? AND head_sha = ? LIMIT 1", (mr_id, head_sha)
+    ).fetchone()
+    return row is not None
 
 
 def claim_next_review(conn: sqlite3.Connection) -> sqlite3.Row | None:

@@ -53,7 +53,6 @@
         <option value="{{ p.agent }}" selected>{{ p.agent }}</option>
         {% endif %}
       </select>
-      <button type="button" class="pull-agents" title="подтянуть агенты из репо проекта" onclick="pullAgents(this)">⤵</button>
     </div></td>
     <td class="center"><input type="checkbox" class="wpush" aria-label="Re-review на push" {% if p.re_review_on_push %}checked{% endif %}></td>
     <td><button type="button" class="danger" onclick="delRow(this)">удалить</button></td>
@@ -95,13 +94,6 @@ function makeOption(value) {
   return opt;
 }
 
-function addOption(select, value) {
-  for (const opt of select.options) {
-    if (opt.value === value) return;
-  }
-  select.appendChild(makeOption(value));
-}
-
 function el(tag, props, children) {
   const node = document.createElement(tag);
   Object.assign(node, props || {});
@@ -114,50 +106,16 @@ function buildRow() {
   slug.setAttribute("aria-label", "Проект");
   const select = el("select", {className: "wagent"}, AGENTS.map(makeOption));
   select.setAttribute("aria-label", "Агент");
-  const pull = el("button", {type: "button", className: "pull-agents", title: "подтянуть агенты из репо проекта", textContent: "⤵"});
-  pull.addEventListener("click", function () { pullAgents(pull); });
   const push = el("input", {type: "checkbox", className: "wpush"});
   push.setAttribute("aria-label", "Re-review на push");
   const del = el("button", {type: "button", className: "danger", textContent: "удалить"});
   del.addEventListener("click", function () { delRow(del); });
   const tr = document.createElement("tr");
   tr.appendChild(el("td", {}, [slug]));
-  tr.appendChild(el("td", {}, [el("div", {className: "agent-cell"}, [select, pull])]));
+  tr.appendChild(el("td", {}, [el("div", {className: "agent-cell"}, [select])]));
   tr.appendChild(el("td", {className: "center"}, [push]));
   tr.appendChild(el("td", {}, [del]));
   return tr;
-}
-
-async function pullAgents(btn) {
-  const tr = btn.closest("tr");
-  const slugInput = tr.querySelector(".wslug");
-  const slug = slugInput.value.trim();
-  if (!slug) {
-    slugInput.classList.add("invalid");
-    slugInput.focus();
-    setStatus("Сначала укажите ссылку на проект", "err");
-    return;
-  }
-  btn.disabled = true;
-  setStatus("Загружаю агентов из репо…");
-  try {
-    const resp = await fetch("/project-agents?slug=" + encodeURIComponent(slug));
-    const body = await resp.json();
-    const agents = body.agents || [];
-    document.querySelectorAll(".wagent").forEach(function (select) {
-      agents.forEach(function (a) { addOption(select, a); });
-    });
-    if (body.error) setStatus(body.error, "err");
-    else if (!agents.length) setStatus("В репо проекта нет агентов", "err");
-    else {
-      btn.textContent = "⤵ " + agents.length;
-      setStatus("Найдено агентов: " + agents.length, "ok");
-    }
-  } catch (err) {
-    setStatus("Ошибка загрузки агентов: " + err, "err");
-  } finally {
-    btn.disabled = false;
-  }
 }
 
 function addRow() {
