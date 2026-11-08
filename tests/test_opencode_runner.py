@@ -15,7 +15,6 @@ from mrwatch.opencode_runner import (
     MAX_VERDICT_INPUT_CHARS,
     parse_verdict,
     run_review,
-    collect_project_instructions,
 )
 
 
@@ -173,42 +172,6 @@ def test_output_truncated_by_length():
     assert output_truncated_by_length(raw) is True
     assert output_truncated_by_length('{"part":{"type":"step-finish","reason":"stop"}}') is False
     assert output_truncated_by_length("") is False
-
-
-def test_collect_project_instructions(tmp_path):
-    (tmp_path / "AGENTS.md").write_text("общие правила", encoding="utf-8")
-    rules = tmp_path / ".opencode" / "rules"
-    rules.mkdir(parents=True)
-    (rules / "10-style.md").write_text("стиль", encoding="utf-8")
-    (rules / "00-arch.md").write_text("архитектура", encoding="utf-8")
-    (rules / "notes.txt").write_text("не markdown", encoding="utf-8")
-
-    result = collect_project_instructions(tmp_path)
-
-    assert "--- AGENTS.md ---" in result
-    assert "--- .opencode/rules/00-arch.md ---" in result
-    assert "--- .opencode/rules/10-style.md ---" in result
-    assert result.index("00-arch") < result.index("10-style")
-    assert "не markdown" not in result
-
-
-def test_collect_project_instructions_caps_size(tmp_path):
-    (tmp_path / "AGENTS.md").write_text("x" * 20_000, encoding="utf-8")
-    rules = tmp_path / ".opencode" / "rules"
-    rules.mkdir(parents=True)
-    for i in range(5):
-        (rules / f"{i:02d}-r.md").write_text("y" * 20_000, encoding="utf-8")
-
-    result = collect_project_instructions(tmp_path)
-
-    assert len(result) < 50_000
-    assert "обрезаны по лимиту" in result
-
-
-def test_build_review_prompt_includes_project_rules():
-    prompt = build_review_prompt("t", "a", None, None, project_rules="ПРАВИЛО")
-    assert "ПРАВИЛА ПРОЕКТА" in prompt
-    assert "ПРАВИЛО" in prompt
 
 
 @pytest.mark.parametrize(

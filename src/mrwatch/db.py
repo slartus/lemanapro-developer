@@ -27,7 +27,6 @@ class MrUpsertResult:
     mr_id: int
     inserted: bool
     head_sha_changed: bool
-    state_changed: bool
 
 
 def connect(db_path: Path) -> sqlite3.Connection:
@@ -374,10 +373,8 @@ def upsert_mr(
             mr_id=int(cursor.lastrowid),
             inserted=True,
             head_sha_changed=True,
-            state_changed=True,
         )
     head_sha_changed = head_sha is not None and row["head_sha"] != head_sha
-    state_changed = state is not None and row["state"] != state
     conn.execute(
         """
         UPDATE mr
@@ -409,7 +406,6 @@ def upsert_mr(
         mr_id=int(row["id"]),
         inserted=False,
         head_sha_changed=head_sha_changed,
-        state_changed=state_changed,
     )
 
 
@@ -478,7 +474,6 @@ def finish_review(
     session_id: str | None = None,
     exit_code: int | None = None,
     error: str | None = None,
-    finished: bool = True,
     counts: tuple[int, int, int, int] = (0, 0, 0, 0),
     verdict: str | None = None,
 ) -> None:
@@ -498,7 +493,7 @@ def finish_review(
             session_id,
             exit_code,
             error,
-            utcnow_iso() if finished else None,
+            utcnow_iso(),
             *counts,
             verdict,
             review_id,
@@ -560,25 +555,6 @@ def requeue_review(conn: sqlite3.Connection, review_id: int, delay_sec: float = 
         (not_before, review_id),
     )
     conn.commit()
-
-
-def request_review(
-    conn: sqlite3.Connection,
-    mr_id: int,
-    trigger: str,
-    head_sha: str,
-    agent: str,
-) -> int | None:
-    review_id = create_review(conn, mr_id, trigger, head_sha, agent)
-    if review_id is not None:
-        return review_id
-    row = conn.execute(
-        'SELECT id, status FROM review WHERE mr_id = ? AND head_sha = ? AND "trigger" = ?',
-        (mr_id, head_sha, trigger),
-    ).fetchone()
-    if row is not None and row["status"] in ("done", "error") and retry_review(conn, row["id"]):
-        return int(row["id"])
-    return None
 
 
 def requeue_incomplete(conn: sqlite3.Connection) -> int:

@@ -134,18 +134,6 @@ class GitLabClient:
         logger.warning("pagination capped at %s pages for %s", _MAX_PAGES, url)
         return items
 
-    async def get_merge_requests(self, updated_after: str | None) -> list[dict[str, Any]]:
-        params: dict[str, Any] = {
-            "scope": "all",
-            "order_by": "updated_at",
-            "sort": "asc",
-            "per_page": 100,
-            "pagination": "keyset",
-        }
-        if updated_after is not None:
-            params["updated_after"] = updated_after
-        return await self._paginated("/api/v4/merge_requests", params)
-
     async def get_project_merge_requests(
         self,
         project_id: int,
@@ -170,20 +158,6 @@ class GitLabClient:
         encoded = quote(path, safe="")
         response = await self._get(f"/api/v4/projects/{encoded}")
         return response.json()
-
-    async def get_project_tree(self, project_id: int, path: str, ref: str) -> list[dict[str, Any]]:
-        items: list[dict[str, Any]] = []
-        url: str = f"/api/v4/projects/{project_id}/repository/tree"
-        params: dict[str, Any] = {"path": path, "ref": ref, "per_page": 100}
-        for _ in range(_MAX_PAGES):
-            response = await self._get(url, params=params)
-            items.extend(response.json())
-            next_url = self._next_url(response)
-            if not next_url:
-                return items
-            url, params = next_url, None
-        logger.warning("tree pagination capped at %s pages", _MAX_PAGES)
-        return items
 
     async def get_project_mr(self, project_id: int, iid: int) -> dict[str, Any]:
         response = await self._get(f"/api/v4/projects/{project_id}/merge_requests/{iid}")

@@ -10,7 +10,13 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
-from mrwatch.procutil import OutputLimitExceeded, communicate_capped, kill_group as _kill_group, kill_on_exit
+from mrwatch.procutil import (
+    OutputLimitExceeded,
+    communicate_capped,
+    kill_group as _kill_group,
+    kill_on_exit,
+    mask_secrets,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -40,8 +46,6 @@ NESTED_CONTEXT_NAMES = frozenset({"AGENTS.md", "CLAUDE.md", "CONTEXT.md"})
 _ROOT_FORBIDDEN = frozenset(n.casefold() for n in SANITIZE_NAMES)
 _NESTED_FORBIDDEN = frozenset(n.casefold() for n in NESTED_CONTEXT_NAMES)
 BASE_REF = "refs/mrwatch/base"
-_GLPAT_RE = re.compile(r"glpat-[A-Za-z0-9_\-]+")
-_BEARER_RE = re.compile(r"Bearer\s+\S+", re.IGNORECASE)
 
 
 class GitOpsError(Exception):
@@ -88,10 +92,6 @@ def build_clone_args(repo_url: str, dest: Path, depth: int) -> list[str]:
 
 def is_safe_branch(name: str) -> bool:
     return bool(BRANCH_RE.fullmatch(name)) and ".." not in name and not name.endswith((".lock", "/", "."))
-
-
-def mask_secrets(text: str) -> str:
-    return _BEARER_RE.sub("Bearer ***", _GLPAT_RE.sub("glpat-***", text))
 
 
 async def run_git(

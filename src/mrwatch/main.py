@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI
 from fastapi.responses import JSONResponse, PlainTextResponse
 
 from mrwatch.config import Config, ResolvedPaths, default_config_path, get_pat, load_config, resolve_paths

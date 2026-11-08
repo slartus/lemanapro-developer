@@ -39,29 +39,6 @@ async def test_get_todos():
         await client.aclose()
 
 
-async def test_get_merge_requests_follows_link_header():
-    def handler(request: httpx.Request) -> httpx.Response:
-        if "page=2" not in str(request.url):
-            return httpx.Response(
-                200,
-                json=[{"iid": 1}],
-                headers={
-                    "Link": (
-                        f'<{BASE_URL}/api/v4/merge_requests?scope=all&per_page=100'
-                        '&pagination=keyset&page=2>; rel="next"'
-                    )
-                },
-            )
-        return httpx.Response(200, json=[{"iid": 2}])
-
-    client = _client(handler)
-    try:
-        mrs = await client.get_merge_requests("2026-01-01T00:00:00Z")
-        assert [mr["iid"] for mr in mrs] == [1, 2]
-    finally:
-        await client.aclose()
-
-
 async def test_retry_on_429():
     calls = {"n": 0}
 

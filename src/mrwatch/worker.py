@@ -33,7 +33,6 @@ from mrwatch.opencode_runner import (
     OpencodeError,
     RunnerEnv,
     build_review_prompt,
-    collect_project_instructions,
     parse_severity_counts,
     parse_verdict,
     run_review,
@@ -76,10 +75,6 @@ class Worker:
         if self._config_provider is not None:
             return self._config_provider()
         return self._static_config
-
-    @property
-    def _git_env(self) -> GitEnv:
-        return make_git_env(self._config.gitlab.pat_command, self._paths.workspaces.parent / "tmp")
 
     async def run(self) -> None:
         while True:

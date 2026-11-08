@@ -17,7 +17,6 @@ from mrwatch.db import (
     poll_state_get,
     poll_state_set,
     requeue_incomplete,
-    request_review,
     retry_review,
     sync_projects,
     upsert_mr,
@@ -109,17 +108,14 @@ def test_upsert_mr_insert_then_update(conn):
     result = _upsert_mr(conn, project_id)
     assert result.inserted is True
     assert result.head_sha_changed is True
-    assert result.state_changed is True
 
     result = _upsert_mr(conn, project_id, head_sha="a" * 40)
     assert result.inserted is False
     assert result.head_sha_changed is False
-    assert result.state_changed is False
 
     result = _upsert_mr(conn, project_id, head_sha="b" * 40, state="merged")
     assert result.inserted is False
     assert result.head_sha_changed is True
-    assert result.state_changed is True
 
     row = conn.execute("SELECT * FROM mr WHERE id = ?", (result.mr_id,)).fetchone()
     assert row["head_sha"] == "b" * 40
@@ -217,21 +213,6 @@ def test_retry_review_from_error_and_done(conn):
     assert retry_review(conn, review_id) is False
 
 
-def test_request_review_requeues_done(conn):
-    project_id = _sync_projects(conn)[10]
-    mr_id = _upsert_mr(conn, project_id).mr_id
-    review_id = create_review(conn, mr_id, "manual", "a" * 40, "agent-a")
-    finish_review(conn, review_id, "done", review_md="old review", session_id="s1")
-
-    assert request_review(conn, mr_id, "manual", "a" * 40, "agent-a") == review_id
-    row = get_review(conn, review_id)
-    assert row["status"] == "queued"
-    assert row["review_md"] is None
-
-    assert request_review(conn, mr_id, "push", "b" * 40, "agent-a") is not None
-    assert request_review(conn, mr_id, "manual", "c" * 40, "agent-a") is not None
-
-
 def test_upsert_mr_update_keeps_old_when_none(conn):
     project_id = _sync_projects(conn)[10]
     mr_id = _upsert_mr(conn, project_id).mr_id
@@ -250,7 +231,6 @@ def test_upsert_mr_update_keeps_old_when_none(conn):
     )
     assert result.inserted is False
     assert result.head_sha_changed is False
-    assert result.state_changed is False
 
     row = conn.execute("SELECT * FROM mr WHERE id = ?", (mr_id,)).fetchone()
     assert row["head_sha"] == "a" * 40
