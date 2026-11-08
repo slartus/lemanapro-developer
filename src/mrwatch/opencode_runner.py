@@ -11,7 +11,7 @@ from mrwatch.review_findings import (
     FENCE_OPEN,
     MAX_PARSE_INPUT_CHARS,
     QUOTE_LINE,
-    _is_fence_close,
+    is_fence_close,
     iter_findings,
     split_review_lines,
 )
@@ -275,7 +275,7 @@ def parse_verdict(review_md: str | None) -> str | None:
     line_hit: tuple[str | None] | None = None
     for raw in split_review_lines(review_md):
         if fence is not None:
-            if _is_fence_close(raw, fence):
+            if is_fence_close(raw, fence):
                 fence = None
             continue
         opening = FENCE_OPEN.match(raw)

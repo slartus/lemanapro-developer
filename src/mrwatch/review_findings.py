@@ -64,7 +64,7 @@ def iter_findings(review_md: str | None) -> Iterator[Finding]:
     index = 0
     for line_no, raw in enumerate(split_review_lines(review_md)):
         if fence is not None:
-            if _is_fence_close(raw, fence):
+            if is_fence_close(raw, fence):
                 fence = None
             continue
         opening = FENCE_OPEN.match(raw)
@@ -370,7 +370,7 @@ LANG_ALLOWED = re.compile(r"[A-Za-z0-9_+#.-]{1,20}")
 BACKTICK_RUN = re.compile(r"`+")
 
 
-def _is_fence_close(raw: str, fence: str) -> bool:
+def is_fence_close(raw: str, fence: str) -> bool:
     stripped = raw.strip()
     return bool(stripped) and stripped[0] == fence[0] and len(stripped) >= len(fence) and not stripped.strip(fence[0])
 
@@ -437,7 +437,7 @@ def _layout_rows(review_md: str) -> tuple[list[dict], dict[int, dict]]:
     prefix_width = 0
     for line_no, raw in enumerate(split_review_lines(review_md)):
         if fence is not None:
-            if _is_fence_close(raw, fence):
+            if is_fence_close(raw, fence):
                 fence = None
             else:
                 block["lines"].append(_dedent(raw, prefix_width))
