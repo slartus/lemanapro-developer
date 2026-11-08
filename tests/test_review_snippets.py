@@ -427,3 +427,90 @@ async def test_review_page_inline_snippet_order_and_escape(ctx):
     assert text.index("&lt;script&gt;x") < text.index('class="cl add">+&lt;script') < text.index("fix: do")
     assert text.index("orphan-code") > text.index("Код к находкам")
     assert text.count("Код к находкам") == 1
+
+
+def _kinds(rows):
+    return [r["kind"] for r in rows]
+
+
+def test_layout_fence_with_lang_and_without():
+    rows, _ = rf.layout_review("a\n```js\nx = 1\n\ny\n```\nb\n```\nplain\n```", [])
+    assert _kinds(rows) == ["line", "code", "line", "code"]
+    assert (rows[1]["lang"], rows[1]["lines"]) == ("js", ["x = 1", "", "y"])
+    assert (rows[3]["lang"], rows[3]["lines"]) == ("", ["plain"])
+
+
+def test_layout_tilde_and_long_fence():
+    rows, _ = rf.layout_review("~~~yaml\na: 1\n```\n~~~\n````kotlin\n```\nx\n```\n````\nend", [])
+    assert _kinds(rows) == ["code", "code", "line"]
+    assert rows[0]["lines"] == ["a: 1", "```"]
+    assert rows[1]["lines"] == ["```", "x", "```"]
+    assert rows[1]["lang"] == "kotlin"
+
+
+def test_layout_indented_fence_strips_prefix():
+    rows, _ = rf.layout_review("- item\n  ```js\n  if (a) {\n    b();\n  }\n  ```\n- next", [])
+    assert _kinds(rows) == ["line", "code", "line"]
+    assert rows[1]["lines"] == ["if (a) {", "  b();", "}"]
+    assert rows[1]["indent"] == 2
+
+
+def test_layout_unclosed_fence_runs_to_end():
+    rows, _ = rf.layout_review("a\n```py\nx\ny", [])
+    assert _kinds(rows) == ["line", "code"]
+    assert rows[1]["lines"] == ["x", "y"]
+
+
+def test_layout_forged_lang_dropped():
+    rows, _ = rf.layout_review('```"><script>alert(1)</script>\nx\n```\n```' + "a" * 21 + "\ny\n```", [])
+    assert [r["lang"] for r in rows] == ["", ""]
+
+
+def test_layout_finding_inside_fence_not_highlighted():
+    rows, _ = rf.layout_review("```\n- [MAJOR] a.py:1 — x\n```", [])
+    assert rows[0]["css"] == "" and rows[0]["lines"] == ["- [MAJOR] a.py:1 — x"]
+
+
+def test_layout_snippet_stays_with_finding_before_fix_block():
+    md = "intro\n```\nskip\n```\n- [MAJOR] a.py:1 — x\n```js\nfix\n```"
+    rows, orphans = rf.layout_review(md, [_sn(0, "MAJOR", "a.py", 4)])
+    assert orphans == []
+    assert _kinds(rows) == ["line", "code", "line", "code"]
+    assert len(rows[2]["snippets"]) == 1 and rows[3]["snippets"] == []
+
+
+def test_inline_code_segments():
+    assert rf.split_inline_code("a `x` b") == [("a ", False), ("x", True), (" b", False)]
+    assert rf.split_inline_code("a ``x ` y`` b") == [("a ", False), ("x ` y", True), (" b", False)]
+    assert rf.split_inline_code("a `x b") == [("a `x b", False)]
+    assert rf.split_inline_code("``a` b") == [("``a` b", False)]
+    assert rf.split_inline_code("") == [("", False)]
+    assert rf.split_inline_code("`` ``") == [("`` ``", False)]
+
+
+async def test_review_page_renders_code_blocks_and_escapes(ctx):
+    ctx_obj, review_id = ctx
+    md = (
+        "- [MAJOR] a.py:1 — use `<script>x</script>` here\n"
+        "  ```\"><script>bad</script>\n  <b>raw</b>\n  ```\n"
+        "```js\nlet a = '<img src=x>'\n```\ntail `open"
+    )
+    finish_review(ctx_obj.conn, review_id, "done", review_md=md)
+    async with _client(ctx_obj) as client:
+        text = (await client.get(f"/reviews/{review_id}")).text
+    assert "<script>x</script>" not in text and "<script>bad" not in text
+    assert "<b>raw</b>" not in text and "<img src=x>" not in text
+    assert "<code>&lt;script&gt;x&lt;/script&gt;</code>" in text
+    assert '<span class="code-lang">js</span>' in text
+    assert text.count('<pre class="code-block">') == 2
+    assert "tail `open" in text
+    assert "```" not in text
+
+
+async def test_review_page_without_fence_unchanged(ctx):
+    ctx_obj, review_id = ctx
+    finish_review(ctx_obj.conn, review_id, "done", review_md="- [NIT] a.py:1 — x\nplain <b>t</b>")
+    async with _client(ctx_obj) as client:
+        text = (await client.get(f"/reviews/{review_id}")).text
+    assert '<span class="ln nit">- [NIT] a.py:1 — x</span><span class="ln">plain &lt;b&gt;t&lt;/b&gt;</span>' in text
+    assert "code-block" not in text.split("</style>")[1]

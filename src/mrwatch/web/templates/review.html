@@ -16,6 +16,11 @@
   .review-text .ln.major { background: var(--major-bg); color: var(--major-fg); border-left-color: var(--major-fg); }
   .review-text .ln.minor { background: var(--warn-bg); color: var(--warn-fg); border-left-color: var(--warn-fg); }
   .review-text .ln.nit { background: var(--neutral-bg); color: var(--neutral-fg); border-left-color: var(--neutral-fg); }
+  .review-text code { font-family: var(--mono); background: var(--surface-2); border-radius: 4px; padding: 0.05em 0.35em; }
+  .review-text .code-wrap { position: relative; margin: 0.3rem 1rem; }
+  .review-text .code-lang { position: absolute; top: 0.15rem; right: 0.5rem; font-size: 0.7rem; color: var(--muted); user-select: none; pointer-events: none; }
+  .review-text pre.code-block { margin: 0; padding: 0.6rem 1rem; background: var(--surface-2); border: 1px solid var(--border); border-radius: 6px; font-family: var(--mono); font-size: 0.84rem; line-height: 1.5; white-space: pre; overflow-x: auto; }
+  .review-text pre.code-block code { background: none; padding: 0; border-radius: 0; font-family: inherit; }
   .snippets details { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); margin-bottom: 0.5rem; }
   .snippets summary { cursor: pointer; padding: 0.5rem 0.9rem; font-family: var(--mono); font-size: 0.85rem; overflow-wrap: anywhere; }
   .snippets summary .sev { margin-right: 0.5rem; }
@@ -88,7 +93,7 @@
 {% if review["review_md"] %}
 {% if rows | selectattr("snippets") | list %}<p class="small"><button type="button" onclick="toggleSnippets(this)">Развернуть весь код</button></p>
 {% endif %}
-<div class="review-text" id="rt">{% for row in rows %}<span class="ln{% if row["css"] %} {{ row["css"] }}{% endif %}">{{ row["text"] }}</span>{% for sn in row["snippets"] %}<div class="snippets inline">{{ snippet_block(sn) }}</div>{% endfor %}{% endfor %}</div>
+<div class="review-text" id="rt">{% for row in rows %}{% if row["kind"] == "code" %}<div class="code-wrap" style="margin-left: calc(1rem + {{ row["indent"] }}ch)">{% if row["lang"] %}<span class="code-lang">{{ row["lang"] }}</span>{% endif %}<pre class="code-block"><code>{{ row["lines"] | join("\n") }}</code></pre></div>{% else %}<span class="ln{% if row["css"] %} {{ row["css"] }}{% endif %}">{% for text, is_code in row["segments"] %}{% if is_code %}<code>{{ text }}</code>{% else %}{{ text }}{% endif %}{% endfor %}</span>{% endif %}{% for sn in row["snippets"] %}<div class="snippets inline">{{ snippet_block(sn) }}</div>{% endfor %}{% endfor %}</div>
 {% elif review["status"] in ("queued", "cloning", "reviewing") %}
 <p class="muted">ревью выполняется… страница обновится автоматически</p>
 {% else %}
