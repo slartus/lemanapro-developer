@@ -292,3 +292,58 @@ async def test_worker_extracts_snippets_before_workspace_removal(tmp_path, db, o
     assert stored[0]["source"] == "diff"
     assert "+print('hello')" in stored[0]["code"]
     assert not (tmp_path / "workspaces" / "10" / "1" / str(review_id)).exists()
+
+
+@pytest.mark.parametrize("path", [".GIT/config", ".Git/HEAD", "a/.gIt/x", "sub/../.git/config"])
+def test_normalize_path_rejects_git_case_variants(path):
+    assert normalize_path(path) is None
+
+
+def test_read_regular_file_rejects_forbidden_directory_identity(tmp_path):
+    (tmp_path / "sub").mkdir()
+    (tmp_path / "sub" / "f.txt").write_text("data")
+    info = os.stat(tmp_path / "sub")
+    root_fd = os.open(tmp_path, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        assert rf._read_regular_file(root_fd, ["sub", "f.txt"], (info.st_dev, info.st_ino)) is None
+        assert rf._read_regular_file(root_fd, ["sub", "f.txt"], (0, 0)) == b"data"
+    finally:
+        os.close(root_fd)
+
+
+def test_read_regular_file_default_guard_blocks_git_dir(tmp_path):
+    (tmp_path / ".git").mkdir()
+    (tmp_path / ".git" / "config").write_text("secret")
+    root_fd = os.open(tmp_path, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        assert rf._read_regular_file(root_fd, [".git", "config"]) is None
+    finally:
+        os.close(root_fd)
+
+
+def test_severity_counts_ignore_fenced_blocks():
+    from mrwatch.opencode_runner import parse_severity_counts
+
+    md = "- [MAJOR] a.py:1 — x\n\n```diff\n- [MAJOR] fix\n```\n"
+    assert parse_severity_counts(md) == (0, 1, 0, 0)
+
+
+def test_iter_findings_not_limited():
+    md = "\n".join(f"- [NIT] a.py:{i} — x" for i in range(1, rf.MAX_FINDINGS + 6))
+    assert len(list(rf.iter_findings(md))) == rf.MAX_FINDINGS + 5
+    assert len(parse_findings(md)) == rf.MAX_FINDINGS
+
+
+def test_snippet_line_numbers_match_git(tmp_path):
+    (tmp_path / "f.txt").write_bytes(b"one\x0ctwo\nthree\xc2\x85x\xe2\x80\xa8y\nfour\r\nfive\n")
+    snippets = extract_snippets("- [NIT] f.txt:3 — x", None, tmp_path)
+    assert snippets[0]["code"].split("\n")[2] == "four"
+    assert "\r" not in snippets[0]["code"]
+
+
+def test_parse_diff_hunks_filters_wanted():
+    full = parse_diff_hunks(DIFF)
+    some = next(iter(full))
+    filtered = parse_diff_hunks(DIFF, {some})
+    assert set(filtered) == {some}
+    assert len(filtered[some]) == len(full[some])

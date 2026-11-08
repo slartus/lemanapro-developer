@@ -4,7 +4,9 @@ import json
 import os
 import re
 import stat
+from collections.abc import Iterator
 from dataclasses import dataclass
+from itertools import islice
 
 MAX_FINDINGS = 30
 MAX_PARSE_INPUT_CHARS = 1_000_000
@@ -50,11 +52,11 @@ class _Hunk:
     lines: list[_DiffLine]
 
 
-def parse_findings(review_md: str | None) -> list[Finding]:
+def iter_findings(review_md: str | None) -> Iterator[Finding]:
     if not review_md or len(review_md) > MAX_PARSE_INPUT_CHARS:
-        return []
-    findings: list[Finding] = []
+        return
     fence: str | None = None
+    index = 0
     for raw in review_md.splitlines():
         if fence is not None:
             stripped = raw.strip()
@@ -71,10 +73,12 @@ def parse_findings(review_md: str | None) -> list[Finding]:
         if not match:
             continue
         path, start, end = _parse_reference(match.group(2))
-        findings.append(Finding(len(findings), match.group(1), path, start, end))
-        if len(findings) >= MAX_FINDINGS:
-            break
-    return findings
+        yield Finding(index, match.group(1), path, start, end)
+        index += 1
+
+
+def parse_findings(review_md: str | None) -> list[Finding]:
+    return list(islice(iter_findings(review_md), MAX_FINDINGS))
 
 
 def _parse_reference(rest: str) -> tuple[str | None, int | None, int | None]:
@@ -101,7 +105,7 @@ def normalize_path(path: str) -> str | None:
     if path.startswith("/"):
         return None
     parts = [p for p in path.split("/") if p not in ("", ".")]
-    if not parts or any(p == ".." or p == ".git" for p in parts):
+    if not parts or any(p == ".." or p.casefold() == ".git" for p in parts):
         return None
     return "/".join(parts)
 
@@ -117,7 +121,7 @@ def _path_candidates(path: str) -> list[str]:
     return candidates
 
 
-def parse_diff_hunks(diff: str | None) -> dict[str, list[_Hunk]]:
+def parse_diff_hunks(diff: str | None, wanted: set[str] | None = None) -> dict[str, list[_Hunk]]:
     files: dict[str, list[_Hunk]] = {}
     if not diff or len(diff) > MAX_DIFF_INPUT_CHARS:
         return files
@@ -145,7 +149,7 @@ def parse_diff_hunks(diff: str | None) -> dict[str, list[_Hunk]]:
             continue
         if raw.startswith("+++ "):
             target = raw[4:].split("\t")[0]
-            if target.startswith("b/"):
+            if target.startswith("b/") and (wanted is None or target[2:] in wanted):
                 current = files.setdefault(target[2:], [])
             else:
                 current = None
@@ -188,13 +192,30 @@ def _diff_snippet(hunks: list[_Hunk], start: int, end: int) -> str | None:
     return None
 
 
-def _read_regular_file(root_fd: int, parts: list[str]) -> bytes | None:
+def _git_identity(root_fd: int) -> tuple[int, int] | None:
+    try:
+        info = os.stat(".git", dir_fd=root_fd, follow_symlinks=False)
+    except OSError:
+        return None
+    return info.st_dev, info.st_ino
+
+
+def _read_regular_file(
+    root_fd: int,
+    parts: list[str],
+    forbidden: tuple[int, int] | None = None,
+) -> bytes | None:
     opened: list[int] = []
     current = root_fd
+    if forbidden is None:
+        forbidden = _git_identity(root_fd)
     try:
         for name in parts[:-1]:
             current = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_DIRECTORY, dir_fd=current)
             opened.append(current)
+            info = os.fstat(current)
+            if forbidden is not None and (info.st_dev, info.st_ino) == forbidden:
+                return None
         fd = os.open(parts[-1], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=current)
         opened.append(fd)
         info = os.fstat(fd)
@@ -223,7 +244,9 @@ def _file_snippet(root_fd: int, path: str, start: int, end: int) -> str | None:
     data = _read_regular_file(root_fd, path.split("/"))
     if data is None or b"\0" in data[:BINARY_SNIFF_BYTES]:
         return None
-    lines = data.decode("utf-8", errors="replace").splitlines()
+    lines = [raw.removesuffix(b"\r").decode("utf-8", errors="replace") for raw in data.split(b"\n")]
+    if lines and lines[-1] == "":
+        lines.pop()
     if start > len(lines):
         return None
     lo = max(1, start - FILE_CONTEXT_LINES)
@@ -235,7 +258,8 @@ def extract_snippets(review_md: str | None, diff: str | None, workspace) -> list
     findings = [f for f in parse_findings(review_md) if f.path and f.start is not None]
     if not findings:
         return []
-    hunks_by_file = parse_diff_hunks(diff)
+    wanted = {c for f in findings for c in _path_candidates(f.path)}
+    hunks_by_file = parse_diff_hunks(diff, wanted)
     root_fd: int | None = None
     try:
         root_fd = os.open(os.fspath(workspace), os.O_RDONLY | os.O_DIRECTORY)
