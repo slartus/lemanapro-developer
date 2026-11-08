@@ -412,3 +412,202 @@ async def test_readded_project_scan_marker_invalidated(conn):
     sync_projects(conn, [(10, "g/p", "agent-a", True, True)])
 
     assert poll_state_get(conn, SCAN_DONE_KEY.format(10)) is None
+
+
+def _roles(conn, iid):
+    row = conn.execute("SELECT my_roles FROM mr WHERE iid = ?", (iid,)).fetchone()
+    return row["my_roles"]
+
+
+@pytest.mark.parametrize(
+    "action,reviewers,expected",
+    [
+        ("mentioned", (), "mentioned"),
+        ("directly_addressed", (), "mentioned"),
+        ("review_requested", ("me",), "reviewer"),
+        ("review_requested", (), ""),
+    ],
+)
+async def test_roles_from_todo_action(conn, action, reviewers, expected):
+    api = StubApi()
+    api.details[(10, 5)] = _detail(10, 5, reviewers=reviewers)
+    api.todos = [{"id": 1, "target_type": "MergeRequest", "action_name": action,
+                  "target": {"project_id": 10, "iid": 5}}]
+    await _make_poller(conn, api).tick()
+    assert _roles(conn, 5) == expected
+
+
+async def test_roles_from_mr_data_and_removal(conn):
+    api = StubApi()
+    mr = _mr(10, 1, author="me", reviewers=["me"])
+    mr["assignees"] = [{"username": "me"}]
+    api.mrs = [mr]
+    poller = _make_poller(conn, api)
+    await poller.tick()
+    assert _roles(conn, 1) == "assignee,author,reviewer"
+
+    changed = _mr(10, 1, author="other", reviewers=[], updated_at="2026-01-02T12:00:00Z")
+    changed["assignees"] = []
+    api.mrs = [changed]
+    await poller.tick()
+    assert _roles(conn, 1) == ""
+
+
+async def test_mention_role_kept_while_open_and_union(conn):
+    api = StubApi()
+    api.details[(10, 5)] = _detail(10, 5)
+    api.todos = [{"id": 1, "target_type": "MergeRequest", "action_name": "mentioned",
+                  "target": {"project_id": 10, "iid": 5}}]
+    poller = _make_poller(conn, api)
+    await poller.tick()
+    api.details[(10, 5)] = _detail(10, 5, reviewers=["me"])
+    api.todos = [{"id": 2, "target_type": "MergeRequest", "action_name": "review_requested",
+                  "target": {"project_id": 10, "iid": 5}}]
+    await poller.tick()
+    assert _roles(conn, 5) == "mentioned,reviewer"
+
+
+async def test_assigned_todo_role_from_detail(conn):
+    api = StubApi()
+    detail = _detail(10, 5)
+    detail["assignees"] = [{"username": "me"}]
+    api.details[(10, 5)] = detail
+    api.todos = [{"id": 1, "target_type": "MergeRequest", "action_name": "assigned",
+                  "target": {"project_id": 10, "iid": 5}}]
+    await _make_poller(conn, api).tick()
+    assert _roles(conn, 5) == "assignee"
+
+
+@pytest.mark.parametrize(
+    "text,expected",
+    [
+        ("cc @me", True),
+        ("@me, please look", True),
+        ("@me2 look", False),
+        ("x@me.ru", False),
+        ("@me.ru", False),
+        ("@me-bot", False),
+        ("thanks @me.", True),
+        ("@me.\nnext", True),
+        ("@me. ok", True),
+        ("@me...", True),
+        ("@ME", True),
+        ("@me_x", False),
+        ("x@me", False),
+        (None, False),
+    ],
+)
+def test_has_mention(text, expected):
+    from mrwatch.poller import _has_mention
+
+    assert _has_mention(text, "me") is expected
+
+
+@pytest.mark.parametrize(
+    "text,username,expected",
+    [
+        ("cc @artem.slinkin", "artem.slinkin", True),
+        ("@username2", "username", False),
+        ("x@username.ru", "username", False),
+    ],
+)
+def test_has_mention_username(text, username, expected):
+    from mrwatch.poller import _has_mention
+
+    assert _has_mention(text, username) is expected
+
+
+async def test_missing_keys_keep_roles(conn):
+    api = StubApi()
+    mr = _mr(10, 1, author="other", reviewers=["me"])
+    mr["assignees"] = [{"username": "me"}]
+    api.mrs = [mr]
+    poller = _make_poller(conn, api)
+    await poller.tick()
+    assert _roles(conn, 1) == "assignee,reviewer"
+
+    partial = _mr(10, 1, author="other", updated_at="2026-01-02T12:00:00Z")
+    del partial["reviewers"]
+    api.mrs = [partial]
+    await poller.tick()
+    assert _roles(conn, 1) == "assignee,reviewer"
+
+    empty = _mr(10, 1, author="other", reviewers=[], updated_at="2026-01-03T12:00:00Z")
+    api.mrs = [empty]
+    await poller.tick()
+    assert _roles(conn, 1) == "assignee"
+
+
+async def test_mine_mention_uses_description_without_notes(conn):
+    api = StubApi()
+    api.mrs = [_mr(10, 1, author="me", description="cc @me")]
+    api.notes[(10, 1)] = []
+    await _make_poller(conn, api).tick()
+    assert "mentioned" in _roles(conn, 1).split(",")
+
+
+async def test_roles_backfill_once_without_reviews(conn):
+    api = StubApi()
+    mr = _mr(10, 1, author="other", reviewers=["me"])
+    api.mrs = [mr]
+    poller = _make_poller(conn, api)
+    await poller.tick()
+    conn.execute("UPDATE mr SET my_roles = ''")
+    conn.execute("DELETE FROM review")
+    conn.execute("DELETE FROM poll_state WHERE key LIKE 'roles_backfill_v5:%'")
+    conn.commit()
+    api.mrs = [_mr(10, 1, author="other", reviewers=["me"], updated_at="2026-01-01T00:00:00Z")]
+    api.project_calls.clear()
+
+    await poller.tick()
+    assert _roles(conn, 1) == "reviewer"
+    assert list_reviews(conn) == []
+    assert len([c for c in api.project_calls if c[2] == "opened" and c[1] is None]) == 1
+
+    api.project_calls.clear()
+    await poller.tick()
+    assert all(c[1] is not None for c in api.project_calls)
+
+
+def _reset_backfill(conn):
+    conn.execute("UPDATE mr SET my_roles = ''")
+    conn.execute("DELETE FROM poll_state WHERE key LIKE 'roles_backfill_v5:%'")
+    conn.commit()
+
+
+async def test_roles_backfill_sets_mentioned_from_description(conn):
+    api = StubApi()
+    api.mrs = [_mr(10, 1, author="other", description="cc @me")]
+    poller = _make_poller(conn, api)
+    await poller.tick()
+    _reset_backfill(conn)
+
+    await poller.tick()
+    assert "mentioned" in _roles(conn, 1)
+
+
+async def test_roles_backfill_api_error_retries_next_tick(conn):
+    api = StubApi()
+    api.mrs = [_mr(10, 1, author="other", description="cc @me")]
+    poller = _make_poller(conn, api)
+    await poller.tick()
+    _reset_backfill(conn)
+
+    original = api.get_project_merge_requests
+    fail = {"on": True}
+
+    async def flaky(project_id, updated_after=None, state="opened"):
+        if fail["on"] and updated_after is None:
+            raise GitlabApiError("down", status=500)
+        return await original(project_id, updated_after, state)
+
+    api.get_project_merge_requests = flaky
+    await poller.tick()
+    assert "mentioned" not in _roles(conn, 1)
+    assert conn.execute(
+        "SELECT 1 FROM poll_state WHERE key LIKE 'roles_backfill_v5:%'"
+    ).fetchone() is None
+
+    fail["on"] = False
+    await poller.tick()
+    assert "mentioned" in _roles(conn, 1)

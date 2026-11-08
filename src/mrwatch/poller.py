@@ -2,13 +2,16 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import sqlite3
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from mrwatch.config import Config
 from mrwatch.db import (
+    MENTIONED_ROLE,
     MR_CURSOR_KEY,
+    ROLES_BACKFILL_KEY,
     SCAN_DONE_KEY,
     MrUpsertResult,
     create_review,
@@ -18,6 +21,7 @@ from mrwatch.db import (
     poll_state_set,
     todo_mark_seen,
     todo_seen_ids,
+    update_mr_roles,
     upsert_mr,
 )
 from mrwatch.gitlab_client import GitLabClient
@@ -26,6 +30,7 @@ logger = logging.getLogger(__name__)
 
 CURSOR_OVERLAP_SEC = 120
 ERROR_PAUSE_SEC = 5.0
+MENTION_ACTIONS = ("mentioned", "directly_addressed")
 
 
 def get_project_row(conn: sqlite3.Connection, project_db_id: int) -> sqlite3.Row | None:
@@ -89,6 +94,7 @@ class Poller:
         created = 0
         sweep_error: Exception | None = None
         try:
+            await self._backfill_roles()
             created += await self._process_todos()
             scanned: set[int] = set()
             created += await self._full_scan(scanned)
@@ -111,7 +117,12 @@ class Poller:
         row = get_project_row(self._conn, project_db_id)
         return bool(row["re_review_on_push"]) if row is not None else False
 
-    def _upsert(self, project_db_id: int, mr: dict[str, Any]) -> MrUpsertResult | None:
+    def _upsert(
+        self,
+        project_db_id: int,
+        mr: dict[str, Any],
+        signal_roles: frozenset[str] = frozenset(),
+    ) -> MrUpsertResult | None:
         head_sha = mr.get("sha")
         if not head_sha:
             logger.warning("MR %s in project %s skipped: no head sha", mr.get("iid"), project_db_id)
@@ -129,6 +140,9 @@ class Poller:
             state=mr.get("state"),
             head_sha=head_sha,
             updated_at=mr.get("updated_at"),
+            derived_roles=derive_roles(mr, self._username()),
+            signal_roles=signal_roles,
+            derived_scope=derived_scope(mr),
         )
 
     def _enqueue(self, mr_id: int, trigger: str, mr: dict[str, Any], project_db_id: int) -> int:
@@ -136,6 +150,31 @@ class Poller:
             self._conn, mr_id, trigger, mr["sha"], self._agent_for(project_db_id)
         )
         return 1 if review_id is not None else 0
+
+    async def _backfill_roles(self) -> None:
+        username = self._username()
+        for gitlab_pid, project_db_id in self._project_ids.items():
+            key = ROLES_BACKFILL_KEY.format(gitlab_pid)
+            if poll_state_get(self._conn, key) is not None:
+                continue
+            if poll_state_get(self._conn, SCAN_DONE_KEY.format(gitlab_pid)) is None:
+                poll_state_set(self._conn, key, datetime.now(UTC).isoformat())
+                continue
+            try:
+                mrs = await self._api.get_project_merge_requests(gitlab_pid)
+            except Exception:
+                logger.exception("roles backfill failed for project %s", gitlab_pid)
+                continue
+            for mr in mrs:
+                if mr.get("iid") is None:
+                    continue
+                roles = derive_roles(mr, username)
+                if _has_mention(mr.get("description"), username):
+                    roles = roles | {MENTIONED_ROLE}
+                update_mr_roles(
+                    self._conn, project_db_id, mr["iid"], roles, derived_scope(mr),
+                )
+            poll_state_set(self._conn, key, datetime.now(UTC).isoformat())
 
     async def _process_todos(self) -> int:
         created = 0
@@ -166,10 +205,10 @@ class Poller:
 
     def _handle_todo(self, todo: dict[str, Any], detail: dict[str, Any], gitlab_pid: int) -> int:
         project_db_id = self._project_ids[gitlab_pid]
-        result = self._upsert(project_db_id, detail)
+        result = self._upsert(project_db_id, detail, todo_signal_roles(todo))
         if result is None or detail.get("state") != "opened":
             return 0
-        mentioned = todo.get("action_name") in ("mentioned", "directly_addressed")
+        mentioned = todo.get("action_name") in MENTION_ACTIONS
         is_reviewer = self._username() in _reviewer_usernames(detail)
         if result.inserted or mentioned or is_reviewer:
             return self._enqueue(result.mr_id, "new", detail, project_db_id)
@@ -203,15 +242,15 @@ class Poller:
     async def _scan_one(
         self, gitlab_pid: int, project_db_id: int, mr: dict[str, Any], username: str
     ) -> int:
-        result = self._upsert(project_db_id, mr)
+        mine = _author(mr).get("username") == username or username in _reviewer_usernames(mr)
+        mentioned = await self._mentioned_in_mr(
+            gitlab_pid, mr["iid"], username, mr.get("description"), fetch_notes=not mine
+        )
+        result = self._upsert(
+            project_db_id, mr, frozenset({MENTIONED_ROLE}) if mentioned else frozenset()
+        )
         if result is None:
             return 0
-        mine = _author(mr).get("username") == username or username in _reviewer_usernames(mr)
-        mentioned = False
-        if not mine:
-            mentioned = await self._mentioned_in_mr(
-                gitlab_pid, mr["iid"], username, mr.get("description")
-            )
         if (mine or mentioned) and mr.get("state") in (None, "opened"):
             return self._enqueue(result.mr_id, "new", mr, project_db_id)
         return 0
@@ -237,16 +276,23 @@ class Poller:
         poll_state_set(self._conn, key, new_cursor.isoformat())
 
     async def _mentioned_in_mr(
-        self, gitlab_pid: int, iid: int, username: str, description: str | None
+        self,
+        gitlab_pid: int,
+        iid: int,
+        username: str,
+        description: str | None,
+        fetch_notes: bool = True,
     ) -> bool:
-        if description and f"@{username}" in description:
+        if _has_mention(description, username):
             return True
+        if not fetch_notes:
+            return False
         try:
             notes = await self._api.get_mr_notes(gitlab_pid, iid)
         except Exception:
             logger.exception("notes fetch failed for %s/%s", gitlab_pid, iid)
             return False
-        return any(f"@{username}" in (note.get("body") or "") for note in notes)
+        return any(_has_mention(note.get("body"), username) for note in notes)
 
     async def _sweep_merge_requests(self, scanned: set[int]) -> tuple[int, Exception | None]:
         created = 0
@@ -303,6 +349,48 @@ class Poller:
         if self._me is None:
             raise RuntimeError("poller user not loaded")
         return self._me["username"]
+
+
+def _assignee_usernames(mr: dict[str, Any]) -> set[str]:
+    assignees = list(mr.get("assignees") or [])
+    if mr.get("assignee"):
+        assignees.append(mr["assignee"])
+    return {a.get("username") for a in assignees if a.get("username")}
+
+
+def _has_mention(text: str | None, username: str) -> bool:
+    if not text:
+        return False
+    return re.search(
+        rf"(?<![\w.@])@{re.escape(username)}(?![\w]|[.-]\w)", text, re.IGNORECASE
+    ) is not None
+
+
+def derived_scope(mr: dict[str, Any]) -> frozenset[str]:
+    scope = {"author"}
+    if "reviewers" in mr:
+        scope.add("reviewer")
+    if "assignees" in mr or "assignee" in mr:
+        scope.add("assignee")
+    return frozenset(scope)
+
+
+def derive_roles(mr: dict[str, Any], username: str) -> frozenset[str]:
+    roles: set[str] = set()
+    if _author(mr).get("username") == username:
+        roles.add("author")
+    if username in _reviewer_usernames(mr):
+        roles.add("reviewer")
+    if username in _assignee_usernames(mr):
+        roles.add("assignee")
+    return frozenset(roles)
+
+
+def todo_signal_roles(todo: dict[str, Any]) -> frozenset[str]:
+    action = todo.get("action_name")
+    if action in MENTION_ACTIONS:
+        return frozenset({MENTIONED_ROLE})
+    return frozenset()
 
 
 def _reviewer_usernames(mr: dict[str, Any]) -> set[str]:

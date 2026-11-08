@@ -8,6 +8,12 @@
   .mr-title { font-weight: 600; }
   .legend { margin-top: 0.8rem; }
   td.nowrap { white-space: nowrap; }
+  .role-tags { display: inline-flex; flex-wrap: wrap; gap: 0.25rem; margin-left: 0.4rem; vertical-align: middle; }
+  .role { font-size: 0.72rem; padding: 0.05rem 0.5rem; }
+  .role.reviewer { background: var(--info-bg); color: var(--info-fg); }
+  .role.mentioned { background: var(--warn-bg); color: var(--warn-fg); }
+  .role.assignee { background: var(--major-bg); color: var(--major-fg); }
+  .role.author { background: var(--ok-bg); color: var(--ok-fg); }
   .empty { text-align: center; padding: 2rem 1rem; }
 {% endblock %}
 {% block content %}
@@ -21,6 +27,12 @@
     <option value="done">done</option>
     <option value="error">error</option>
   </select>
+  <select id="rf" aria-label="Фильтр по роли">
+    <option value="">Все роли</option>
+    {% for code, label in role_labels.items() %}
+    <option value="{{ code }}">{{ label }}</option>
+    {% endfor %}
+  </select>
   <button id="fc-btn" onclick="forceCheck()">Проверить сейчас</button>
   <span id="fc-status" class="muted small" role="status"></span>
 </div>
@@ -32,10 +44,11 @@
   </thead>
   <tbody id="mr-body">
   {% for m in mrs %}
-  <tr data-status="{{ m["latest_review_status"] or "" }}">
+  <tr data-status="{{ m["latest_review_status"] or "" }}" data-roles="{{ m["my_roles"] or "" }}">
     <td class="muted">{{ m["path_with_namespace"].split("/")[-1] }}</td>
     {% set href = m["web_url"] | safe_url %}
-    <td>{% if href %}<a class="mr-title" href="{{ href }}">{{ m["title"] or ("!" ~ m["iid"]) }}</a>{% else %}<span class="mr-title">{{ m["title"] or ("!" ~ m["iid"]) }}</span>{% endif %}</td>
+    <td>{% if href %}<a class="mr-title" href="{{ href }}">{{ m["title"] or ("!" ~ m["iid"]) }}</a>{% else %}<span class="mr-title">{{ m["title"] or ("!" ~ m["iid"]) }}</span>{% endif %}
+      {% if m["my_roles"] %}<span class="role-tags">{% for code in m["my_roles"].split(",") %}<span class="badge role {{ code }}">{{ role_labels.get(code, code) }}</span>{% endfor %}</span>{% endif %}</td>
     <td>{{ m["author_name"] or m["author_username"] or "—" }}</td>
     <td class="small">{{ m["source_branch"] or "—" }}</td>
     <td>
@@ -69,15 +82,19 @@
 const ACTIVE = ["queued", "cloning", "reviewing"];
 const q = document.getElementById("q");
 const sf = document.getElementById("sf");
+const rf = document.getElementById("rf");
+const ROLE_LABELS = {{ role_labels | tojson }};
 const hasMrs = {{ (mrs | length > 0) | tojson }};
 let timer = null;
 
 function applyFilter() {
   const needle = q.value.trim().toLowerCase();
   const status = sf.value;
+  const role = rf.value;
   let shown = 0;
   document.querySelectorAll("#mr-body tr").forEach(function (tr) {
     const ok = (!status || tr.dataset.status === status) &&
+      (!role || (tr.dataset.roles || "").split(",").includes(role)) &&
       (!needle || tr.textContent.toLowerCase().includes(needle));
     tr.hidden = !ok;
     if (ok) shown++;
@@ -107,11 +124,20 @@ function el(tag, className, text) {
 function renderRow(m) {
   const tr = document.createElement("tr");
   tr.dataset.status = m.latest_review_status || "";
+  const roles = m.my_roles || [];
+  tr.dataset.roles = roles.join(",");
   tr.appendChild(el("td", "muted", (m.path_with_namespace || "").split("/").pop()));
   const title = el("td");
   const link = el("a", "mr-title", m.title || ("!" + m.iid));
   link.href = safeHref(m.web_url);
   title.appendChild(link);
+  if (roles.length) {
+    const tags = el("span", "role-tags");
+    roles.forEach(function (code) {
+      tags.appendChild(el("span", "badge role " + code, ROLE_LABELS[code] || code));
+    });
+    title.appendChild(tags);
+  }
   tr.appendChild(title);
   tr.appendChild(el("td", "", m.author_name || m.author_username || "—"));
   tr.appendChild(el("td", "small", m.source_branch || "—"));
@@ -190,6 +216,7 @@ async function forceCheck() {
 
 q.addEventListener("input", applyFilter);
 sf.addEventListener("change", applyFilter);
+rf.addEventListener("change", applyFilter);
 schedule();
 </script>
 {% endblock %}

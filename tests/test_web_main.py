@@ -432,3 +432,17 @@ async def test_settings_bad_body_400(ctx, tmp_path, monkeypatch):
     assert resp.status_code == 400
     saved = yaml.safe_load(cfg.read_text(encoding="utf-8"))
     assert saved["gitlab"]["poll_interval_sec"] == 60
+
+
+async def test_api_mrs_and_index_include_roles(ctx):
+    ctx_obj, _ = ctx
+    ctx_obj.conn.execute("UPDATE mr SET my_roles = 'mentioned,reviewer'")
+    ctx_obj.conn.commit()
+    async with _client(ctx_obj) as client:
+        api = await client.get("/api/mrs")
+        page = await client.get("/")
+    assert api.json()[0]["my_roles"] == ["mentioned", "reviewer"]
+    assert 'data-roles="mentioned,reviewer"' in page.text
+    assert "упомянули" in page.text
+    assert "ревьюер" in page.text
+    assert 'id="rf"' in page.text
