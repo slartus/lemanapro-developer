@@ -144,6 +144,9 @@ def _migrate_to_v5(conn: sqlite3.Connection) -> None:
 
 def _migrate_to_v6(conn: sqlite3.Connection) -> None:
     _add_column(conn, "mr", "is_draft", "INTEGER NOT NULL DEFAULT 0")
+    tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
+    if "poll_state" in tables:
+        conn.execute("DELETE FROM poll_state WHERE key LIKE 'roles_backfill_v5:%'")
 
 
 def _parse_roles(value: str | None) -> set[str]:

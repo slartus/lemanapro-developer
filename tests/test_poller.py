@@ -626,6 +626,8 @@ def _is_draft(conn, iid):
         ({"work_in_progress": False}, False),
         ({"draft": False, "work_in_progress": True}, False),
         ({}, None),
+        ({"draft": "true"}, None),
+        ({"draft": None, "work_in_progress": True}, True),
     ],
 )
 def test_parse_draft(extra, expected):
@@ -666,3 +668,32 @@ async def test_roles_backfill_updates_draft(conn):
     api.mrs = [_mr(10, 1) | {"draft": True}]
     await poller.tick()
     assert _is_draft(conn, 1) == 1
+
+
+async def test_migration_v6_reruns_backfill_once_and_sets_draft(conn):
+    api = StubApi()
+    api.mrs = [_mr(10, 1)]
+    poller = _make_poller(conn, api)
+    await poller.tick()
+    conn.execute("DELETE FROM review")
+    conn.execute("UPDATE mr SET is_draft = 0, my_roles = 'author'")
+    conn.execute("PRAGMA user_version = 5")
+    conn.commit()
+    assert conn.execute(
+        "SELECT COUNT(*) FROM poll_state WHERE key LIKE 'roles_backfill_v5:%'"
+    ).fetchone()[0] == 1
+    init_schema(conn)
+    assert conn.execute(
+        "SELECT COUNT(*) FROM poll_state WHERE key LIKE 'roles_backfill_v5:%'"
+    ).fetchone()[0] == 0
+
+    api.mrs = [_mr(10, 1) | {"draft": True}]
+    api.project_calls.clear()
+    await poller.tick()
+    assert _is_draft(conn, 1) == 1
+    assert list_reviews(conn) == []
+    assert len([c for c in api.project_calls if c[2] == "opened" and c[1] is None]) == 1
+
+    api.project_calls.clear()
+    await poller.tick()
+    assert all(c[1] is not None for c in api.project_calls)
