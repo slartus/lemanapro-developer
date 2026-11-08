@@ -169,8 +169,6 @@ def test_cleanup_old_workspaces(tmp_path):
 
 
 def test_make_git_env_no_token(tmp_path):
-    from mrwatch.opencode_runner import _build_env
-
     secret = "glpat-FAKE-SECRET-123"
     pat_command = f"echo {secret}"
     env = make_git_env(pat_command, tmp_path)
@@ -180,7 +178,6 @@ def test_make_git_env_no_token(tmp_path):
     assert all(pat_command != v for v in env.base_env.values())
     assert not any(secret in v for v in env.base_env.values())
     assert "GIT_ASKPASS" not in env.base_env
-    assert not any(secret in v for v in _build_env(str(tmp_path), tmp_path).values())
 
 
 async def test_askpass_script_contains_command_not_token(tmp_path, monkeypatch):

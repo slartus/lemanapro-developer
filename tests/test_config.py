@@ -134,6 +134,14 @@ def test_default_config_path_env_override(monkeypatch):
         "ftp://gitlab.example.com",
         "gitlab.example.com",
         "https://",
+        " https://host",
+        "https://host\n",
+        "https://ho st",
+        "https://host:abc",
+        "https://host:99999",
+        "https://host:0",
+        "https://host\\evil",
+        "https://host\t",
     ],
 )
 def test_gitlab_url_rejected(url):

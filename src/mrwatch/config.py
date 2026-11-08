@@ -38,7 +38,15 @@ class GitlabConfig(BaseModel):
         url = value.rstrip("/")
         if not url:
             raise ValueError("url must not be empty")
+        if "\\" in url or any(c.isspace() or not c.isprintable() for c in url):
+            raise ValueError("url must not contain whitespace, control characters or backslashes")
         parts = urlsplit(url)
+        try:
+            port = parts.port
+        except ValueError:
+            raise ValueError("url has an invalid port") from None
+        if port is not None and not 1 <= port <= 65535:
+            raise ValueError("url has an invalid port")
         if parts.scheme != "https":
             raise ValueError("url must use https://")
         if not parts.hostname:
