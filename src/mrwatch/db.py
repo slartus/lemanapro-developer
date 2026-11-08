@@ -518,7 +518,13 @@ def retry_review(conn: sqlite3.Connection, review_id: int) -> bool:
             error = NULL, started_at = NULL, finished_at = NULL,
             attempt = 0, not_before = NULL,
             crit_count = 0, major_count = 0, minor_count = 0, nit_count = 0,
-            verdict = NULL, snippets_json = NULL
+            verdict = NULL, snippets_json = NULL,
+            agent = COALESCE(
+                (SELECT project.agent FROM project
+                 JOIN mr ON mr.project_id = project.id
+                 WHERE mr.id = review.mr_id),
+                agent
+            )
         WHERE id = ? AND status IN ('error', 'done')
         """,
         (review_id,),
