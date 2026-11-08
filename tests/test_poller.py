@@ -697,3 +697,120 @@ async def test_migration_v6_reruns_backfill_once_and_sets_draft(conn):
     api.project_calls.clear()
     await poller.tick()
     assert all(c[1] is not None for c in api.project_calls)
+
+
+MR_URL = "https://gitlab.example.com/g/p/-/merge_requests/5"
+
+
+def _mention_url(conn):
+    return conn.execute("SELECT mention_url FROM mr WHERE iid = 5").fetchone()[0]
+
+
+async def _tick_with_target_url(conn, target_url, action="mentioned", todo_id=1):
+    api = StubApi()
+    api.details[(10, 5)] = _detail(10, 5)
+    api.todos = [{"id": todo_id, "target_type": "MergeRequest", "action_name": action,
+                  "target_url": target_url, "target": {"project_id": 10, "iid": 5}}]
+    await _make_poller(conn, api).tick()
+
+
+@pytest.mark.parametrize("action", ["mentioned", "directly_addressed"])
+async def test_mention_url_saved_from_todo(conn, action):
+    await _tick_with_target_url(conn, MR_URL + "#note_9", action)
+    assert _mention_url(conn) == MR_URL + "#note_9"
+
+
+async def test_mention_url_not_saved_for_other_action(conn):
+    await _tick_with_target_url(conn, MR_URL + "#note_9", "assigned")
+    assert _mention_url(conn) is None
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        "javascript:alert(1)",
+        "ftp://gitlab.example.com/g/p/-/merge_requests/5#note_1",
+        "https://evil.example.org/g/p/-/merge_requests/5#note_1",
+        "https://gitlab.example.com:8443/g/p/-/merge_requests/5#note_1",
+        "https://user@gitlab.example.com/g/p/-/merge_requests/5#note_1",
+        "https://gitlab.example.com/g/p/-/merge_requests/6#note_1",
+        "https://gitlab.example.com/g/p/-/merge_requests/55#note_1",
+        "https://gitlab.example.com/other/-/merge_requests/5#note_1",
+        "https://gitlab.example.com/g/p/-/merge_requests/5/../6#note_1",
+        "//gitlab.example.com/g/p/-/merge_requests/5",
+        "http://gitlab.example.com/g/p/-/merge_requests/5#note_1",
+        "https://gitlab.example.com/g/p/-/merge_requests/5/..\\..\\6",
+        "https://gitlab.example.com/g/p/-/merge_requests/5/%5C..%5C6",
+        "https://gitlab.example.com＃/g",
+        "https://[abc/g/p",
+        "",
+        None,
+    ],
+)
+async def test_mention_url_rejected(conn, bad):
+    await _tick_with_target_url(conn, bad)
+    assert _mention_url(conn) is None
+
+
+async def test_mention_url_updated_to_latest(conn):
+    await _tick_with_target_url(conn, MR_URL + "#note_1")
+    await _tick_with_target_url(conn, MR_URL + "#note_2", todo_id=2)
+    assert _mention_url(conn) == MR_URL + "#note_2"
+
+
+async def test_mention_url_invalid_still_enqueues_review_and_marks_todo(conn):
+    for i, bad in enumerate(["https://gitlab.example.com＃/g", "https://[abc/g/p"], start=1):
+        await _tick_with_target_url(conn, bad, todo_id=i)
+    assert _mention_url(conn) is None
+    assert len(list_reviews(conn)) == 1
+    assert todo_seen_ids(conn) == {1, 2}
+
+
+async def test_mention_url_save_failure_does_not_block_review(conn, monkeypatch):
+    def boom(*args, **kwargs):
+        raise RuntimeError("db")
+
+    monkeypatch.setattr("mrwatch.poller.set_mention_url", boom)
+    await _tick_with_target_url(conn, MR_URL + "#note_9")
+    assert len(list_reviews(conn)) == 1
+    assert todo_seen_ids(conn) == {1}
+
+
+async def test_mention_url_explicit_default_port_accepted(conn):
+    url = "https://gitlab.example.com:443/g/p/-/merge_requests/5#note_1"
+    await _tick_with_target_url(conn, url)
+    assert _mention_url(conn) == url
+
+
+async def test_mention_url_processed_in_id_order_latest_wins(conn):
+    api = StubApi()
+    api.details[(10, 5)] = _detail(10, 5)
+    api.todos = [
+        {"id": i, "target_type": "MergeRequest", "action_name": "mentioned",
+         "target_url": f"{MR_URL}#note_{i}", "target": {"project_id": 10, "iid": 5}}
+        for i in (2, 1)
+    ]
+    await _make_poller(conn, api).tick()
+    assert _mention_url(conn) == MR_URL + "#note_2"
+
+
+def _subpath_tick(conn, web_url, target_url):
+    api = StubApi()
+    api.details[(10, 5)] = _detail(10, 5) | {"web_url": web_url}
+    api.todos = [{"id": 1, "target_type": "MergeRequest", "action_name": "mentioned",
+                  "target_url": target_url, "target": {"project_id": 10, "iid": 5}}]
+    config = _config()
+    config.gitlab.url = "https://gitlab.example.com/gitlab"
+    return _make_poller(conn, api, config).tick()
+
+
+async def test_mention_url_under_gitlab_subpath_accepted(conn):
+    url = "https://gitlab.example.com/gitlab/g/p/-/merge_requests/5"
+    await _subpath_tick(conn, url, url + "#note_1")
+    assert _mention_url(conn) == url + "#note_1"
+
+
+async def test_mention_url_outside_gitlab_subpath_rejected(conn):
+    url = "https://gitlab.example.com/other/g/p/-/merge_requests/5"
+    await _subpath_tick(conn, url, url + "#note_1")
+    assert _mention_url(conn) is None

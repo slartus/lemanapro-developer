@@ -372,7 +372,7 @@ def test_migration_v1_to_v2_adds_severity_columns(tmp_path):
     assert {"crit_count", "major_count", "minor_count", "nit_count"} <= columns
     mr_columns = {r[1] for r in conn.execute("PRAGMA table_info(mr)")}
     assert "author_name" in mr_columns
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == 7
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 8
     assert "my_roles" in mr_columns
     conn.close()
 
@@ -411,7 +411,7 @@ def test_migration_v5_idempotent_and_keeps_data(tmp_path):
     init_schema(conn)
     _run_migration(conn, 5, _migrate_to_v5)
     init_schema(conn)
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == 7
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 8
     assert conn.execute("SELECT my_roles FROM mr").fetchone()["my_roles"] == "mentioned"
     conn.close()
 
@@ -447,11 +447,11 @@ def test_migration_v6_adds_is_draft_and_is_idempotent(tmp_path):
     columns = {r[1]: r for r in conn.execute("PRAGMA table_info(mr)")}
     assert columns["is_draft"][3] == 1
     assert columns["is_draft"][4] == "0"
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == 7
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 8
     conn.execute("PRAGMA user_version = 5")
     conn.commit()
     init_schema(conn)
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == 7
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 8
     conn.close()
 
 
@@ -480,7 +480,7 @@ def test_migration_v7_adds_verdict_backfills_and_is_idempotent(tmp_path):
     init_schema(conn)
     verdicts = [r[0] for r in conn.execute("SELECT verdict FROM review ORDER BY id")]
     assert verdicts == ["REQUEST_CHANGES", "APPROVE_WITH_NITS", None, None, None]
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == 7
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 8
     conn.execute("PRAGMA user_version = 6")
     conn.commit()
     init_schema(conn)
@@ -522,4 +522,22 @@ def test_finish_review_stores_verdict_and_retry_clears_it(tmp_path):
     assert list_mrs(conn)[0]["verdict"] == "REQUEST_CHANGES"
     assert retry_review(conn, rid)
     assert get_review(conn, rid)["verdict"] is None
+    conn.close()
+
+
+def test_migration_v8_adds_mention_url_idempotently(tmp_path):
+    conn = connect(tmp_path / "v7.db")
+    init_schema(conn)
+    conn.execute("ALTER TABLE mr DROP COLUMN mention_url")
+    conn.execute("PRAGMA user_version = 7")
+    conn.commit()
+    init_schema(conn)
+    init_schema(conn)
+    columns = {r[1]: r for r in conn.execute("PRAGMA table_info(mr)")}
+    assert columns["mention_url"][3] == 0
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 8
+    conn.execute("PRAGMA user_version = 7")
+    conn.commit()
+    init_schema(conn)
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 8
     conn.close()

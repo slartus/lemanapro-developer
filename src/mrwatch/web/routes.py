@@ -143,9 +143,10 @@ ROLE_LABELS = {
 }
 
 
-def _mr_payload(row) -> dict:
+def _mr_payload(row, gitlab_url: str) -> dict:
     payload = {field: row[field] for field in MR_ROW_FIELDS}
     payload["is_draft"] = bool(row["is_draft"])
+    payload["mention_url"] = safe_url(row["mention_url"], gitlab_url)
     payload["my_roles"] = [role for role in (row["my_roles"] or "").split(",") if role]
     return payload
 
@@ -172,8 +173,9 @@ async def api_review(request: Request, review_id: int):
 
 @router.get("/api/mrs")
 async def api_mrs(request: Request):
-    rows = list_mrs(_ctx(request).conn)
-    return JSONResponse([_mr_payload(row) for row in rows])
+    ctx = _ctx(request)
+    gitlab_url = ctx.config.gitlab.url
+    return JSONResponse([_mr_payload(row, gitlab_url) for row in list_mrs(ctx.conn)])
 
 
 def _config_path() -> Path:
