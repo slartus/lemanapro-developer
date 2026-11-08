@@ -1,14 +1,17 @@
 # Пример конфига mr-watch.
-# Скопируйте в ~/.config/mr-watch/config.yaml (chmod 600; при group/other-writable сервис не стартует).
+# Путь задаёт MRWATCH_CONFIG (launchd: <проект>/config.yaml), без него — ~/.config/mr-watch/config.yaml.
+# chmod 600: при group/other-writable сервис не стартует, при world-readable — warning.
 # Секретов здесь нет: GitLab PAT читается через pat_command (macOS Keychain).
+# Неизвестные ключи — ошибка валидации.
 
 gitlab:
-  # Базовый URL self-hosted GitLab (trailing slash не обязателен, срезается).
+  # Базовый URL self-hosted GitLab: только https://, без логина/пароля, query и fragment.
+  # Trailing slash не обязателен, срезается.
   url: https://gitlab.example.com
   # Интервал опроса GitLab, секунды.
   poll_interval_sec: 60
   # Shell-команда, печатающая PAT в stdout (без перевода строки — ок).
-  # Пример сохранения в Keychain:
+  # Пример сохранения в Keychain (scope: read_api + read_repository):
   #   security add-generic-password -s mr-watch -a gitlab -w <token>
   pat_command: security find-generic-password -s mr-watch -a gitlab -w
 
@@ -17,7 +20,8 @@ projects:
     gitlab_project_id: 42
     # path_with_namespace (group/project), для отображения и логов.
     slug: group/project
-    # Имя opencode-агента, который делает ревью.
+    # Имя глобального read-only агента opencode (~/.config/opencode/agent/<имя>.md).
+    # В frontmatter должны быть запрещены edit, bash, webfetch, иначе ревью не запустится.
     agent: mr-watch-reviewer
     # Перезапускать ревью при смене head_sha (push в MR).
     re_review_on_push: false
@@ -26,13 +30,12 @@ projects:
     # variant: low
 
 review:
-  # Параллельных воркеров ревью.
+  # Параллельных воркеров ревью (смена применяется после рестарта).
   max_parallel: 2
-  # Таймаут одного ревью (клон + opencode run), секунды.
+  # Таймаут opencode run на одно ревью (включая автоповтор при reason=length), секунды.
   timeout_sec: 1800
   # Глубина shallow-клона.
   clone_depth: 50
-  # Сколько часов назад смотреть MR при первом запуске (0 = только новые).
   # Удалять рабочие каталоги старше N дней (страховка на случай краха).
   workspace_ttl_days: 3
   # Удалять логи ревью (logs/review-*.log) старше N дней при старте.
@@ -54,5 +57,5 @@ paths:
   db: ~/projects/mr-watch/data/mrwatch.db
   # Рабочие каталоги клонов.
   workspaces: ~/projects/mr-watch/workspaces
-  # Прочие файлы сервиса.
+  # app.log и review-<id>.log.
   logs: ~/projects/mr-watch/logs

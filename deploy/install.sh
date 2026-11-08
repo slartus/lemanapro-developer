@@ -21,6 +21,7 @@ fi
 
 if [ ! -f "$CONFIG_DST" ]; then
   cp config.example.yaml "$CONFIG_DST"
+  chmod 600 "$CONFIG_DST"
   echo "Создан $CONFIG_DST — заполни projects и проверь pat_command."
 fi
 
