@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import UTC, datetime, timedelta
+import time
+from datetime import datetime, timedelta
 
 import pytest
 
@@ -9,7 +10,6 @@ from helpers import list_reviews
 from mrwatch.config import Config, GitlabConfig, ProjectConfig, ReviewConfig
 from mrwatch.db import (
     claim_next_review,
-    connect,
     get_review,
     init_schema,
     poll_state_get,
@@ -24,6 +24,14 @@ from mrwatch.poller import Poller, parse_draft
 CURSOR_KEY = MR_CURSOR_KEY.format(10)
 
 USER = {"id": 1, "username": "me"}
+
+
+async def _wait_until(predicate, timeout: float = 10.0) -> None:
+    deadline = time.monotonic() + timeout
+    while not predicate():
+        if time.monotonic() > deadline:
+            raise AssertionError("condition not met in time")
+        await asyncio.sleep(0.01)
 
 
 class StubApi:
@@ -93,14 +101,6 @@ def _config(re_review_on_push=False):
         ],
         review=ReviewConfig(),
     )
-
-
-@pytest.fixture
-def conn(tmp_path):
-    c = connect(tmp_path / "test.db")
-    init_schema(c)
-    yield c
-    c.close()
 
 
 def _make_poller(conn, api, config=None, work_event=None):
@@ -294,7 +294,7 @@ async def test_run_loop_records_error_and_clears_on_success(conn):
     poller = Poller(conn, api, config, mapping)
 
     task = asyncio.create_task(poller.run())
-    await asyncio.sleep(0.15)
+    await _wait_until(lambda: poll_state_get(conn, "poll_last_error") is not None)
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await task
@@ -304,7 +304,7 @@ async def test_run_loop_records_error_and_clears_on_success(conn):
 
     api.fail_todos = False
     task = asyncio.create_task(poller.run())
-    await asyncio.sleep(0.15)
+    await _wait_until(lambda: poll_state_get(conn, "poll_last_ok") is not None)
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await task

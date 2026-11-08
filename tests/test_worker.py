@@ -4,15 +4,12 @@ import stat
 import subprocess
 from pathlib import Path
 
-import pytest
 
 from mrwatch.config import Config, GitlabConfig, PathsConfig, ProjectConfig, ReviewConfig
 from mrwatch.config import resolve_paths
 from mrwatch.db import (
-    connect,
     create_review,
     get_review,
-    init_schema,
     sync_projects,
     upsert_mr,
 )
@@ -32,25 +29,6 @@ def _git(*args: str, cwd: Path | None = None) -> str:
              "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"},
     )
     return result.stdout
-
-
-@pytest.fixture
-def origin(tmp_path: Path) -> Path:
-    origin = tmp_path / "origin"
-    origin.mkdir()
-    _git("init", "-q", "-b", "main", cwd=origin)
-    (origin / "app.py").write_text("print('hi')\n")
-    _git("add", ".", cwd=origin)
-    _git("commit", "-qm", "init", cwd=origin)
-    _git("branch", "feature", cwd=origin)
-    _git("checkout", "-q", "feature", cwd=origin)
-    (origin / "app.py").write_text("print('hello')\n")
-    _git("add", ".", cwd=origin)
-    _git("commit", "-qm", "feature work", cwd=origin)
-    feature_sha = _git("rev-parse", "feature", cwd=origin).strip()
-    _git("checkout", "-q", "main", cwd=origin)
-    _git("update-ref", "refs/merge-requests/1/head", feature_sha, cwd=origin)
-    return origin
 
 
 READONLY_AGENT = (
@@ -103,16 +81,6 @@ def _detail(base_sha: str, head_sha: str) -> dict:
         "description": "описание",
         "diff_refs": {"base_sha": base_sha, "head_sha": head_sha},
     }
-
-
-@pytest.fixture
-def db(tmp_path: Path):
-    (tmp_path / "data").mkdir(parents=True, exist_ok=True)
-    conn = connect(tmp_path / "data" / "mrwatch.db")
-    conn.execute("PRAGMA foreign_keys=ON")
-    init_schema(conn)
-    yield conn
-    conn.close()
 
 
 def _queued_review(conn, origin: Path) -> int:

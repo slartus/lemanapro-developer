@@ -4,14 +4,12 @@ import asyncio
 import os
 import sqlite3
 import stat
-import subprocess
 import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import httpx
 import pytest
-import yaml
 
 from mrwatch import main as main_module
 from mrwatch import opencode_runner, poller as poller_module, worker as worker_module
@@ -59,19 +57,13 @@ from mrwatch.gitlab_client import GitlabApiError
 from mrwatch.main import AppContext, create_app
 from mrwatch.opencode_runner import RunnerEnv, run_review
 from mrwatch.poller import Poller
-from mrwatch.worker import Worker
 
 from tests.test_poller import StubApi, _config as poller_config, _mr, _detail
 from tests.test_worker import (
-    READONLY_AGENT,
-    StubApi as WorkerApi,
-    _config as worker_config,
-    _detail as worker_detail,
     _fake_opencode,
     _git,
     _queued_review,
     _worker,
-    origin,  # noqa: F401
 )
 
 USER_ENV = {"PATH": "/usr/bin:/bin", "HOME": str(Path.home())}
@@ -705,7 +697,7 @@ def test_review_mr_index_exists(conn):
 def test_migration_v3_to_v4_moves_legacy_cursor(tmp_path):
     c = connect(tmp_path / "old.db")
     init_schema(c)
-    mapping = sync_projects(c, [(10, "g/p", "a", False, True), (20, "g/q", "a", False, True)])
+    sync_projects(c, [(10, "g/p", "a", False, True), (20, "g/q", "a", False, True)])
     c.execute("DROP INDEX idx_review_mr")
     c.execute("DROP TABLE todo_seen")
     c.execute("ALTER TABLE review DROP COLUMN not_before")

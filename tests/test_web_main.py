@@ -1,43 +1,12 @@
 from __future__ import annotations
 
-from pathlib import Path
 
 import httpx
 import pytest
 import yaml
 
-from mrwatch.config import Config, GitlabConfig, PathsConfig, ProjectConfig, ReviewConfig
-from mrwatch.config import resolve_paths
-from mrwatch.db import connect, create_review, finish_review, init_schema, sync_projects, upsert_mr
-from mrwatch.gitlab_client import GitLabClient
-from mrwatch.main import AppContext, create_app
-
-
-@pytest.fixture
-def ctx(tmp_path: Path):
-    config = Config(
-        gitlab=GitlabConfig(url="https://gitlab.example.com", pat_command="printf tok"),
-        projects=[ProjectConfig(gitlab_project_id=10, slug="g/p", agent="agent-a")],
-        review=ReviewConfig(max_parallel=1),
-        paths=PathsConfig(
-            db=str(tmp_path / "data" / "mrwatch.db"),
-            workspaces=str(tmp_path / "workspaces"),
-            logs=str(tmp_path / "logs"),
-        ),
-    )
-    paths = resolve_paths(config)
-    conn = connect(paths.db)
-    init_schema(conn)
-    mapping = sync_projects(conn, [(10, "g/p", "agent-a", False, True)])
-    result = upsert_mr(
-        conn, project_db_id=mapping[10], iid=1, title="MR 1", author_username="me",
-        source_branch="feature", web_url="https://gitlab.example.com/g/p/-/mr/1",
-        state="opened", head_sha="a" * 40, updated_at="2026-01-01T12:00:00Z",
-    )
-    review_id = create_review(conn, result.mr_id, "new", "a" * 40, "agent-a")
-    api = GitLabClient(config.gitlab.url, "fake-token")
-    yield AppContext(conn=conn, config=config, paths=paths, api=api, project_ids=mapping), review_id
-    conn.close()
+from mrwatch.db import finish_review
+from mrwatch.main import create_app
 
 
 def _client(ctx_obj) -> httpx.AsyncClient:
@@ -291,8 +260,6 @@ class _ProjectResolver:
 
     async def get_project_by_path(self, path):
         if path not in self._by_path:
-            import json as _json
-            from fastapi.responses import PlainTextResponse
             raise LookupError(path)
         return self._by_path[path]
 
