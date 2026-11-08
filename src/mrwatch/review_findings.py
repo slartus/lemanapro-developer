@@ -37,6 +37,7 @@ class Finding:
     path: str | None
     start: int | None
     end: int | None
+    line: int = 0
 
 
 @dataclass
@@ -52,12 +53,16 @@ class _Hunk:
     lines: list[_DiffLine]
 
 
+def split_review_lines(review_md: str) -> list[str]:
+    return [raw.removesuffix("\r") for raw in review_md.split("\n")]
+
+
 def iter_findings(review_md: str | None) -> Iterator[Finding]:
     if not review_md or len(review_md) > MAX_PARSE_INPUT_CHARS:
         return
     fence: str | None = None
     index = 0
-    for raw in review_md.splitlines():
+    for line_no, raw in enumerate(split_review_lines(review_md)):
         if fence is not None:
             stripped = raw.strip()
             if stripped and stripped[0] == fence[0] and len(stripped) >= len(fence) and not stripped.strip(fence[0]):
@@ -73,7 +78,7 @@ def iter_findings(review_md: str | None) -> Iterator[Finding]:
         if not match:
             continue
         path, start, end = _parse_reference(match.group(2))
-        yield Finding(index, match.group(1), path, start, end)
+        yield Finding(index, match.group(1), path, start, end, line_no)
         index += 1
 
 
@@ -302,6 +307,7 @@ def extract_snippets(review_md: str | None, diff: str | None, workspace) -> list
             total += len(code)
             snippets.append({
                 "index": finding.index,
+                "line": finding.line,
                 "severity": finding.severity,
                 "path": used,
                 "start": finding.start,
@@ -338,9 +344,43 @@ def load_snippets(raw: str | None) -> list[dict]:
             continue
         if not all(isinstance(v, int) and not isinstance(v, bool) for v in (start, end, index)):
             continue
+        line = item.get("line")
+        if not isinstance(line, int) or isinstance(line, bool) or line < 0:
+            line = None
         source = item.get("source") if item.get("source") in ("diff", "file") else "file"
         result.append({
-            "index": index, "severity": severity, "path": path,
+            "index": index, "line": line, "severity": severity, "path": path,
             "start": start, "end": end, "source": source, "code": code,
         })
     return result
+
+
+_SEVERITY_CLASS = (("[BLOCKER]", "crit"), ("[MAJOR]", "major"), ("[MINOR]", "minor"), ("[NIT]", "nit"))
+
+
+def _matches(finding: Finding, snippet: dict) -> bool:
+    return (
+        finding.index == snippet["index"]
+        and finding.severity == snippet["severity"]
+        and finding.path is not None
+        and snippet["path"] in _path_candidates(finding.path)
+    )
+
+
+def layout_review(review_md: str | None, snippets: list[dict]) -> tuple[list[dict], list[dict]]:
+    if not review_md:
+        return [], list(snippets)
+    rows = [
+        {"text": text, "css": next((css for tag, css in _SEVERITY_CLASS if tag in text), ""), "snippets": []}
+        for text in split_review_lines(review_md)
+    ]
+    by_line = {f.line: f for f in iter_findings(review_md)}
+    orphans: list[dict] = []
+    for snippet in snippets:
+        line = snippet.get("line")
+        finding = by_line.get(line) if line is not None else None
+        if finding is not None and _matches(finding, snippet):
+            rows[line]["snippets"].append(snippet)
+        else:
+            orphans.append(snippet)
+    return rows, orphans
