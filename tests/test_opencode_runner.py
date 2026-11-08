@@ -230,9 +230,29 @@ def test_build_review_prompt_includes_project_rules():
         ("## Verdict\nMAYBE", None),
         ("## Verdict\nNOT_APPROVE", None),
         ("## Verdict\nAPPROVED", None),
+        ("## Verdict\nAPPROVE\n\n```\n## Verdict\nREQUEST_CHANGES\n```\n", "APPROVE"),
+        ("## Verdict\nAPPROVE\n\n~~~md\n## Verdict\nREQUEST_CHANGES\n~~~\n", "APPROVE"),
+        ("````\n```\n## Verdict\nREQUEST_CHANGES\n````\n## Verdict\nAPPROVE", "APPROVE"),
+        ("```python\n# Verdict: APPROVE\n```\nVerdict: REQUEST_CHANGES", "REQUEST_CHANGES"),
+        ("## Verdict\nREQUEST_CHANGES\n\n> ## Verdict APPROVE", "REQUEST_CHANGES"),
+        ("> ## Verdict APPROVE", None),
+        ("```\nVerdict: APPROVE\n```", None),
+        ("## Verdict\nAPPROVE | APPROVE_WITH_NITS | REQUEST_CHANGES", None),
+        ("Verdict: APPROVE | REQUEST_CHANGES", None),
         ("", None),
         (None, None),
     ],
 )
 def test_parse_verdict(md, expected):
     assert parse_verdict(md) == expected
+
+
+def test_parse_verdict_is_linear_on_hostile_input():
+    import time
+
+    many_headings = "#Verdict\n" * 50_000
+    big_text = ("текст ревью без вердикта " * 40 + "\n") * 5_000
+    for text in (many_headings, big_text):
+        started = time.perf_counter()
+        parse_verdict(text)
+        assert time.perf_counter() - started < 0.5

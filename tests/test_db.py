@@ -488,6 +488,25 @@ def test_migration_v7_adds_verdict_backfills_and_is_idempotent(tmp_path):
     conn.close()
 
 
+def test_migration_v7_backfills_in_batches(tmp_path):
+    conn = connect(tmp_path / "many.db")
+    init_schema(conn)
+    conn.execute("ALTER TABLE review DROP COLUMN verdict")
+    conn.execute("PRAGMA user_version = 6")
+    conn.execute("INSERT INTO project (id, gitlab_project_id, path_with_namespace, agent) VALUES (1, 1, 'g/p', 'a')")
+    conn.execute("INSERT INTO mr (id, project_id, iid, head_sha, updated_at, first_seen_at) VALUES (1, 1, 1, 'x', 't', 't')")
+    for index in range(450):
+        conn.execute(
+            "INSERT INTO review (mr_id, \"trigger\", head_sha, status, agent, review_md, created_at) "
+            "VALUES (1, 'new', ?, 'done', 'a', '## Verdict\nAPPROVE', 't')",
+            (f"sha{index}",),
+        )
+    conn.commit()
+    init_schema(conn)
+    assert conn.execute("SELECT COUNT(*) FROM review WHERE verdict = 'APPROVE'").fetchone()[0] == 450
+    conn.close()
+
+
 def test_finish_review_stores_verdict_and_retry_clears_it(tmp_path):
     conn = connect(tmp_path / "v.db")
     init_schema(conn)

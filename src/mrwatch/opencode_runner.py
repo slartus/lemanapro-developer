@@ -252,37 +252,62 @@ def parse_severity_counts(review_md: str | None) -> tuple[int, int, int, int]:
 
 
 VERDICTS = ("APPROVE_WITH_NITS", "REQUEST_CHANGES", "APPROVE")
+MAX_VERDICT_INPUT_CHARS = 1_000_000
 VERDICT_TOKEN = re.compile(r"(?<![A-Za-z0-9_])(APPROVE_WITH_NITS|REQUEST_CHANGES|APPROVE)(?![A-Za-z0-9_])")
-VERDICT_HEADING = re.compile(r"^[ \t]{0,3}#{1,6}[ \t]*Verdict\b[ \t:\-]*(.*)$", re.IGNORECASE)
-VERDICT_LINE = re.compile(r"^[ \t]*(?:[-+>][ \t]*)?Verdict[ \t]*:(.*)$", re.IGNORECASE)
-ANY_HEADING = re.compile(r"^[ \t]{0,3}#{1,6}\s")
+VERDICT_HEADING = re.compile(r"^[ \t]{0,3}#{1,6}[ \t]*verdict\b(.*)$", re.IGNORECASE)
+VERDICT_LINE = re.compile(r"^[ \t]*(?:[-+][ \t]*)?verdict[ \t]*:(.*)$", re.IGNORECASE)
+ANY_HEADING = re.compile(r"^[ \t]{0,3}#{1,6}[ \t]*\S")
+FENCE_OPEN = re.compile(r"^[ \t]{0,3}(`{3,}|~{3,})")
+QUOTE_LINE = re.compile(r"^[ \t]{0,3}>")
+
+
+def _single_token(tokens: set[str]) -> str | None:
+    return next(iter(tokens)) if len(tokens) == 1 else None
 
 
 def parse_verdict(review_md: str | None) -> str | None:
     if not review_md:
         return None
-    lines = review_md.replace("*", "").replace("`", "").splitlines()
-    section_hits: list[str] = []
-    line_hits: list[str] = []
-    for index, line in enumerate(lines):
+    fence: str | None = None
+    in_section = False
+    section_tokens: set[str] = set()
+    section_hit: tuple[str | None] | None = None
+    line_hit: tuple[str | None] | None = None
+    for raw in review_md[:MAX_VERDICT_INPUT_CHARS].splitlines():
+        if fence is not None:
+            stripped = raw.strip()
+            if stripped and stripped[0] == fence[0] and len(stripped) >= len(fence) and not stripped.strip(fence[0]):
+                fence = None
+            continue
+        opening = FENCE_OPEN.match(raw)
+        if opening:
+            fence = opening.group(1)
+            continue
+        if QUOTE_LINE.match(raw):
+            continue
+        line = raw.replace("*", "").replace("`", "")
         heading = VERDICT_HEADING.match(line)
+        if in_section and (heading or ANY_HEADING.match(line)):
+            if section_tokens:
+                section_hit = (_single_token(section_tokens),)
+            in_section = False
+            section_tokens = set()
         if heading:
-            body = [heading.group(1)]
-            for following in lines[index + 1:]:
-                if ANY_HEADING.match(following):
-                    break
-                body.append(following)
-            token = VERDICT_TOKEN.search("\n".join(body))
-            if token:
-                section_hits.append(token.group(1))
+            in_section = True
+            section_tokens.update(VERDICT_TOKEN.findall(heading.group(1)))
+            continue
+        if in_section:
+            section_tokens.update(VERDICT_TOKEN.findall(line))
             continue
         inline = VERDICT_LINE.match(line)
         if inline:
-            token = VERDICT_TOKEN.search(inline.group(1))
-            if token:
-                line_hits.append(token.group(1))
-    hits = section_hits or line_hits
-    return hits[-1] if hits else None
+            tokens = set(VERDICT_TOKEN.findall(inline.group(1)))
+            if tokens:
+                line_hit = (_single_token(tokens),)
+    if in_section and section_tokens:
+        section_hit = (_single_token(section_tokens),)
+    hit = section_hit or line_hit
+    return hit[0] if hit else None
 
 
 MAX_RULES_TOTAL_CHARS = 40_000

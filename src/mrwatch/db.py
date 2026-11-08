@@ -158,14 +158,24 @@ def _migrate_to_v7(conn: sqlite3.Connection) -> None:
     _backfill_verdicts(conn)
 
 
+VERDICT_BACKFILL_BATCH = 200
+
+
 def _backfill_verdicts(conn: sqlite3.Connection) -> None:
-    rows = conn.execute(
-        "SELECT id, review_md FROM review WHERE status = 'done' AND verdict IS NULL"
-    ).fetchall()
-    for row in rows:
-        verdict = parse_verdict(row[1])
-        if verdict is not None:
-            conn.execute("UPDATE review SET verdict = ? WHERE id = ?", (verdict, row[0]))
+    last_id = 0
+    while True:
+        rows = conn.execute(
+            "SELECT id, review_md FROM review WHERE status = 'done' AND verdict IS NULL AND id > ? "
+            "ORDER BY id LIMIT ?",
+            (last_id, VERDICT_BACKFILL_BATCH),
+        ).fetchall()
+        if not rows:
+            return
+        for row in rows:
+            verdict = parse_verdict(row[1])
+            if verdict is not None:
+                conn.execute("UPDATE review SET verdict = ? WHERE id = ?", (verdict, row[0]))
+        last_id = rows[-1][0]
 
 
 def _parse_roles(value: str | None) -> set[str]:
