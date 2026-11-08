@@ -587,3 +587,15 @@ async def test_index_has_adaptive_refresh_logic(ctx):
     assert "IDLE_INTERVAL_MS = 30000" in page.text
     assert "visibilitychange" in page.text
     assert "inFlight" in page.text
+
+
+async def test_force_check_reschedules_followup_refreshes(ctx):
+    ctx_obj, _ = ctx
+    async with _client(ctx_obj) as client:
+        page = await client.get("/")
+    text = page.text
+    assert "FORCE_CHECK_FOLLOWUP_MS = [2000, 4000]" in text
+    body = text[text.index("async function forceCheck()"):]
+    body = body[: body.index("\n}\n")]
+    assert "scheduleFollowups(FORCE_CHECK_FOLLOWUP_MS)" in body
+    assert "if (id === cycle) after();" in text
