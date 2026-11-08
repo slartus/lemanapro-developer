@@ -10,13 +10,14 @@
   .error-block { border: 1px solid var(--err-fg); background: var(--err-bg); color: var(--err-fg); border-radius: var(--radius); padding: 0.8rem 1rem; margin: 1rem 0; }
   .error-block strong { display: block; margin-bottom: 0.3rem; }
   .error-block pre { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; font-family: var(--mono); font-size: 0.85rem; }
-  .review-text { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 0.8rem 0; font-family: var(--mono); font-size: 0.88rem; line-height: 1.55; overflow-x: auto; }
-  .review-text .ln { display: block; white-space: pre-wrap; overflow-wrap: anywhere; padding: 0 1rem; min-height: 1.55em; border-left: 3px solid transparent; }
+  .review-text { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 0.8rem 0; font-family: inherit; font-size: 1rem; line-height: 1.5; overflow-x: auto; }
+  .review-text .ln { display: block; white-space: pre-wrap; overflow-wrap: anywhere; padding: 0 1rem; min-height: 1.5em; border-left: 3px solid transparent; }
   .review-text .ln.crit { background: var(--err-bg); color: var(--err-fg); border-left-color: var(--err-fg); }
   .review-text .ln.major { background: var(--major-bg); color: var(--major-fg); border-left-color: var(--major-fg); }
   .review-text .ln.minor { background: var(--warn-bg); color: var(--warn-fg); border-left-color: var(--warn-fg); }
   .review-text .ln.nit { background: var(--neutral-bg); color: var(--neutral-fg); border-left-color: var(--neutral-fg); }
-  .review-text code { font-family: var(--mono); background: var(--surface-2); border-radius: 4px; padding: 0.05em 0.35em; }
+  .review-text .ln.h { font-weight: 700; font-size: 1.12em; margin-top: 0.5rem; }
+  .review-text code { font-family: var(--mono); font-size: 0.88em; background: var(--surface-2); border: 1px solid var(--border); border-radius: 4px; padding: 0.05em 0.35em; }
   .review-text .code-wrap { position: relative; margin: 0.3rem 1rem; }
   .review-text .code-lang { position: absolute; top: 0.15rem; right: 0.5rem; font-size: 0.7rem; color: var(--muted); user-select: none; pointer-events: none; }
   .review-text pre.code-block { margin: 0; padding: 0.6rem 1rem; background: var(--surface-2); border: 1px solid var(--border); border-radius: 6px; font-family: var(--mono); font-size: 0.84rem; line-height: 1.5; white-space: pre; overflow-x: auto; }
@@ -93,7 +94,7 @@
 {% if review["review_md"] %}
 {% if rows | selectattr("snippets") | list %}<p class="small"><button type="button" onclick="toggleSnippets(this)">Развернуть весь код</button></p>
 {% endif %}
-<div class="review-text" id="rt">{% for row in rows %}{% if row["kind"] == "code" %}<div class="code-wrap" style="margin-left: calc(1rem + {{ row["indent"] }}ch)">{% if row["lang"] %}<span class="code-lang">{{ row["lang"] }}</span>{% endif %}<pre class="code-block"><code>{{ row["lines"] | join("\n") }}</code></pre></div>{% else %}<span class="ln{% if row["css"] %} {{ row["css"] }}{% endif %}">{% for text, is_code in row["segments"] %}{% if is_code %}<code>{{ text }}</code>{% else %}{{ text }}{% endif %}{% endfor %}</span>{% endif %}{% for sn in row["snippets"] %}<div class="snippets inline">{{ snippet_block(sn) }}</div>{% endfor %}{% endfor %}</div>
+<div class="review-text" id="rt">{% for row in rows %}{% if row["kind"] == "code" %}<div class="code-wrap" style="margin-left: calc(1rem + {{ row["indent"] }}ch)">{% if row["lang"] %}<span class="code-lang">{{ row["lang"] }}</span>{% endif %}<pre class="code-block"><code>{{ row["lines"] | join("\n") }}</code></pre></div>{% else %}<span class="ln{% if row["css"] %} {{ row["css"] }}{% endif %}{% if row["segments"] and not row["segments"][0][1] and row["segments"][0][0].startswith("#") %} h{% endif %}">{% for text, is_code in row["segments"] %}{% if is_code %}<code>{{ text }}</code>{% else %}{{ text }}{% endif %}{% endfor %}</span>{% endif %}{% for sn in row["snippets"] %}<div class="snippets inline">{{ snippet_block(sn) }}</div>{% endfor %}{% endfor %}</div>
 {% elif review["status"] in ("queued", "cloning", "reviewing") %}
 <p class="muted">ревью выполняется… страница обновится автоматически</p>
 {% else %}
