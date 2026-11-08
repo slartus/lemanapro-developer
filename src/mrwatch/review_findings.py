@@ -127,22 +127,27 @@ def parse_diff_hunks(diff: str | None, wanted: set[str] | None = None) -> dict[s
         return files
     current: list[_Hunk] | None = None
     hunk: _Hunk | None = None
+    keep = False
     old_left = new_left = 0
     new_no = 0
+    in_hunk = False
     for raw in diff.split("\n"):
-        if hunk is not None and (old_left > 0 or new_left > 0):
+        if in_hunk and (old_left > 0 or new_left > 0):
             marker = raw[:1]
             if marker == "\\":
                 continue
             if marker == "+":
-                hunk.lines.append(_DiffLine(new_no, raw))
+                if keep:
+                    hunk.lines.append(_DiffLine(new_no, raw))
                 new_no += 1
                 new_left -= 1
             elif marker == "-":
-                hunk.lines.append(_DiffLine(None, raw))
+                if keep:
+                    hunk.lines.append(_DiffLine(None, raw))
                 old_left -= 1
             else:
-                hunk.lines.append(_DiffLine(new_no, " " + raw[1:] if raw else " "))
+                if keep:
+                    hunk.lines.append(_DiffLine(new_no, " " + raw[1:] if raw else " "))
                 new_no += 1
                 new_left -= 1
                 old_left -= 1
@@ -154,14 +159,18 @@ def parse_diff_hunks(diff: str | None, wanted: set[str] | None = None) -> dict[s
             else:
                 current = None
             hunk = None
+            in_hunk = False
             continue
         header = HUNK_HEADER.match(raw)
-        if header and current is not None:
+        if header:
             old_left = int(header.group(2)) if header.group(2) is not None else 1
             new_left = int(header.group(4)) if header.group(4) is not None else 1
             new_no = int(header.group(3))
-            hunk = _Hunk(new_no, new_left, [])
-            current.append(hunk)
+            in_hunk = True
+            keep = current is not None
+            if current is not None:
+                hunk = _Hunk(new_no, new_left, [])
+                current.append(hunk)
     return files
 
 

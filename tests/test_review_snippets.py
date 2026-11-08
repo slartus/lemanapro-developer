@@ -347,3 +347,23 @@ def test_parse_diff_hunks_filters_wanted():
     filtered = parse_diff_hunks(DIFF, {some})
     assert set(filtered) == {some}
     assert len(filtered[some]) == len(full[some])
+
+
+def test_parse_diff_hunks_foreign_file_body_not_parsed_as_header():
+    diff = (
+        "--- a/other.py\n+++ b/other.py\n@@ -1,2 +1,3 @@\n"
+        " x\n++ b/app.py\n+y\n"
+        "@@ -9 +9 @@\n-q\n+r\n"
+        "--- a/app.py\n+++ b/app.py\n@@ -1 +1 @@\n-a\n+mine\n"
+    )
+    for wanted in (None, {"app.py"}):
+        hunks = parse_diff_hunks(diff, wanted)
+        assert [ln.text for h in hunks["app.py"] for ln in h.lines] == ["-a", "+mine"]
+
+
+def test_severity_counts_truncate_oversized_review():
+    from mrwatch.opencode_runner import parse_severity_counts
+
+    head = "- [MAJOR] a.py:1 — x\n- [NIT] b.py:2 — y\n"
+    md = head + "z" * rf.MAX_PARSE_INPUT_CHARS + "\n- [BLOCKER] c.py:3 — tail\n"
+    assert parse_severity_counts(md) == (0, 1, 0, 1)

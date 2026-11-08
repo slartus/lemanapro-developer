@@ -7,7 +7,7 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from mrwatch.review_findings import iter_findings
+from mrwatch.review_findings import MAX_PARSE_INPUT_CHARS, iter_findings
 from mrwatch.procutil import (
     OutputLimitExceeded,
     communicate_capped,
@@ -241,7 +241,7 @@ def parse_severity_counts(review_md: str | None) -> tuple[int, int, int, int]:
     """(blocker, major, minor, nit) по маркерам находок в формате агента."""
     counts = [0, 0, 0, 0]
     order = {"BLOCKER": 0, "MAJOR": 1, "MINOR": 2, "NIT": 3}
-    for finding in iter_findings(review_md):
+    for finding in iter_findings((review_md or "")[:MAX_PARSE_INPUT_CHARS]):
         counts[order[finding.severity]] += 1
     return tuple(counts)
 
