@@ -4,6 +4,7 @@ from pathlib import Path
 import pytest
 
 from mrwatch.db import (
+    MAX_REVIEW_MD_LENGTH,
     backup,
     claim_next_review,
     connect,
@@ -166,14 +167,14 @@ def test_finish_review_writes_fields_and_truncates(conn):
     mr_id = _upsert_mr(conn, project_id).mr_id
     review_id = create_review(conn, mr_id, "new", "a" * 40, "agent-a")
 
-    big_md = "x" * (1_000_000 + 500)
+    big_md = "x" * (MAX_REVIEW_MD_LENGTH + 500)
     finish_review(conn, review_id, "done", review_md=big_md, session_id="sess-1", exit_code=0)
     row = get_review(conn, review_id)
     assert row["status"] == "done"
     assert row["session_id"] == "sess-1"
     assert row["exit_code"] == 0
     assert row["finished_at"] is not None
-    assert len(row["review_md"]) == 1_000_000 + len("...[truncated]")
+    assert len(row["review_md"]) == MAX_REVIEW_MD_LENGTH + len("...[truncated]")
     assert row["review_md"].endswith("...[truncated]")
 
     review_id2 = create_review(conn, mr_id, "push", "b" * 40, "agent-a")
@@ -540,4 +541,25 @@ def test_migration_v8_adds_mention_url_idempotently(tmp_path):
     conn.commit()
     init_schema(conn)
     assert conn.execute("PRAGMA user_version").fetchone()[0] == 8
+    conn.close()
+
+
+def test_verdict_backfill_skips_truncated_review_md(tmp_path):
+    conn = connect(tmp_path / "t.db")
+    init_schema(conn)
+    conn.execute("ALTER TABLE review DROP COLUMN verdict")
+    conn.execute("PRAGMA user_version = 6")
+    conn.execute("INSERT INTO project (id, gitlab_project_id, path_with_namespace, agent) VALUES (1, 1, 'g/p', 'a')")
+    conn.execute("INSERT INTO mr (id, project_id, iid, head_sha, updated_at, first_seen_at) VALUES (1, 1, 1, 'x', 't', 't')")
+    truncated = "## Verdict\nAPPROVE\n" + "x" * MAX_REVIEW_MD_LENGTH
+    truncated = truncated[:MAX_REVIEW_MD_LENGTH] + "...[truncated]"
+    conn.execute(
+        "INSERT INTO review (mr_id, \"trigger\", head_sha, status, agent, review_md, created_at) "
+        "VALUES (1, 'new', 'sha', 'done', 'a', ?, 't')",
+        (truncated,),
+    )
+    conn.commit()
+    init_schema(conn)
+    assert len(truncated) > MAX_REVIEW_MD_LENGTH
+    assert conn.execute("SELECT verdict FROM review").fetchone()[0] is None
     conn.close()

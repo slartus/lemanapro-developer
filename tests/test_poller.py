@@ -676,7 +676,7 @@ async def test_migration_v6_reruns_backfill_once_and_sets_draft(conn):
     poller = _make_poller(conn, api)
     await poller.tick()
     conn.execute("DELETE FROM review")
-    conn.execute("UPDATE mr SET is_draft = 0, my_roles = 'author'")
+    conn.execute("UPDATE mr SET is_draft = 0, my_roles = 'author,mentioned'")
     conn.execute("PRAGMA user_version = 5")
     conn.commit()
     assert conn.execute(
@@ -691,6 +691,7 @@ async def test_migration_v6_reruns_backfill_once_and_sets_draft(conn):
     api.project_calls.clear()
     await poller.tick()
     assert _is_draft(conn, 1) == 1
+    assert "mentioned" in conn.execute("SELECT my_roles FROM mr WHERE iid = 1").fetchone()[0].split(",")
     assert list_reviews(conn) == []
     assert len([c for c in api.project_calls if c[2] == "opened" and c[1] is None]) == 1
 
@@ -776,6 +777,30 @@ async def test_mention_url_save_failure_does_not_block_review(conn, monkeypatch)
     assert todo_seen_ids(conn) == {1}
 
 
+async def test_mention_url_older_todo_does_not_overwrite_newer(conn):
+    await _tick_with_target_url(conn, MR_URL + "#note_5", todo_id=5)
+    await _tick_with_target_url(conn, MR_URL + "#note_2", todo_id=2)
+    assert _mention_url(conn) == MR_URL + "#note_5"
+
+
+async def test_mention_url_port_zero_rejected(conn):
+    await _tick_with_target_url(conn, "https://gitlab.example.com:0/g/p/-/merge_requests/5#note_1")
+    assert _mention_url(conn) is None
+
+
+async def test_todos_with_mixed_id_types_do_not_abort_tick(conn):
+    api = StubApi()
+    api.details[(10, 5)] = _detail(10, 5)
+    api.todos = [
+        {"id": "x", "target_type": "MergeRequest", "action_name": "mentioned",
+         "target_url": MR_URL + "#note_1", "target": {"project_id": 10, "iid": 5}},
+        {"id": 3, "target_type": "MergeRequest", "action_name": "mentioned",
+         "target_url": MR_URL + "#note_3", "target": {"project_id": 10, "iid": 5}},
+    ]
+    await _make_poller(conn, api).tick()
+    assert _mention_url(conn) is not None
+
+
 async def test_mention_url_explicit_default_port_accepted(conn):
     url = "https://gitlab.example.com:443/g/p/-/merge_requests/5#note_1"
     await _tick_with_target_url(conn, url)
@@ -814,3 +839,14 @@ async def test_mention_url_outside_gitlab_subpath_rejected(conn):
     url = "https://gitlab.example.com/other/g/p/-/merge_requests/5"
     await _subpath_tick(conn, url, url + "#note_1")
     assert _mention_url(conn) is None
+
+
+async def test_todo_with_bool_id_is_skipped(conn):
+    api = StubApi()
+    api.details[(10, 5)] = _detail(10, 5)
+    api.todos = [
+        {"id": True, "target_type": "MergeRequest", "action_name": "mentioned",
+         "target_url": MR_URL + "#note_1", "target": {"project_id": 10, "iid": 5}},
+    ]
+    await _make_poller(conn, api).tick()
+    assert conn.execute("SELECT COUNT(*) FROM mr").fetchone()[0] == 0

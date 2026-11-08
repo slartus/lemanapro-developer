@@ -158,6 +158,8 @@ async def clone_for_review(
     expected_sha: str | None = None,
 ) -> Path:
     workspace = Path(workspace).resolve()
+    if os.path.lexists(workspace):
+        await asyncio.to_thread(remove_workspace, workspace)
     workspace.mkdir(parents=True, exist_ok=True)
     try:
         await run_git(build_clone_args(repo_url, workspace, depth), tmpdir, env, harden=harden, tmpdir=tmpdir)
@@ -185,19 +187,22 @@ async def clone_for_review(
                 )
             except GitOpsError as exc:
                 logger.warning("base branch fetch failed (%s): %s", target_branch, exc)
+        try:
+            await run_git(["git", "remote", "remove", "origin"], workspace, env, harden=harden, tmpdir=tmpdir)
+        except GitOpsError as exc:
+            logger.warning("remote remove failed: %s", exc)
+        try:
+            await asyncio.to_thread(sanitize_clone, workspace)
+        except (GitOpsError, OSError) as exc:
+            raise GitOpsError(f"workspace sanitize failed: {exc}") from exc
     except BaseException:
-        await asyncio.to_thread(remove_workspace, workspace)
+        await _discard_workspace(workspace)
         raise
-    try:
-        await run_git(["git", "remote", "remove", "origin"], workspace, env, harden=harden, tmpdir=tmpdir)
-    except GitOpsError as exc:
-        logger.warning("remote remove failed: %s", exc)
-    try:
-        await asyncio.to_thread(sanitize_clone, workspace)
-    except (GitOpsError, OSError) as exc:
-        await asyncio.to_thread(remove_workspace, workspace)
-        raise GitOpsError(f"workspace sanitize failed: {exc}") from exc
     return workspace
+
+
+async def _discard_workspace(workspace: Path) -> None:
+    await asyncio.shield(asyncio.to_thread(remove_workspace, workspace))
 
 
 async def _pin_fetch_head(

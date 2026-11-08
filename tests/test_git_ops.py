@@ -177,3 +177,114 @@ def test_make_git_env_no_token(tmp_path):
     assert "GIT_LFS_SKIP_SMUDGE" in env.base_env
     assert set(env.base_env) <= {"PATH", "HOME", "TMPDIR", "GIT_TERMINAL_PROMPT", "GIT_LFS_SKIP_SMUDGE"}
     assert all("printf tok" != v for v in env.base_env.values())
+
+
+async def test_clone_removes_stale_workspace_before_clone(origin, tmp_path):
+    tmpdir = tmp_path / "tmp"
+    tmpdir.mkdir()
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    (workspace / "stale.txt").write_text("old")
+    await clone_for_review(workspace, str(origin), 1, "main", 5, NO_ENV, tmpdir, harden=False)
+    assert not (workspace / "stale.txt").exists()
+    assert (workspace / "new.py").exists()
+
+
+async def test_clone_cancelled_during_sanitize_removes_workspace(origin, tmp_path, monkeypatch):
+    import asyncio
+
+    from mrwatch import git_ops
+
+    tmpdir = tmp_path / "tmp"
+    tmpdir.mkdir()
+    workspace = tmp_path / "ws"
+
+    def cancelled(_workspace):
+        raise asyncio.CancelledError()
+
+    monkeypatch.setattr(git_ops, "sanitize_clone", cancelled)
+    with pytest.raises(asyncio.CancelledError):
+        await clone_for_review(workspace, str(origin), 1, "main", 5, NO_ENV, tmpdir, harden=False)
+    assert not workspace.exists()
+
+
+async def test_clone_cancelled_during_remote_remove_removes_workspace(origin, tmp_path, monkeypatch):
+    import asyncio
+
+    from mrwatch import git_ops
+
+    tmpdir = tmp_path / "tmp"
+    tmpdir.mkdir()
+    workspace = tmp_path / "ws"
+    real_run_git = git_ops.run_git
+
+    async def run_git(args, *a, **kw):
+        if args[:3] == ["git", "remote", "remove"]:
+            raise asyncio.CancelledError()
+        return await real_run_git(args, *a, **kw)
+
+    monkeypatch.setattr(git_ops, "run_git", run_git)
+    with pytest.raises(asyncio.CancelledError):
+        await clone_for_review(workspace, str(origin), 1, "main", 5, NO_ENV, tmpdir, harden=False)
+    assert not workspace.exists()
+
+
+async def test_clone_cancel_during_sanitize_removes_workspace_in_thread(origin, tmp_path, monkeypatch):
+    import asyncio
+    import threading
+
+    from mrwatch import git_ops
+
+    tmpdir = tmp_path / "tmp"
+    tmpdir.mkdir()
+    workspace = tmp_path / "ws"
+    removal_threads: list[int] = []
+    real_remove = git_ops.remove_workspace
+
+    def cancelled(_workspace):
+        raise asyncio.CancelledError()
+
+    def tracking_remove(path):
+        removal_threads.append(threading.get_ident())
+        real_remove(path)
+
+    monkeypatch.setattr(git_ops, "sanitize_clone", cancelled)
+    monkeypatch.setattr(git_ops, "remove_workspace", tracking_remove)
+    with pytest.raises(asyncio.CancelledError):
+        await clone_for_review(workspace, str(origin), 1, "main", 5, NO_ENV, tmpdir, harden=False)
+    assert not workspace.exists()
+    assert removal_threads and removal_threads[0] != threading.get_ident()
+
+
+async def test_clone_failure_then_cancel_during_discard_propagates_cancel(tmp_path, monkeypatch):
+    import asyncio
+    import threading
+    import time
+
+    from mrwatch import git_ops
+
+    removing = threading.Event()
+    removed = threading.Event()
+
+    def slow_remove(path, *args, **kwargs):
+        removing.set()
+        time.sleep(0.3)
+        removed.set()
+
+    async def failing_run_git(*args, **kwargs):
+        raise git_ops.GitOpsError("clone failed")
+
+    monkeypatch.setattr(git_ops, "remove_workspace", slow_remove)
+    monkeypatch.setattr(git_ops, "run_git", failing_run_git)
+
+    task = asyncio.create_task(
+        clone_for_review(tmp_path / "ws", "u", 1, None, 1, NO_ENV, tmp_path, harden=False)
+    )
+    while not removing.is_set():
+        await asyncio.sleep(0.01)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert task.cancelled()
+    await asyncio.to_thread(removed.wait, 2)
+    assert removed.is_set()

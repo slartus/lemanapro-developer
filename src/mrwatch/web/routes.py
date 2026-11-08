@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import os
+from functools import lru_cache
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -26,11 +27,16 @@ templates = Jinja2Templates(directory=str(Path(__file__).parent / "templates"))
 FAVICON_PATH = Path(__file__).parent / "static" / "favicon.svg"
 
 
+@lru_cache(maxsize=1)
+def _favicon_bytes() -> bytes:
+    return FAVICON_PATH.read_bytes()
+
+
 @router.get("/favicon.svg", include_in_schema=False)
 @router.get("/favicon.ico", include_in_schema=False)
 async def favicon():
     return Response(
-        FAVICON_PATH.read_bytes(),
+        _favicon_bytes(),
         media_type="image/svg+xml",
         headers={"Cache-Control": "public, max-age=86400"},
     )
