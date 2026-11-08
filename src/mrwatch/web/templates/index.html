@@ -197,8 +197,11 @@ function renderRow(m) {
   return tr;
 }
 
+let inFlight = false;
+
 async function refresh() {
-  if (document.hidden) return;
+  if (document.hidden || inFlight) return;
+  inFlight = true;
   try {
     const r = await fetch("/api/mrs", {cache: "no-store"});
     if (!r.ok) return;
@@ -206,15 +209,28 @@ async function refresh() {
     document.getElementById("mr-body").replaceChildren(...rows.map(renderRow));
     MRW.renderTimes();
     applyFilter();
-  } catch (e) {}
+  } catch (e) {
+  } finally {
+    inFlight = false;
+  }
 }
 
+const ACTIVE_INTERVAL_MS = 5000;
+const IDLE_INTERVAL_MS = 30000;
+
 function schedule() {
-  if (timer) clearInterval(timer);
-  timer = setInterval(function () {
-    if (hasActive()) refresh();
-  }, 5000);
+  if (timer) clearTimeout(timer);
+  timer = setTimeout(async function () {
+    await refresh();
+    schedule();
+  }, hasActive() ? ACTIVE_INTERVAL_MS : IDLE_INTERVAL_MS);
 }
+
+document.addEventListener("visibilitychange", async function () {
+  if (document.hidden) return;
+  await refresh();
+  schedule();
+});
 
 async function forceCheck() {
   const btn = document.getElementById("fc-btn");

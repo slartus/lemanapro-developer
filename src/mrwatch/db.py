@@ -617,7 +617,7 @@ def list_mrs(conn: sqlite3.Connection, limit: int = 200) -> list[sqlite3.Row]:
             ) last ON last.max_id = r.id
         ) latest_done ON latest_done.mr_id = mr.id
         WHERE mr.state IS NULL OR mr.state IN ('opened', 'locked')
-        ORDER BY mr.id DESC
+        ORDER BY julianday(mr.updated_at) IS NULL, julianday(mr.updated_at) DESC, mr.id DESC
         LIMIT ?
         """,
         (limit,),
