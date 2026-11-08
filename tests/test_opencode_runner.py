@@ -12,6 +12,7 @@ from mrwatch.opencode_runner import (
     output_truncated_by_length,
     parse_opencode_output,
     parse_severity_counts,
+    MAX_VERDICT_INPUT_CHARS,
     parse_verdict,
     run_review,
     collect_project_instructions,
@@ -245,6 +246,24 @@ def test_build_review_prompt_includes_project_rules():
 )
 def test_parse_verdict(md, expected):
     assert parse_verdict(md) == expected
+
+
+def _padded(tail: str, total: int) -> str:
+    return "x" * (total - len(tail)) + tail
+
+
+def test_parse_verdict_over_limit_returns_none():
+    tail = "\n## Verdict\nAPPROVE\n"
+    assert parse_verdict(_padded(tail, MAX_VERDICT_INPUT_CHARS + 1)) is None
+
+
+def test_parse_verdict_exactly_at_limit_is_parsed():
+    tail = "\n## Verdict\nAPPROVE\n"
+    assert parse_verdict(_padded(tail, MAX_VERDICT_INPUT_CHARS)) == "APPROVE"
+
+
+def test_parse_verdict_unclosed_fence_before_verdict_returns_none():
+    assert parse_verdict("text\n```\ncode\n## Verdict\nAPPROVE\n") is None
 
 
 def test_parse_verdict_is_linear_on_hostile_input():

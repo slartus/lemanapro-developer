@@ -5,9 +5,9 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
-from mrwatch.opencode_runner import parse_verdict
+from mrwatch.opencode_runner import MAX_VERDICT_INPUT_CHARS, parse_verdict
 
-MAX_REVIEW_MD_LENGTH = 1_000_000
+MAX_REVIEW_MD_LENGTH = MAX_VERDICT_INPUT_CHARS
 TRUNCATION_MARKER = "...[truncated]"
 SCHEMA_VERSION = 7
 

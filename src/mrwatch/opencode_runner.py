@@ -266,14 +266,14 @@ def _single_token(tokens: set[str]) -> str | None:
 
 
 def parse_verdict(review_md: str | None) -> str | None:
-    if not review_md:
+    if not review_md or len(review_md) > MAX_VERDICT_INPUT_CHARS:
         return None
     fence: str | None = None
     in_section = False
     section_tokens: set[str] = set()
     section_hit: tuple[str | None] | None = None
     line_hit: tuple[str | None] | None = None
-    for raw in review_md[:MAX_VERDICT_INPUT_CHARS].splitlines():
+    for raw in review_md.splitlines():
         if fence is not None:
             stripped = raw.strip()
             if stripped and stripped[0] == fence[0] and len(stripped) >= len(fence) and not stripped.strip(fence[0]):
