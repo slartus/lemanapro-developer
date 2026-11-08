@@ -133,6 +133,7 @@ ROLE_LABELS = {
 
 def _mr_payload(row) -> dict:
     payload = {field: row[field] for field in MR_ROW_FIELDS}
+    payload["is_draft"] = bool(row["is_draft"])
     payload["my_roles"] = [role for role in (row["my_roles"] or "").split(",") if role]
     return payload
 

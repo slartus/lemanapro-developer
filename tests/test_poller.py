@@ -19,7 +19,7 @@ from mrwatch.db import (
 from mrwatch.gitlab_client import GitlabApiError
 from mrwatch.db import SCAN_DONE_KEY, list_mrs
 from mrwatch.db import MR_CURSOR_KEY, todo_seen_ids
-from mrwatch.poller import Poller
+from mrwatch.poller import Poller, parse_draft
 
 CURSOR_KEY = MR_CURSOR_KEY.format(10)
 
@@ -611,3 +611,89 @@ async def test_roles_backfill_api_error_retries_next_tick(conn):
     fail["on"] = False
     await poller.tick()
     assert "mentioned" in _roles(conn, 1)
+
+
+def _is_draft(conn, iid):
+    return conn.execute("SELECT is_draft FROM mr WHERE iid = ?", (iid,)).fetchone()["is_draft"]
+
+
+@pytest.mark.parametrize(
+    "extra,expected",
+    [
+        ({"draft": True}, True),
+        ({"draft": False}, False),
+        ({"work_in_progress": True}, True),
+        ({"work_in_progress": False}, False),
+        ({"draft": False, "work_in_progress": True}, False),
+        ({}, None),
+        ({"draft": "true"}, None),
+        ({"draft": None, "work_in_progress": True}, True),
+    ],
+)
+def test_parse_draft(extra, expected):
+    assert parse_draft(extra) is expected
+
+
+async def test_draft_saved_and_kept_when_field_absent(conn):
+    api = StubApi()
+    api.mrs = [_mr(10, 1) | {"draft": True}]
+    poller = _make_poller(conn, api)
+    await poller.tick()
+    assert _is_draft(conn, 1) == 1
+
+    api.mrs = [_mr(10, 1, updated_at="2026-01-02T12:00:00Z")]
+    await poller.tick()
+    assert _is_draft(conn, 1) == 1
+
+    api.mrs = [_mr(10, 1, updated_at="2026-01-03T12:00:00Z") | {"work_in_progress": False}]
+    await poller.tick()
+    assert _is_draft(conn, 1) == 0
+
+
+async def test_draft_from_todo_detail(conn):
+    api = StubApi()
+    api.details[(10, 5)] = _detail(10, 5) | {"draft": True}
+    api.todos = [{"id": 1, "target_type": "MergeRequest", "action_name": "mentioned",
+                  "target": {"project_id": 10, "iid": 5}}]
+    await _make_poller(conn, api).tick()
+    assert _is_draft(conn, 5) == 1
+
+
+async def test_roles_backfill_updates_draft(conn):
+    api = StubApi()
+    api.mrs = [_mr(10, 1)]
+    poller = _make_poller(conn, api)
+    await poller.tick()
+    _reset_backfill(conn)
+    api.mrs = [_mr(10, 1) | {"draft": True}]
+    await poller.tick()
+    assert _is_draft(conn, 1) == 1
+
+
+async def test_migration_v6_reruns_backfill_once_and_sets_draft(conn):
+    api = StubApi()
+    api.mrs = [_mr(10, 1)]
+    poller = _make_poller(conn, api)
+    await poller.tick()
+    conn.execute("DELETE FROM review")
+    conn.execute("UPDATE mr SET is_draft = 0, my_roles = 'author'")
+    conn.execute("PRAGMA user_version = 5")
+    conn.commit()
+    assert conn.execute(
+        "SELECT COUNT(*) FROM poll_state WHERE key LIKE 'roles_backfill_v5:%'"
+    ).fetchone()[0] == 1
+    init_schema(conn)
+    assert conn.execute(
+        "SELECT COUNT(*) FROM poll_state WHERE key LIKE 'roles_backfill_v5:%'"
+    ).fetchone()[0] == 0
+
+    api.mrs = [_mr(10, 1) | {"draft": True}]
+    api.project_calls.clear()
+    await poller.tick()
+    assert _is_draft(conn, 1) == 1
+    assert list_reviews(conn) == []
+    assert len([c for c in api.project_calls if c[2] == "opened" and c[1] is None]) == 1
+
+    api.project_calls.clear()
+    await poller.tick()
+    assert all(c[1] is not None for c in api.project_calls)

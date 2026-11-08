@@ -372,7 +372,7 @@ def test_migration_v1_to_v2_adds_severity_columns(tmp_path):
     assert {"crit_count", "major_count", "minor_count", "nit_count"} <= columns
     mr_columns = {r[1] for r in conn.execute("PRAGMA table_info(mr)")}
     assert "author_name" in mr_columns
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == 5
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 6
     assert "my_roles" in mr_columns
     conn.close()
 
@@ -411,7 +411,7 @@ def test_migration_v5_idempotent_and_keeps_data(tmp_path):
     init_schema(conn)
     _run_migration(conn, 5, _migrate_to_v5)
     init_schema(conn)
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == 5
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 6
     assert conn.execute("SELECT my_roles FROM mr").fetchone()["my_roles"] == "mentioned"
     conn.close()
 
@@ -433,4 +433,23 @@ def test_roles_union_recompute_and_clear_on_close(tmp_path):
     assert put(derived={"author"}) == "author,mentioned"
     assert put(derived=set()) == "mentioned"
     assert put(state="merged", derived=set()) == ""
+    conn.close()
+
+
+def test_migration_v6_adds_is_draft_and_is_idempotent(tmp_path):
+    conn = connect(tmp_path / "v5.db")
+    init_schema(conn)
+    conn.execute("ALTER TABLE mr DROP COLUMN is_draft")
+    conn.execute("PRAGMA user_version = 5")
+    conn.commit()
+    init_schema(conn)
+    init_schema(conn)
+    columns = {r[1]: r for r in conn.execute("PRAGMA table_info(mr)")}
+    assert columns["is_draft"][3] == 1
+    assert columns["is_draft"][4] == "0"
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 6
+    conn.execute("PRAGMA user_version = 5")
+    conn.commit()
+    init_schema(conn)
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 6
     conn.close()
