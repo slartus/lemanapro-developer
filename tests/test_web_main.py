@@ -291,8 +291,6 @@ class _ProjectResolver:
 
     async def get_project_by_path(self, path):
         if path not in self._by_path:
-            import json as _json
-            from fastapi.responses import PlainTextResponse
             raise LookupError(path)
         return self._by_path[path]
 

@@ -70,7 +70,6 @@ def test_mask_secrets():
 
 
 async def test_clone_for_review_full_flow(origin, tmp_path):
-    import asyncio
 
     tmpdir = tmp_path / "tmp"
     tmpdir.mkdir()
@@ -92,7 +91,6 @@ async def test_clone_for_review_full_flow(origin, tmp_path):
 
 
 async def test_clone_failure_raises(origin, tmp_path):
-    import asyncio
 
     from mrwatch.git_ops import GitOpsError
 
@@ -112,7 +110,6 @@ async def test_clone_failure_raises(origin, tmp_path):
 
 
 async def test_diff_for_review(origin, tmp_path):
-    import asyncio
 
     tmpdir = tmp_path / "tmp"
     tmpdir.mkdir()

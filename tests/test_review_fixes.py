@@ -1,9 +1,7 @@
 from __future__ import annotations
 
 import os
-import sqlite3
 import time
-from pathlib import Path
 
 import pytest
 
@@ -13,13 +11,11 @@ from mrwatch.agents import AgentError, validate_agent
 from mrwatch.db import (
     SCHEMA_VERSION,
     connect,
-    create_review,
-    get_review,
     init_schema,
     poll_state_get,
     rebase_review_head,
 )
-from mrwatch.git_ops import GitEnv, GitOpsError, sanitize_clone
+from mrwatch.git_ops import GitEnv, sanitize_clone
 from mrwatch.opencode_runner import _build_env
 from mrwatch.web.routes import safe_url
 

@@ -104,7 +104,6 @@ async def review_detail(request: Request, review_id: int):
 async def force_check(request: Request):
     if request.headers.get("x-requested-with") != "mrwatch":
         return PlainTextResponse("forbidden", status_code=403)
-    ctx = _ctx(request)
     try:
         config = load_config(default_config_path())
         _warn_if_workers_changed(request, config)
