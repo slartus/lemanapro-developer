@@ -1,3 +1,4 @@
+from pydantic import ValidationError
 import pytest
 
 from mrwatch.config import (
@@ -119,3 +120,28 @@ def test_default_config_path_env_override(monkeypatch):
     assert default_config_path() == Path("/tmp/custom.yaml")
     monkeypatch.delenv("MRWATCH_CONFIG")
     assert str(default_config_path()).endswith(".config/mr-watch/config.yaml")
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://user:pass@gitlab.example.com",
+        "https://token@gitlab.example.com",
+        "https://gitlab.example.com?a=1",
+        "https://gitlab.example.com/#frag",
+        "https://gitlab.example.com/gitlab?x=y",
+        "http://gitlab.example.com",
+        "ftp://gitlab.example.com",
+        "gitlab.example.com",
+        "https://",
+    ],
+)
+def test_gitlab_url_rejected(url):
+    with pytest.raises(ValidationError):
+        GitlabConfig(url=url)
+
+
+def test_gitlab_url_accepted():
+    assert GitlabConfig(url="https://gitlab.example.com").url == "https://gitlab.example.com"
+    assert GitlabConfig(url="https://gitlab.example.com:8443/").url == "https://gitlab.example.com:8443"
+    assert GitlabConfig(url="https://example.com/gitlab/").url == "https://example.com/gitlab"

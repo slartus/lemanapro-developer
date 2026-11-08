@@ -169,11 +169,52 @@ def test_cleanup_old_workspaces(tmp_path):
 
 
 def test_make_git_env_no_token(tmp_path):
-    env = make_git_env("printf tok", tmp_path)
+    from mrwatch.opencode_runner import _build_env
+
+    secret = "glpat-FAKE-SECRET-123"
+    pat_command = f"echo {secret}"
+    env = make_git_env(pat_command, tmp_path)
     assert "GIT_TERMINAL_PROMPT" in env.base_env
     assert "GIT_LFS_SKIP_SMUDGE" in env.base_env
     assert set(env.base_env) <= {"PATH", "HOME", "TMPDIR", "GIT_TERMINAL_PROMPT", "GIT_LFS_SKIP_SMUDGE"}
-    assert all("printf tok" != v for v in env.base_env.values())
+    assert all(pat_command != v for v in env.base_env.values())
+    assert not any(secret in v for v in env.base_env.values())
+    assert "GIT_ASKPASS" not in env.base_env
+    assert not any(secret in v for v in _build_env(str(tmp_path), tmp_path).values())
+
+
+async def test_askpass_script_contains_command_not_token(tmp_path, monkeypatch):
+    import asyncio
+
+    from mrwatch import git_ops
+
+    secret = "glpat-FAKE-SECRET-123"
+    pat_command = f"echo {secret}"
+    captured: dict = {}
+
+    class FakeProc:
+        returncode = 0
+
+        async def communicate(self):
+            return b"", b""
+
+    async def fake_exec(*args, **kwargs):
+        captured["env"] = dict(kwargs["env"])
+        captured["script"] = Path(kwargs["env"]["GIT_ASKPASS"]).read_text()
+        captured["args"] = args
+        return FakeProc()
+
+    async def fake_communicate(proc, limit):
+        return b"", b""
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
+    monkeypatch.setattr(git_ops, "communicate_capped", fake_communicate)
+    env = make_git_env(pat_command, tmp_path)
+    await git_ops.run_git(["git", "--version"], cwd=tmp_path, env=env, tmpdir=tmp_path)
+    assert pat_command in captured["script"]
+    assert not any(secret in v for k, v in captured["env"].items() if k != "GIT_ASKPASS")
+    assert secret not in captured["env"]["GIT_ASKPASS"]
+    assert not any(secret in a for a in captured["args"])
 
 
 async def test_clone_removes_stale_workspace_before_clone(origin, tmp_path):
