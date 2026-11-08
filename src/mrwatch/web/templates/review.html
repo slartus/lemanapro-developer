@@ -23,6 +23,7 @@
   .snippets .cl { display: block; white-space: pre; padding: 0 0.9rem; min-height: 1.5em; border-left: 3px solid transparent; }
   .snippets .cl.add { background: var(--ok-bg); color: var(--ok-fg); border-left-color: var(--ok-fg); }
   .snippets .cl.del { background: var(--err-bg); color: var(--err-fg); border-left-color: var(--err-fg); }
+  .review-text .snippets.inline { padding: 0 1rem; margin: 0.2rem 0; }
   .siblings a, .siblings strong { margin-right: 0.6rem; white-space: nowrap; }
   #retry-msg { min-height: 1.2em; }
 {% endblock %}
@@ -79,9 +80,15 @@
 </p>
 {% endif %}
 
+{% macro snippet_block(sn) %}<details class="snip">
+<summary><span class="sev {{ {"BLOCKER": "crit", "MAJOR": "major", "MINOR": "minor", "NIT": "nit"}.get(sn["severity"], "nit") }}">{{ sn["severity"] }}</span>{{ sn["path"] }}:{{ sn["start"] }}{% if sn["end"] != sn["start"] %}-{{ sn["end"] }}{% endif %}</summary>
+<pre class="code">{% for l in sn["code"].split("\n") %}<span class="cl{% if sn["source"] == "diff" and l.startswith("+") %} add{% elif sn["source"] == "diff" and l.startswith("-") %} del{% endif %}">{{ l }}</span>{% endfor %}</pre>
+</details>{% endmacro %}
 <h2>Результат ревью</h2>
 {% if review["review_md"] %}
-<div class="review-text" id="rt">{% for line in review["review_md"].splitlines() %}<span class="ln{% if "[BLOCKER]" in line %} crit{% elif "[MAJOR]" in line %} major{% elif "[MINOR]" in line %} minor{% elif "[NIT]" in line %} nit{% endif %}">{{ line }}</span>{% endfor %}</div>
+{% if rows | selectattr("snippets") | list %}<p class="small"><button type="button" onclick="toggleSnippets(this)">Развернуть весь код</button></p>
+{% endif %}
+<div class="review-text" id="rt">{% for row in rows %}<span class="ln{% if row["css"] %} {{ row["css"] }}{% endif %}">{{ row["text"] }}</span>{% for sn in row["snippets"] %}<div class="snippets inline">{{ snippet_block(sn) }}</div>{% endfor %}{% endfor %}</div>
 {% elif review["status"] in ("queued", "cloning", "reviewing") %}
 <p class="muted">ревью выполняется… страница обновится автоматически</p>
 {% else %}
@@ -91,16 +98,20 @@
 <h2>Код к находкам</h2>
 <div class="snippets">
 {% for sn in snippets %}
-<details>
-<summary><span class="sev {{ {"BLOCKER": "crit", "MAJOR": "major", "MINOR": "minor", "NIT": "nit"}.get(sn["severity"], "nit") }}">{{ sn["severity"] }}</span>{{ sn["path"] }}:{{ sn["start"] }}{% if sn["end"] != sn["start"] %}-{{ sn["end"] }}{% endif %}</summary>
-<pre class="code">{% for l in sn["code"].split("\n") %}<span class="cl{% if sn["source"] == "diff" and l.startswith("+") %} add{% elif sn["source"] == "diff" and l.startswith("-") %} del{% endif %}">{{ l }}</span>{% endfor %}</pre>
-</details>
+{{ snippet_block(sn) }}
 {% endfor %}
 </div>
 {% endif %}
 {% endblock %}
 {% block scripts %}
 <script>
+function toggleSnippets(btn) {
+  const open = btn.dataset.open !== "1";
+  document.querySelectorAll("details.snip").forEach(function (d) { d.open = open; });
+  btn.dataset.open = open ? "1" : "0";
+  btn.textContent = open ? "Свернуть весь код" : "Развернуть весь код";
+}
+
 const ACTIVE_STATUS = ["queued", "cloning", "reviewing"];
 const CURRENT = {{ review["status"] | tojson }};
 

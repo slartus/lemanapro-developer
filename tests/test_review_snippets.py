@@ -367,3 +367,63 @@ def test_severity_counts_truncate_oversized_review():
     head = "- [MAJOR] a.py:1 — x\n- [NIT] b.py:2 — y\n"
     md = head + "z" * rf.MAX_PARSE_INPUT_CHARS + "\n- [BLOCKER] c.py:3 — tail\n"
     assert parse_severity_counts(md) == (0, 1, 0, 1)
+
+
+def test_finding_line_and_snippet_line_with_fence_and_quote(tmp_path):
+    (tmp_path / "m.py").write_text("\n".join(f"l{i}" for i in range(1, 30)))
+    md = "intro\r\n```\r\n- [MAJOR] x.py:1 — fake\r\n```\r\n> - [NIT] y.py:1\r\n- [MINOR] m.py:5 — real\r\n"
+    found = parse_findings(md)
+    assert [(f.index, f.line) for f in found] == [(0, 5)]
+    snippets = extract_snippets(md, None, tmp_path)
+    assert snippets[0]["line"] == 5
+    assert rf.split_review_lines(md)[5].startswith("- [MINOR]")
+
+
+def test_load_snippets_old_record_without_line():
+    raw = json.dumps([{"index": 0, "severity": "NIT", "path": "a.py", "start": 1, "end": 1, "source": "file", "code": "x"}])
+    assert load_snippets(raw)[0]["line"] is None
+
+
+def _sn(index, severity, path, line, code="c"):
+    return {"index": index, "line": line, "severity": severity, "path": path,
+            "start": 1, "end": 1, "source": "file", "code": code}
+
+
+def test_layout_inserts_after_finding_line():
+    md = "head\n- [MAJOR] a.py:1 — x\n  fix: y\n- [NIT] b.py:2 — z"
+    rows, orphans = rf.layout_review(md, [_sn(0, "MAJOR", "a.py", 1), _sn(1, "NIT", "b.py", 3)])
+    assert orphans == []
+    assert [len(r["snippets"]) for r in rows] == [0, 1, 0, 1]
+    assert rows[1]["css"] == "major"
+
+
+def test_layout_orphans_old_and_forged():
+    md = "- [MAJOR] a.py:1 — x\ntext\n- [NIT] b.py:2 — z"
+    snippets = [
+        _sn(0, "MAJOR", "a.py", None),
+        _sn(0, "MAJOR", "a.py", 1),
+        _sn(0, "MAJOR", "a.py", 2),
+        _sn(1, "NIT", "b.py", 0),
+        _sn(1, "MINOR", "b.py", 2),
+        _sn(1, "NIT", "other.py", 2),
+        _sn(1, "NIT", "b.py", 99),
+    ]
+    rows, orphans = rf.layout_review(md, snippets)
+    assert len(orphans) == 7
+    assert [len(r["snippets"]) for r in rows] == [0, 0, 0]
+
+
+async def test_review_page_inline_snippet_order_and_escape(ctx):
+    ctx_obj, review_id = ctx
+    md = "- [MAJOR] a.py:1 — <script>x</script>\n  fix: do\n- [NIT] z.py:1 — q"
+    snippets = [
+        dict(_sn(0, "MAJOR", "a.py", 0), source="diff", code="+<script>alert(1)</script>\n-old"),
+        _sn(1, "NIT", "z.py", 7, code="orphan-code"),
+    ]
+    finish_review(ctx_obj.conn, review_id, "done", review_md=md, snippets_json=json.dumps(snippets))
+    async with _client(ctx_obj) as client:
+        text = (await client.get(f"/reviews/{review_id}")).text
+    assert "<script>alert(1)" not in text and "<script>x</script>" not in text
+    assert text.index("&lt;script&gt;x") < text.index('class="cl add">+&lt;script') < text.index("fix: do")
+    assert text.index("orphan-code") > text.index("Код к находкам")
+    assert text.count("Код к находкам") == 1

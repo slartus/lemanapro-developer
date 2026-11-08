@@ -17,7 +17,7 @@ from mrwatch.agents import list_readonly_agents
 from mrwatch.config import Config, default_config_path, load_config
 from mrwatch.db import get_review, list_mrs, retry_review, sync_projects
 from mrwatch.gitlab_client import GitlabApiError
-from mrwatch.review_findings import load_snippets
+from mrwatch.review_findings import layout_review, load_snippets
 
 logger = logging.getLogger(__name__)
 
@@ -95,10 +95,11 @@ async def review_detail(request: Request, review_id: int):
         "SELECT id, status, created_at FROM review WHERE mr_id = ? ORDER BY id DESC",
         (review["mr_id"],),
     ).fetchall()
+    rows, orphans = layout_review(review["review_md"], load_snippets(review["snippets_json"]))
     return templates.TemplateResponse(
         request, "review.html",
         {"review": review, "mr": mr, "siblings": siblings,
-         "snippets": load_snippets(review["snippets_json"])},
+         "rows": rows, "snippets": orphans},
     )
 
 
