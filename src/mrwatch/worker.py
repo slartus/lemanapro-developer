@@ -17,6 +17,7 @@ from mrwatch.db import (
     requeue_review,
 )
 from mrwatch.git_ops import (
+    BASE_REF,
     GitEnv,
     GitOpsError,
     HeadMismatchError,
@@ -167,7 +168,7 @@ class Worker:
         )
         try:
             out = await run_git(
-                ["git", "merge-base", f"refs/remotes/origin/{target}", head_sha],
+                ["git", "merge-base", BASE_REF, head_sha],
                 workspace, env,
             )
         except GitOpsError as exc:

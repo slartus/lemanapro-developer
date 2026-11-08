@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import sqlite3
 import time
 from pathlib import Path
@@ -18,7 +19,7 @@ from mrwatch.db import (
     poll_state_get,
     rebase_review_head,
 )
-from mrwatch.git_ops import GitOpsError, sanitize_clone
+from mrwatch.git_ops import GitEnv, GitOpsError, sanitize_clone
 from mrwatch.opencode_runner import _build_env
 from mrwatch.web.routes import safe_url
 
@@ -40,6 +41,28 @@ def test_sanitize_removes_nested_context_files(tmp_path):
     assert not (ws / "src" / "AGENTS.md").exists()
     assert not (ws / "src" / "deep" / "CLAUDE.md").exists()
     assert (ws / "src" / "keep.md").exists()
+
+
+@pytest.mark.parametrize("name", ["agents.md", "Agents.MD", "context.md", "Claude.md", "Context.MD"])
+def test_sanitize_removes_case_variants(tmp_path, name):
+    ws = tmp_path / "ws"
+    (ws / "sub" / "deep").mkdir(parents=True)
+    (ws / name).write_text("x")
+    (ws / "sub" / name).write_text("x")
+    (ws / "sub" / "deep" / name).write_text("x")
+    (ws / "sub" / "keep.md").write_text("x")
+    sanitize_clone(ws)
+    assert sorted(p.name for p in ws.rglob("*")) == ["deep", "keep.md", "sub"]
+
+
+def test_sanitize_removes_case_variant_root_dirs(tmp_path):
+    ws = tmp_path / "ws"
+    (ws / ".OpenCode").mkdir(parents=True)
+    (ws / ".OpenCode" / "a").write_text("x")
+    (ws / "OpenCode.JSON").write_text("x")
+    (ws / ".Claude").mkdir()
+    sanitize_clone(ws)
+    assert list(ws.iterdir()) == []
 
 
 def test_sanitize_removes_nested_symlink_without_following(tmp_path):
@@ -155,15 +178,25 @@ async def test_base_sha_uses_diff_refs_when_head_matches(tmp_path, db, origin):
 
 
 async def test_base_sha_uses_merge_base_when_head_moved(tmp_path, db, origin):
+    from mrwatch.git_ops import clone_for_review, diff_for_review
+
+    bare = tmp_path / "bare.git"
+    _git("clone", "-q", "--bare", str(origin), str(bare))
+    _git("update-ref", "refs/merge-requests/1/head", _git("rev-parse", "feature", cwd=origin).strip(), cwd=bare)
     worker = _worker(tmp_path, db, origin, "/bin/true")
     ws = tmp_path / "clone"
-    _git("clone", "-q", str(origin), str(ws))
-    head = _git("rev-parse", "origin/feature", cwd=ws).strip()
-    expected = _git("rev-parse", "origin/main", cwd=ws).strip()
+    tmpdir = tmp_path / "gt"
+    tmpdir.mkdir()
+    await clone_for_review(ws, str(bare), 1, "main", 5, GitEnv(pat_command="", base_env=dict(os.environ)), tmpdir, harden=False)
+    assert "origin" not in _git("remote", cwd=ws)
+    head = _git("rev-parse", "HEAD", cwd=ws).strip()
+    expected = _git("rev-parse", "main", cwd=origin).strip()
     got = await worker._resolve_base_sha(
         ws, {"sha": "c" * 40, "target_branch": "main"}, {"base_sha": "d" * 40}, head
     )
     assert got == expected
+    diff = await diff_for_review(ws, got, head)
+    assert diff and "+print('hello')" in diff
 
 
 def test_safe_url():

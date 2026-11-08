@@ -37,6 +37,9 @@ SANITIZE_NAMES = (
     ".agents",
 )
 NESTED_CONTEXT_NAMES = frozenset({"AGENTS.md", "CLAUDE.md", "CONTEXT.md"})
+_ROOT_FORBIDDEN = frozenset(n.casefold() for n in SANITIZE_NAMES)
+_NESTED_FORBIDDEN = frozenset(n.casefold() for n in NESTED_CONTEXT_NAMES)
+BASE_REF = "refs/mrwatch/base"
 _GLPAT_RE = re.compile(r"glpat-[A-Za-z0-9_\-]+")
 _BEARER_RE = re.compile(r"Bearer\s+\S+", re.IGNORECASE)
 
@@ -174,7 +177,7 @@ async def clone_for_review(
         if target_branch and not is_safe_branch(target_branch):
             logger.warning("base branch skipped, unsafe name: %r", target_branch)
         elif target_branch:
-            refspec = f"refs/heads/{target_branch}:refs/remotes/origin/{target_branch}"
+            refspec = f"refs/heads/{target_branch}:{BASE_REF}"
             try:
                 await run_git(
                     ["git", "fetch", "--depth", str(depth), "origin", refspec],
@@ -190,7 +193,7 @@ async def clone_for_review(
     except GitOpsError as exc:
         logger.warning("remote remove failed: %s", exc)
     try:
-        sanitize_clone(workspace)
+        await asyncio.to_thread(sanitize_clone, workspace)
     except (GitOpsError, OSError) as exc:
         await asyncio.to_thread(remove_workspace, workspace)
         raise GitOpsError(f"workspace sanitize failed: {exc}") from exc
@@ -221,31 +224,26 @@ def _raise_walk_error(exc: OSError) -> None:
     raise exc
 
 
+def _remove_path(path: Path) -> None:
+    if path.is_dir() and not path.is_symlink():
+        shutil.rmtree(path)
+    else:
+        path.unlink()
+
+
 def sanitize_clone(workspace: Path) -> None:
-    for name in SANITIZE_NAMES:
-        path = workspace / name
-        if path.is_symlink() or path.is_file():
-            path.unlink()
-        elif path.is_dir():
-            shutil.rmtree(path)
-        elif os.path.lexists(path):
-            path.unlink()
+    leftovers: list[str] = []
     for root, dirs, files in os.walk(workspace, followlinks=False, onerror=_raise_walk_error):
-        if ".git" in dirs:
+        if ".git" in dirs and Path(root) == workspace:
             dirs.remove(".git")
-        for name in [n for n in dirs + files if n in NESTED_CONTEXT_NAMES]:
+        forbidden = _ROOT_FORBIDDEN if Path(root) == workspace else _NESTED_FORBIDDEN
+        for name in [n for n in dirs + files if n.casefold() in forbidden]:
             path = Path(root) / name
-            if path.is_dir() and not path.is_symlink():
-                shutil.rmtree(path)
-            else:
-                path.unlink()
+            _remove_path(path)
             if name in dirs:
                 dirs.remove(name)
-    leftovers = [name for name in SANITIZE_NAMES if os.path.lexists(workspace / name)]
-    for root, dirs, files in os.walk(workspace, followlinks=False, onerror=_raise_walk_error):
-        if ".git" in dirs:
-            dirs.remove(".git")
-        leftovers.extend(str(Path(root, n)) for n in dirs + files if n in NESTED_CONTEXT_NAMES)
+            if os.path.lexists(path):
+                leftovers.append(str(path))
     if leftovers:
         raise GitOpsError(f"sanitize left forbidden paths: {', '.join(leftovers)}")
 
