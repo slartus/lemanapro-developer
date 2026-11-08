@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>ru.slinkin.mr-watch</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>__PROJECT_DIR__/.venv/bin/uvicorn</string>
+        <string>mrwatch.main:get_app</string>
+        <string>--factory</string>
+        <string>--host</string>
+        <string>127.0.0.1</string>
+        <string>--port</string>
+        <string>8123</string>
+    </array>
+    <key>WorkingDirectory</key>
+    <string>__PROJECT_DIR__</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+        <key>MRWATCH_CONFIG</key>
+        <string>__PROJECT_DIR__/config.yaml</string>
+    </dict>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>StandardOutPath</key>
+    <string>__HOME__/Library/Logs/mr-watch/out.log</string>
+    <key>StandardErrorPath</key>
+    <string>__HOME__/Library/Logs/mr-watch/err.log</string>
+    <key>ProcessType</key>
+    <string>Background</string>
+</dict>
+</plist>

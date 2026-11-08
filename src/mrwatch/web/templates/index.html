@@ -1,0 +1,105 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<title>mr-watch</title>
+<style>
+  body { font-family: -apple-system, sans-serif; margin: 2rem; color: #1a1a1a; }
+  table { border-collapse: collapse; width: 100%; margin-bottom: 2rem; }
+  th, td { text-align: left; padding: 0.4rem 0.8rem; border-bottom: 1px solid #ddd; }
+  th { background: #f5f5f5; }
+  a { color: #0366d6; text-decoration: none; }
+  .status { padding: 0.1rem 0.5rem; border-radius: 4px; font-size: 0.85rem; }
+  .status.done { background: #d4edda; } .status.error { background: #f8d7da; }
+  .status.queued, .status.cloning, .status.reviewing { background: #fff3cd; }
+  .muted { color: #666; font-size: 0.85rem; }
+  .sev { display: inline-block; padding: 0.05rem 0.4rem; margin-right: 0.2rem;
+         border-radius: 4px; font-size: 0.8rem; }
+  .sev.crit { background: #f8d7da; color: #842029; }
+  .sev.major { background: #ffe5d0; color: #854a0e; }
+  .sev.minor { background: #fff3cd; color: #664d03; }
+  .sev.nit { background: #e2e3e5; color: #41464b; }
+  .sev.clean { background: #d4edda; color: #1e4620; }
+
+  @media (prefers-color-scheme: dark) {
+    body { background: #16181d; color: #d6d9de; color-scheme: dark; }
+    a { color: #6cb2ff; }
+    th { background: #22262e; }
+    th, td { border-bottom: 1px solid #2c313a; }
+    .muted { color: #8b919c; }
+    .status.done { background: #173425; color: #9be3b2; }
+    .status.error { background: #3b1d21; color: #f08e97; }
+    .status.queued, .status.cloning, .status.reviewing { background: #3a3016; color: #e8c96a; }
+    .sev.crit { background: #3d1c20; color: #f199a2; }
+    .sev.major { background: #3d2817; color: #f0b077; }
+    .sev.minor { background: #3a3014; color: #e5cd6f; }
+    .sev.nit { background: #2b2e33; color: #b4bac2; }
+    .sev.clean { background: #173425; color: #9be3b2; }
+    pre { background: #1d212a; }
+    button { background: #22262e; color: #d6d9de; border: 1px solid #3a4150; }
+    .error-text { color: #f08e97; }
+  }
+</style>
+</head>
+<body>
+<h1>mr-watch <a href="/settings" style="font-size: 0.9rem; margin-left: 1rem">настройки</a></h1>
+<p><button id="fc-btn" onclick="forceCheck()">Проверить сейчас</button>
+<span id="fc-status" class="muted"></span></p>
+
+<p class="muted">Находки: <span class="sev crit">●</span> крит · <span class="sev major">●</span> мажор · <span class="sev minor">●</span> минор · <span class="sev nit">●</span> нит · статус/находки — последнего ревью</p>
+
+<table>
+  <tr><th>Проект</th><th>MR</th><th>Автор</th><th>Ветка</th><th>Ревью</th><th>Находки</th><th>Обновлён</th></tr>
+  {% for m in mrs %}
+  <tr>
+    <td class="muted">{{ m["path_with_namespace"].split("/")[-1] }}</td>
+    <td><a href="{{ m["web_url"] }}">{{ m["title"] or ("!" ~ m["iid"]) }}</a></td>
+    <td>{{ m["author_name"] or m["author_username"] or "—" }}</td>
+    <td>{{ m["source_branch"] or "—" }}</td>
+    <td>
+      {% if m["latest_review_id"] %}
+        <a href="/reviews/{{ m["latest_review_id"] }}"><span class="status {{ m["latest_review_status"] }}">{{ m["latest_review_status"] }}</span></a>
+      {% else %}<span class="muted">—</span>{% endif %}
+    </td>
+    <td>
+      {% if m["latest_done_review_id"] %}
+        {% if m["crit_count"] %}<span class="sev crit">{{ m["crit_count"] }}</span>{% endif %}
+        {% if m["major_count"] %}<span class="sev major">{{ m["major_count"] }}</span>{% endif %}
+        {% if m["minor_count"] %}<span class="sev minor">{{ m["minor_count"] }}</span>{% endif %}
+        {% if m["nit_count"] %}<span class="sev nit">{{ m["nit_count"] }}</span>{% endif %}
+        {% if not (m["crit_count"] or m["major_count"] or m["minor_count"] or m["nit_count"]) %}
+          <span class="sev clean">✓</span>
+        {% endif %}
+      {% else %}<span class="muted">—</span>{% endif %}
+    </td>
+    <td class="muted">{{ m["updated_at"] }}</td>
+  </tr>
+  {% endfor %}
+  {% if not mrs %}<tr><td colspan="7" class="muted">нет MR</td></tr>{% endif %}
+</table>
+<script>
+async function forceCheck() {
+  const btn = document.getElementById("fc-btn");
+  const status = document.getElementById("fc-status");
+  if (btn.disabled) return;
+  btn.disabled = true;
+  status.textContent = "проверяю…";
+  try {
+    const r = await fetch("/force-check", {
+      method: "POST",
+      headers: {"X-Requested-With": "mrwatch"},
+    });
+    if (r.ok) {
+      location.reload();
+      return;
+    }
+    status.textContent = "ошибка: " + (await r.text());
+  } catch (e) {
+    status.textContent = "ошибка сети";
+  } finally {
+    btn.disabled = false;
+  }
+}
+</script>
+</body>
+</html>

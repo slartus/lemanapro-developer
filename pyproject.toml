@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mrwatch"
+version = "0.1.0"
+description = "Self-hosted GitLab merge request auto-review service"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi",
+    "uvicorn[standard]",
+    "httpx",
+    "jinja2",
+    "pyyaml",
+    "pydantic>=2",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[dependency-groups]
+dev = ["pytest", "pytest-asyncio"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"

@@ -1,0 +1,111 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<title>mr-watch — ревью #{{ review["id"] }}</title>
+<style>
+  body { font-family: -apple-system, sans-serif; margin: 2rem; color: #1a1a1a; }
+  h1 { font-size: 1.3rem; }
+  pre { background: #f6f8fa; padding: 1rem; border-radius: 6px; overflow-x: auto;
+        white-space: pre-wrap; word-wrap: break-word; }
+  table { border-collapse: collapse; margin-bottom: 1.5rem; }
+  th, td { text-align: left; padding: 0.3rem 0.8rem; border-bottom: 1px solid #ddd; }
+  th { color: #666; font-weight: 500; }
+  .status { padding: 0.1rem 0.5rem; border-radius: 4px; }
+  .status.done { background: #d4edda; } .status.error { background: #f8d7da; }
+  .status.queued, .status.cloning, .status.reviewing { background: #fff3cd; }
+  button { padding: 0.4rem 1rem; cursor: pointer; }
+  a { color: #0366d6; text-decoration: none; }
+  .error-text { color: #b02a37; font-family: monospace; }
+  .sev { display: inline-block; padding: 0.05rem 0.4rem; margin-right: 0.2rem;
+         border-radius: 4px; font-size: 0.8rem; }
+  .sev.crit { background: #f8d7da; color: #842029; }
+  .sev.major { background: #ffe5d0; color: #854a0e; }
+  .sev.minor { background: #fff3cd; color: #664d03; }
+  .sev.nit { background: #e2e3e5; color: #41464b; }
+  .sev.clean { background: #d4edda; color: #1e4620; }
+
+  @media (prefers-color-scheme: dark) {
+    body { background: #16181d; color: #d6d9de; color-scheme: dark; }
+    a { color: #6cb2ff; }
+    th { background: #22262e; }
+    th, td { border-bottom: 1px solid #2c313a; }
+    .muted { color: #8b919c; }
+    .status.done { background: #173425; color: #9be3b2; }
+    .status.error { background: #3b1d21; color: #f08e97; }
+    .status.queued, .status.cloning, .status.reviewing { background: #3a3016; color: #e8c96a; }
+    .sev.crit { background: #3d1c20; color: #f199a2; }
+    .sev.major { background: #3d2817; color: #f0b077; }
+    .sev.minor { background: #3a3014; color: #e5cd6f; }
+    .sev.nit { background: #2b2e33; color: #b4bac2; }
+    .sev.clean { background: #173425; color: #9be3b2; }
+    pre { background: #1d212a; }
+    button { background: #22262e; color: #d6d9de; border: 1px solid #3a4150; }
+    .error-text { color: #f08e97; }
+  }
+</style>
+</head>
+<body>
+<a href="/">← назад</a>
+<h1>{{ mr["path_with_namespace"] }} !{{ mr["iid"] }} — {{ mr["title"] or "без названия" }}</h1>
+
+<table>
+  <tr><th>Ревью</th><td>#{{ review["id"] }} ({{ review["trigger"] }}), агент {{ review["agent"] }}</td></tr>
+  <tr><th>Статус</th><td><span class="status {{ review["status"] }}">{{ review["status"] }}</span></td></tr>
+  <tr><th>head_sha</th><td class="muted">{{ review["head_sha"] }}</td></tr>
+  <tr><th>Попыток</th><td>{{ review["attempt"] }}</td></tr>
+  <tr><th>Находки</th><td>
+    {% if review["status"] == "done" %}
+      {% if review["crit_count"] %}<span class="sev crit">{{ review["crit_count"] }}</span>{% endif %}
+      {% if review["major_count"] %}<span class="sev major">{{ review["major_count"] }}</span>{% endif %}
+      {% if review["minor_count"] %}<span class="sev minor">{{ review["minor_count"] }}</span>{% endif %}
+      {% if review["nit_count"] %}<span class="sev nit">{{ review["nit_count"] }}</span>{% endif %}
+      {% if not (review["crit_count"] or review["major_count"] or review["minor_count"] or review["nit_count"]) %}
+        <span class="sev clean">✓</span>
+      {% endif %}
+    {% else %}<span class="muted">—</span>{% endif %}
+  </td></tr>
+  <tr><th>Создано</th><td>{{ review["created_at"] }}</td></tr>
+  <tr><th>Завершено</th><td>{{ review["finished_at"] or "—" }}</td></tr>
+  <tr><th>MR</th><td><a href="{{ mr["web_url"] }}">{{ mr["web_url"] }}</a></td></tr>
+  {% if review["session_id"] %}<tr><th>Сессия opencode</th><td class="muted">{{ review["session_id"] }}</td></tr>{% endif %}
+</table>
+
+{% if review["status"] in ("error", "done") %}
+<button onclick="retry()">Re-review</button>
+{% endif %}
+
+{% if siblings | length > 1 %}
+<p class="muted">Ревью этого MR:
+  {% for s in siblings %}
+    {% if s["id"] == review["id"] %}
+      <strong>#{{ s["id"] }} ({{ s["status"] }})</strong>
+    {% else %}
+      <a href="/reviews/{{ s["id"] }}">#{{ s["id"] }} ({{ s["status"] }})</a>
+    {% endif %}
+  {% endfor %}
+</p>
+{% endif %}
+
+{% if review["error"] %}<p class="error-text">{{ review["error"] }}</p>{% endif %}
+
+<h2>Результат ревью</h2>
+{% if review["review_md"] %}
+<pre>{{ review["review_md"] }}</pre>
+{% elif review["status"] in ("queued", "cloning", "reviewing") %}
+<p>ревью выполняется…</p>
+{% else %}
+<p>результата нет</p>
+{% endif %}
+
+<script>
+async function retry() {
+  await fetch("/reviews/{{ review["id"] }}/retry", {
+    method: "POST",
+    headers: {"X-Requested-With": "mrwatch"},
+  });
+  location.reload();
+}
+</script>
+</body>
+</html>

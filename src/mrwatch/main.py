@@ -1,0 +1,180 @@
+from __future__ import annotations
+
+import asyncio
+import logging
+import sqlite3
+from contextlib import asynccontextmanager
+from dataclasses import dataclass
+from logging.handlers import RotatingFileHandler
+from pathlib import Path
+
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse, PlainTextResponse
+
+from mrwatch.config import Config, ResolvedPaths, default_config_path, get_pat, load_config, resolve_paths
+from mrwatch.db import backup, connect, init_schema, poll_state_get, requeue_incomplete, sync_projects
+from mrwatch.git_ops import cleanup_old_workspaces
+from mrwatch.gitlab_client import GitLabClient
+from mrwatch.poller import Poller
+from mrwatch.web.routes import router as web_router
+from mrwatch.worker import start_workers
+
+logger = logging.getLogger("mrwatch")
+
+DEFAULT_PORT = 8123
+BACKUP_INTERVAL_SEC = 86400
+BACKUP_KEEP = 7
+
+
+@dataclass
+class AppContext:
+    conn: sqlite3.Connection
+    config: Config
+    paths: ResolvedPaths
+    api: GitLabClient
+    project_ids: dict[int, int]
+
+
+class NoStoreHtmlMiddleware:
+    def __init__(self, app) -> None:
+        self.app = app
+
+    async def __call__(self, scope, receive, send) -> None:
+        if scope["type"] == "http":
+            async def send_wrapper(message) -> None:
+                if message["type"] == "http.response.start":
+                    headers = message.setdefault("headers", [])
+                    content_type = next(
+                        (v for k, v in headers if k == b"content-type"), b""
+                    )
+                    if content_type.startswith(b"text/html"):
+                        headers.append((b"cache-control", b"no-store"))
+                await send(message)
+            await self.app(scope, receive, send_wrapper)
+            return
+        await self.app(scope, receive, send)
+
+
+class HostCheckMiddleware:
+    def __init__(self, app, allowed_hosts: set[str]) -> None:
+        self.app = app
+        self.allowed_hosts = allowed_hosts
+
+    async def __call__(self, scope, receive, send) -> None:
+        if scope["type"] == "http":
+            host = next(
+                (value.decode("latin-1") for key, value in scope["headers"] if key == b"host"),
+                "",
+            )
+            if host not in self.allowed_hosts:
+                response = PlainTextResponse("forbidden", status_code=403)
+                await response(scope, receive, send)
+                return
+        await self.app(scope, receive, send)
+
+
+def setup_logging(logs_dir: Path) -> None:
+    logs_dir.mkdir(parents=True, exist_ok=True)
+    root = logging.getLogger()
+    if any(isinstance(h, RotatingFileHandler) for h in root.handlers):
+        return
+    handler = RotatingFileHandler(
+        logs_dir / "app.log", maxBytes=5 * 1024 * 1024, backupCount=5, encoding="utf-8"
+    )
+    handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s %(message)s"))
+    root = logging.getLogger()
+    root.setLevel(logging.INFO)
+    root.addHandler(handler)
+    console = logging.StreamHandler()
+    console.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s %(message)s"))
+    root.addHandler(console)
+
+
+async def _backup_loop(ctx: AppContext) -> None:
+    while True:
+        await asyncio.sleep(BACKUP_INTERVAL_SEC)
+        try:
+            dest = await asyncio.to_thread(backup, ctx.conn, ctx.paths.db.parent / "backups")
+            _prune_backups(dest.parent, BACKUP_KEEP)
+            logger.info("db backup written: %s", dest.name)
+        except Exception:
+            logger.exception("db backup failed")
+
+
+def _prune_backups(backup_dir: Path, keep: int) -> None:
+    backups = sorted(backup_dir.glob("mrwatch-*.db"))
+    for old in backups[:-keep]:
+        old.unlink(missing_ok=True)
+
+
+def create_app(ctx: AppContext, port: int = DEFAULT_PORT) -> FastAPI:
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
+        requeue_incomplete(ctx.conn)
+        cleanup_old_workspaces(ctx.paths.workspaces, ctx.config.review.workspace_ttl_days)
+        ctx.paths.workspaces.parent.joinpath("tmp").mkdir(parents=True, exist_ok=True)
+        queue: asyncio.Queue = asyncio.Queue(maxsize=100)
+        poller = Poller(ctx.conn, ctx.api, ctx.config, ctx.project_ids, queue)
+        app.state.poller = poller
+        tasks = [asyncio.create_task(poller.run(), name="mrwatch-poller")]
+        tasks.extend(start_workers(
+            ctx.config.review.max_parallel, ctx.conn, ctx.api, ctx.config,
+            ctx.paths, queue,
+        ))
+        tasks.append(asyncio.create_task(_backup_loop(ctx), name="mrwatch-backup"))
+        logger.info("started: %s workers, poll interval %ss",
+                    ctx.config.review.max_parallel, ctx.config.gitlab.poll_interval_sec)
+        yield
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        await ctx.api.aclose()
+        ctx.conn.close()
+        logger.info("stopped")
+
+    app = FastAPI(title="mr-watch", lifespan=lifespan)
+    app.state.ctx = ctx
+    app.include_router(web_router)
+
+    @app.get("/healthz")
+    async def healthz() -> JSONResponse:
+        last_ok = poll_state_get(ctx.conn, "poll_last_ok")
+        last_error = poll_state_get(ctx.conn, "poll_last_error")
+        status = "degraded" if last_error else "ok"
+        return JSONResponse({
+            "status": status,
+            "last_poll": last_ok,
+            "last_error": last_error,
+        })
+
+    app.add_middleware(NoStoreHtmlMiddleware)
+    app.add_middleware(HostCheckMiddleware, allowed_hosts={
+        f"127.0.0.1:{port}", f"localhost:{port}",
+    })
+    return app
+
+
+def bootstrap() -> tuple[AppContext, int]:
+    config = load_config(default_config_path())
+    paths = resolve_paths(config)
+    setup_logging(paths.logs)
+    conn = connect(paths.db)
+    init_schema(conn)
+    pat = get_pat(config.gitlab)
+    api = GitLabClient(config.gitlab.url, pat)
+    project_ids = sync_projects(conn, [
+        (p.gitlab_project_id, p.slug, p.agent, p.re_review_on_push, True)
+        for p in config.projects
+    ])
+    return AppContext(conn=conn, config=config, paths=paths, api=api, project_ids=project_ids), DEFAULT_PORT
+
+
+app = None
+
+
+def get_app() -> FastAPI:
+    global app
+    if app is None:
+        ctx, port = bootstrap()
+        app = create_app(ctx, port)
+    return app

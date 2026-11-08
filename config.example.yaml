@@ -1,0 +1,46 @@
+# Пример конфига mr-watch.
+# Скопируйте в ~/.config/mr-watch/config.yaml (chmod 600).
+# Секретов здесь нет: GitLab PAT читается через pat_command (macOS Keychain).
+
+gitlab:
+  # Базовый URL self-hosted GitLab (trailing slash не обязателен, срезается).
+  url: https://gitlab.example.com
+  # Интервал опроса GitLab, секунды.
+  poll_interval_sec: 60
+  # Shell-команда, печатающая PAT в stdout (без перевода строки — ок).
+  # Пример сохранения в Keychain:
+  #   security add-generic-password -s mr-watch -a gitlab -w <token>
+  pat_command: security find-generic-password -s mr-watch -a gitlab -w
+
+projects:
+  - # Числовой ID проекта в GitLab (Project ID на странице проекта).
+    gitlab_project_id: 42
+    # path_with_namespace (group/project), для отображения и логов.
+    slug: group/project
+    # Имя opencode-агента, который делает ревью.
+    agent: mr-watch-reviewer
+    # Перезапускать ревью при смене head_sha (push в MR).
+    re_review_on_push: false
+
+review:
+  # Параллельных воркеров ревью.
+  max_parallel: 2
+  # Таймаут одного ревью (клон + opencode run), секунды.
+  timeout_sec: 1800
+  # Глубина shallow-клона.
+  clone_depth: 50
+  # Сколько часов назад смотреть MR при первом запуске (0 = только новые).
+  # Удалять рабочие каталоги старше N дней (страховка на случай краха).
+  workspace_ttl_days: 3
+
+opencode:
+  # Путь до бинаря opencode.
+  bin: ~/.opencode/bin/opencode
+
+paths:
+  # Файл базы SQLite (каталог создаётся автоматически).
+  db: ~/projects/mr-watch/data/mrwatch.db
+  # Рабочие каталоги клонов.
+  workspaces: ~/projects/mr-watch/workspaces
+  # Прочие файлы сервиса.
+  logs: ~/projects/mr-watch/logs
