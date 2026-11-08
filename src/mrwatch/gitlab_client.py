@@ -106,19 +106,7 @@ class GitLabClient:
         return response.json()
 
     async def get_todos(self) -> list[dict[str, Any]]:
-        items: list[dict[str, Any]] = []
-        url: str = "/api/v4/todos"
-        query: dict[str, Any] | None = {"state": "pending", "per_page": 100}
-        for _ in range(_MAX_PAGES):
-            response = await self._get(url, query)
-            items.extend(response.json())
-            next_url = self._next_url(response)
-            if not next_url:
-                return items
-            url = next_url
-            query = None
-        logger.warning("todos pagination capped at %s pages", _MAX_PAGES)
-        return items
+        return await self._paginated("/api/v4/todos", {"state": "pending", "per_page": 100})
 
     async def _paginated(self, url: str, params: dict[str, Any]) -> list[dict[str, Any]]:
         items: list[dict[str, Any]] = []

@@ -3,6 +3,7 @@ from pathlib import Path
 
 import pytest
 
+from helpers import list_reviews
 from mrwatch.db import (
     MAX_REVIEW_MD_LENGTH,
     backup,
@@ -13,7 +14,6 @@ from mrwatch.db import (
     get_review,
     init_schema,
     list_mrs,
-    list_reviews,
     poll_state_get,
     poll_state_set,
     requeue_incomplete,

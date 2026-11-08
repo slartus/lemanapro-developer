@@ -569,20 +569,6 @@ def get_review(conn: sqlite3.Connection, review_id: int) -> sqlite3.Row | None:
     return conn.execute("SELECT * FROM review WHERE id = ?", (review_id,)).fetchone()
 
 
-def list_reviews(conn: sqlite3.Connection, limit: int = 100) -> list[sqlite3.Row]:
-    return conn.execute(
-        """
-        SELECT review.*, mr.iid, mr.title, project.path_with_namespace
-        FROM review
-        JOIN mr ON mr.id = review.mr_id
-        JOIN project ON project.id = mr.project_id
-        ORDER BY review.id DESC
-        LIMIT ?
-        """,
-        (limit,),
-    ).fetchall()
-
-
 def list_mrs(conn: sqlite3.Connection, limit: int = 200) -> list[sqlite3.Row]:
     return conn.execute(
         """

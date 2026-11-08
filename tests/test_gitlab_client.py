@@ -4,7 +4,7 @@ from __future__ import annotations
 import httpx
 import pytest
 
-from mrwatch.gitlab_client import GitLabClient, GitlabApiError
+from mrwatch.gitlab_client import _MAX_PAGES, GitLabClient, GitlabApiError
 
 BASE_URL = "https://gitlab.example.com"
 
@@ -112,3 +112,72 @@ async def test_get_todos_paginates():
         assert [t["id"] for t in todos] == [1, 2]
     finally:
         await client.aclose()
+
+
+async def test_project_merge_requests_follow_next_link():
+    seen = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request.url)
+        assert request.url.path == "/api/v4/projects/1/merge_requests"
+        if len(seen) == 1:
+            assert request.url.params["updated_after"] == "2026-01-01T00:00:00Z"
+            return httpx.Response(
+                200,
+                json=[{"id": 1}],
+                headers={
+                    "Link": (
+                        f"<{BASE_URL}/api/v4/projects/1/merge_requests"
+                        '?id_after=5&per_page=100>; rel="next"'
+                    )
+                },
+            )
+        assert request.url.params["id_after"] == "5"
+        assert len(request.url.params.get_list("per_page")) == 1
+        assert "updated_after" not in request.url.params
+        return httpx.Response(200, json=[{"id": 2}])
+
+    client = _client(handler)
+    try:
+        mrs = await client.get_project_merge_requests(1, "2026-01-01T00:00:00Z")
+    finally:
+        await client.aclose()
+    assert [m["id"] for m in mrs] == [1, 2]
+    assert len(seen) == 2
+
+
+async def test_project_merge_requests_stop_without_next_link():
+    calls = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(1)
+        return httpx.Response(200, json=[{"id": 1}])
+
+    client = _client(handler)
+    try:
+        mrs = await client.get_project_merge_requests(1, "2026-01-01T00:00:00Z")
+    finally:
+        await client.aclose()
+    assert mrs == [{"id": 1}]
+    assert len(calls) == 1
+
+
+async def test_project_merge_requests_capped_at_max_pages():
+    calls = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(1)
+        return httpx.Response(
+            200,
+            json=[{"id": len(calls)}],
+            headers={
+                "Link": f'<{BASE_URL}/api/v4/projects/1/merge_requests?page=9>; rel="next"'
+            },
+        )
+
+    client = _client(handler)
+    try:
+        mrs = await client.get_project_merge_requests(1, "2026-01-01T00:00:00Z")
+    finally:
+        await client.aclose()
+    assert len(mrs) == len(calls) == _MAX_PAGES

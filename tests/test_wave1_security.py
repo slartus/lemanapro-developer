@@ -268,7 +268,7 @@ async def test_foreign_next_link_not_followed():
     assert all("evil.example.org" not in url for url in seen)
 
 
-async def test_same_host_next_link_followed_and_tree_capped():
+async def test_same_host_next_link_followed_and_capped():
     calls = []
 
     def handler(request: httpx.Request) -> httpx.Response:

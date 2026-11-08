@@ -5,13 +5,13 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
+from helpers import list_reviews
 from mrwatch.config import Config, GitlabConfig, ProjectConfig, ReviewConfig
 from mrwatch.db import (
     claim_next_review,
     connect,
     get_review,
     init_schema,
-    list_reviews,
     poll_state_get,
     poll_state_set,
     sync_projects,

@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+from helpers import list_reviews
 from mrwatch import main as main_module
 from mrwatch.agents import AgentError, validate_agent
 from mrwatch.db import (
@@ -15,7 +16,6 @@ from mrwatch.db import (
     create_review,
     get_review,
     init_schema,
-    list_reviews,
     poll_state_get,
     rebase_review_head,
 )
