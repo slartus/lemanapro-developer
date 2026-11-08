@@ -446,3 +446,29 @@ async def test_api_mrs_and_index_include_roles(ctx):
     assert "упомянули" in page.text
     assert "ревьюер" in page.text
     assert 'id="rf"' in page.text
+
+
+async def test_index_marks_open_mr_time_for_staleness(ctx):
+    ctx_obj, _ = ctx
+    async with _client(ctx_obj) as client:
+        page = await client.get("/")
+    assert 'data-ts="2026-01-01T12:00:00Z" data-open="1"' in page.text
+    assert "MRW.staleness" in page.text
+
+
+async def test_index_skips_staleness_for_merged_mr(ctx):
+    ctx_obj, _ = ctx
+    ctx_obj.conn.execute("UPDATE mr SET state = 'merged'")
+    ctx_obj.conn.commit()
+    async with _client(ctx_obj) as client:
+        page = await client.get("/")
+    assert 'data-open="1"' not in page.text.split("<tbody", 1)[1].split("</tbody>", 1)[0]
+
+
+async def test_api_mrs_exposes_updated_at_and_state(ctx):
+    ctx_obj, _ = ctx
+    async with _client(ctx_obj) as client:
+        api = await client.get("/api/mrs")
+    row = api.json()[0]
+    assert row["updated_at"] == "2026-01-01T12:00:00Z"
+    assert row["state"] == "opened"

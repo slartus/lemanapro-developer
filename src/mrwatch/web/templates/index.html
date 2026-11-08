@@ -67,7 +67,7 @@
         {% endif %}
       {% else %}<span class="muted">—</span>{% endif %}
     </td>
-    <td class="muted small nowrap"><time data-ts="{{ m["updated_at"] }}">{{ m["updated_at"] }}</time></td>
+    <td class="muted small nowrap"><time data-ts="{{ m["updated_at"] }}"{% if m["state"] in (none, "opened", "locked") %} data-open="1"{% endif %}>{{ m["updated_at"] }}</time></td>
   </tr>
   {% endfor %}
   </tbody>
@@ -166,6 +166,7 @@ function renderRow(m) {
   const updated = el("td", "muted small nowrap");
   const time = el("time", "", m.updated_at);
   time.dataset.ts = m.updated_at;
+  if (!m.state || m.state === "opened" || m.state === "locked") time.dataset.open = "1";
   updated.appendChild(time);
   tr.appendChild(updated);
   return tr;
