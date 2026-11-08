@@ -502,3 +502,30 @@ INFO-лог списка (pid, agent) при каждом сохранении �
 addRow была задвоенная кнопка. Блок <script> переписан целиком начисто
 (rowHtml() для консистентных строк), синтаксис проверен node --check.
 Тесты 112 passed, сервис перезапущен.
+
+## 2026-11-08 — Аудит, hardening, фичи таблицы, тесты/CI, синхронизация документации
+
+**Что:**
+- Аудит (`swarm-report/review-audit-2026-11-08.md`): безопасность, надёжность,
+  чистота, расхождения с PLAN.
+- Hardening: `core.symlinks=false`, рекурсивная casefold-санитизация
+  (AGENTS.md/CLAUDE.md/CONTEXT.md, `.opencode`, `opencode.json(c)`, `.claude`,
+  `.agents`), `OPENCODE_DISABLE_PROJECT_CONFIG`/`OPENCODE_DISABLE_CLAUDE_CODE`,
+  allowlist глобальных read-only агентов, ревью ровно `head_sha` +
+  `refs/mrwatch/base`, `gitlab.url` только https без userinfo, `safe_url`,
+  проверка прав конфига и запись 0600, kill process group при отмене, лимиты
+  вывода, `next`-ссылки пагинации только на свой origin.
+- Надёжность: per-project курсоры и `/projects/:id/merge_requests`, todo
+  больше не помечаются в GitLab (локальный `todo_seen`, PAT read-only),
+  рабочий ежесуточный бэкап БД, супервизия задач и `/healthz` 503 +
+  `dead_tasks`, ротация review-логов (`log_ttl_days`), автоповтор при
+  `reason=length`, per-project `model`/`variant`.
+- Таблица: роли (ревьюер/упомянули/назначен/мой MR), draft, вердикт, свежесть
+  активности, ссылка на комментарий упоминания, фильтры, автообновление через
+  `/api/mrs`, favicon.
+- Чистка: мёртвый код и дубли (маскирование, kill group, пагинация), сбор
+  правил проекта в промпт удалён (файлы правил вырезаются санитизацией).
+- Тесты/CI: dev-группа (pytest, pytest-asyncio, pytest-cov, ruff), порог
+  покрытия 88%, GitHub Actions (`ruff check src tests`, `pytest --cov`).
+- Документация: README, PLAN, `config.example.yaml` приведены к коду;
+  `install.sh` выставляет 0600 на созданный конфиг.
