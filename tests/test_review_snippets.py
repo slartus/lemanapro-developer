@@ -514,3 +514,16 @@ async def test_review_page_without_fence_unchanged(ctx):
         text = (await client.get(f"/reviews/{review_id}")).text
     assert '<span class="ln nit">- [NIT] a.py:1 — x</span><span class="ln">plain &lt;b&gt;t&lt;/b&gt;</span>' in text
     assert "code-block" not in text.split("</style>")[1]
+
+
+async def test_review_page_heading_only_for_markdown_headings(ctx):
+    ctx_obj, review_id = ctx
+    md = "## Summary\n#123 fix\n#!/bin/sh\n####### x\n###### six"
+    finish_review(ctx_obj.conn, review_id, "done", review_md=md)
+    async with _client(ctx_obj) as client:
+        text = (await client.get(f"/reviews/{review_id}")).text
+    assert '<span class="ln h">## Summary</span>' in text
+    assert '<span class="ln h">###### six</span>' in text
+    assert '<span class="ln">#123 fix</span>' in text
+    assert '<span class="ln">#!/bin/sh</span>' in text
+    assert '<span class="ln">####### x</span>' in text
