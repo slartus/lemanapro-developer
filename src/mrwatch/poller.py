@@ -143,6 +143,7 @@ class Poller:
             derived_roles=derive_roles(mr, self._username()),
             signal_roles=signal_roles,
             derived_scope=derived_scope(mr),
+            is_draft=parse_draft(mr),
         )
 
     def _enqueue(self, mr_id: int, trigger: str, mr: dict[str, Any], project_db_id: int) -> int:
@@ -173,6 +174,7 @@ class Poller:
                     roles = roles | {MENTIONED_ROLE}
                 update_mr_roles(
                     self._conn, project_db_id, mr["iid"], roles, derived_scope(mr),
+                    parse_draft(mr),
                 )
             poll_state_set(self._conn, key, datetime.now(UTC).isoformat())
 
@@ -364,6 +366,14 @@ def _has_mention(text: str | None, username: str) -> bool:
     return re.search(
         rf"(?<![\w.@])@{re.escape(username)}(?![\w]|[.-]\w)", text, re.IGNORECASE
     ) is not None
+
+
+def parse_draft(mr: dict[str, Any]) -> bool | None:
+    for key in ("draft", "work_in_progress"):
+        value = mr.get(key)
+        if isinstance(value, bool):
+            return value
+    return None
 
 
 def derived_scope(mr: dict[str, Any]) -> frozenset[str]:

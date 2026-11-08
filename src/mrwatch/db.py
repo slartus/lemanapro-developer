@@ -7,7 +7,7 @@ from pathlib import Path
 
 MAX_REVIEW_MD_LENGTH = 1_000_000
 TRUNCATION_MARKER = "...[truncated]"
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 DERIVED_ROLES = frozenset({"reviewer", "assignee", "author"})
 MENTIONED_ROLE = "mentioned"
@@ -104,6 +104,8 @@ def init_schema(conn: sqlite3.Connection) -> None:
         _run_migration(conn, 4, _migrate_to_v4)
     if version < 5:
         _run_migration(conn, 5, _migrate_to_v5)
+    if version < 6:
+        _run_migration(conn, 6, _migrate_to_v6)
     conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
     conn.commit()
 
@@ -138,6 +140,10 @@ def _migrate_to_v3(conn: sqlite3.Connection) -> None:
 
 def _migrate_to_v5(conn: sqlite3.Connection) -> None:
     _add_column(conn, "mr", "my_roles", "TEXT NOT NULL DEFAULT ''")
+
+
+def _migrate_to_v6(conn: sqlite3.Connection) -> None:
+    _add_column(conn, "mr", "is_draft", "INTEGER NOT NULL DEFAULT 0")
 
 
 def _parse_roles(value: str | None) -> set[str]:
@@ -199,6 +205,7 @@ def update_mr_roles(
     iid: int,
     derived_roles: frozenset[str] | set[str],
     derived_scope: frozenset[str] | set[str] = DERIVED_ROLES,
+    is_draft: bool | None = None,
 ) -> None:
     row = conn.execute(
         "SELECT id, state, my_roles FROM mr WHERE project_id = ? AND iid = ?",
@@ -207,7 +214,10 @@ def update_mr_roles(
     if row is None:
         return
     merged = _merge_roles(row["my_roles"], derived_roles, None, row["state"], derived_scope)
-    conn.execute("UPDATE mr SET my_roles = ? WHERE id = ?", (merged, row["id"]))
+    conn.execute(
+        "UPDATE mr SET my_roles = ?, is_draft = COALESCE(?, is_draft) WHERE id = ?",
+        (merged, None if is_draft is None else int(is_draft), row["id"]),
+    )
     conn.commit()
 
 
@@ -286,6 +296,7 @@ def upsert_mr(
     derived_roles: frozenset[str] | set[str] | None = None,
     signal_roles: frozenset[str] | set[str] | None = None,
     derived_scope: frozenset[str] | set[str] = DERIVED_ROLES,
+    is_draft: bool | None = None,
 ) -> MrUpsertResult:
     row = conn.execute(
         "SELECT id, head_sha, state, my_roles FROM mr WHERE project_id = ? AND iid = ?",
@@ -296,8 +307,8 @@ def upsert_mr(
             """
             INSERT INTO mr
                 (project_id, iid, title, author_username, author_name, source_branch,
-                 web_url, state, head_sha, first_seen_at, updated_at, my_roles)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 web_url, state, head_sha, first_seen_at, updated_at, my_roles, is_draft)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 project_db_id,
@@ -312,6 +323,7 @@ def upsert_mr(
                 utcnow_iso(),
                 updated_at or utcnow_iso(),
                 _merge_roles(None, derived_roles, signal_roles, state),
+                int(bool(is_draft)),
             ),
         )
         conn.commit()
@@ -329,7 +341,7 @@ def upsert_mr(
         SET title = ?, author_username = ?, author_name = COALESCE(?, author_name),
             source_branch = ?, web_url = ?,
             state = COALESCE(?, state), head_sha = COALESCE(?, head_sha), updated_at = ?,
-            my_roles = ?
+            my_roles = ?, is_draft = COALESCE(?, is_draft)
         WHERE id = ?
         """,
         (
@@ -345,6 +357,7 @@ def upsert_mr(
                 row["my_roles"], derived_roles, signal_roles, state or row["state"],
                 derived_scope,
             ),
+            None if is_draft is None else int(is_draft),
             row["id"],
         ),
     )

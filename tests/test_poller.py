@@ -19,7 +19,7 @@ from mrwatch.db import (
 from mrwatch.gitlab_client import GitlabApiError
 from mrwatch.db import SCAN_DONE_KEY, list_mrs
 from mrwatch.db import MR_CURSOR_KEY, todo_seen_ids
-from mrwatch.poller import Poller
+from mrwatch.poller import Poller, parse_draft
 
 CURSOR_KEY = MR_CURSOR_KEY.format(10)
 
@@ -611,3 +611,58 @@ async def test_roles_backfill_api_error_retries_next_tick(conn):
     fail["on"] = False
     await poller.tick()
     assert "mentioned" in _roles(conn, 1)
+
+
+def _is_draft(conn, iid):
+    return conn.execute("SELECT is_draft FROM mr WHERE iid = ?", (iid,)).fetchone()["is_draft"]
+
+
+@pytest.mark.parametrize(
+    "extra,expected",
+    [
+        ({"draft": True}, True),
+        ({"draft": False}, False),
+        ({"work_in_progress": True}, True),
+        ({"work_in_progress": False}, False),
+        ({"draft": False, "work_in_progress": True}, False),
+        ({}, None),
+    ],
+)
+def test_parse_draft(extra, expected):
+    assert parse_draft(extra) is expected
+
+
+async def test_draft_saved_and_kept_when_field_absent(conn):
+    api = StubApi()
+    api.mrs = [_mr(10, 1) | {"draft": True}]
+    poller = _make_poller(conn, api)
+    await poller.tick()
+    assert _is_draft(conn, 1) == 1
+
+    api.mrs = [_mr(10, 1, updated_at="2026-01-02T12:00:00Z")]
+    await poller.tick()
+    assert _is_draft(conn, 1) == 1
+
+    api.mrs = [_mr(10, 1, updated_at="2026-01-03T12:00:00Z") | {"work_in_progress": False}]
+    await poller.tick()
+    assert _is_draft(conn, 1) == 0
+
+
+async def test_draft_from_todo_detail(conn):
+    api = StubApi()
+    api.details[(10, 5)] = _detail(10, 5) | {"draft": True}
+    api.todos = [{"id": 1, "target_type": "MergeRequest", "action_name": "mentioned",
+                  "target": {"project_id": 10, "iid": 5}}]
+    await _make_poller(conn, api).tick()
+    assert _is_draft(conn, 5) == 1
+
+
+async def test_roles_backfill_updates_draft(conn):
+    api = StubApi()
+    api.mrs = [_mr(10, 1)]
+    poller = _make_poller(conn, api)
+    await poller.tick()
+    _reset_backfill(conn)
+    api.mrs = [_mr(10, 1) | {"draft": True}]
+    await poller.tick()
+    assert _is_draft(conn, 1) == 1

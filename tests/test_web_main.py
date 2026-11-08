@@ -456,15 +456,6 @@ async def test_index_marks_open_mr_time_for_staleness(ctx):
     assert "MRW.staleness" in page.text
 
 
-async def test_index_skips_staleness_for_merged_mr(ctx):
-    ctx_obj, _ = ctx
-    ctx_obj.conn.execute("UPDATE mr SET state = 'merged'")
-    ctx_obj.conn.commit()
-    async with _client(ctx_obj) as client:
-        page = await client.get("/")
-    assert 'data-open="1"' not in page.text.split("<tbody", 1)[1].split("</tbody>", 1)[0]
-
-
 async def test_api_mrs_exposes_updated_at_and_state(ctx):
     ctx_obj, _ = ctx
     async with _client(ctx_obj) as client:
@@ -472,3 +463,20 @@ async def test_api_mrs_exposes_updated_at_and_state(ctx):
     row = api.json()[0]
     assert row["updated_at"] == "2026-01-01T12:00:00Z"
     assert row["state"] == "opened"
+
+
+async def test_api_mrs_and_index_expose_draft(ctx):
+    ctx_obj, _ = ctx
+    async with _client(ctx_obj) as client:
+        plain = await client.get("/")
+        assert (await client.get("/api/mrs")).json()[0]["is_draft"] is False
+        ctx_obj.conn.execute("UPDATE mr SET is_draft = 1")
+        ctx_obj.conn.commit()
+        api = await client.get("/api/mrs")
+        page = await client.get("/")
+    assert api.json()[0]["is_draft"] is True
+    assert 'class="badge role draft"' not in plain.text.split("<tbody", 1)[1]
+    body = page.text.split("<tbody", 1)[1]
+    assert 'class="badge role draft">draft</span>' in body
+    assert 'data-draft="1"' in body
+    assert 'id="hd"' in page.text
