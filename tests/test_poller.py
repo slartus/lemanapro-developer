@@ -412,3 +412,56 @@ async def test_readded_project_scan_marker_invalidated(conn):
     sync_projects(conn, [(10, "g/p", "agent-a", True, True)])
 
     assert poll_state_get(conn, SCAN_DONE_KEY.format(10)) is None
+
+
+def _roles(conn, iid):
+    row = conn.execute("SELECT my_roles FROM mr WHERE iid = ?", (iid,)).fetchone()
+    return row["my_roles"]
+
+
+@pytest.mark.parametrize(
+    "action,expected",
+    [
+        ("mentioned", "mentioned"),
+        ("directly_addressed", "mentioned"),
+        ("review_requested", "reviewer"),
+        ("assigned", "assignee"),
+    ],
+)
+async def test_roles_from_todo_action(conn, action, expected):
+    api = StubApi()
+    api.details[(10, 5)] = _detail(10, 5)
+    api.todos = [{"id": 1, "target_type": "MergeRequest", "action_name": action,
+                  "target": {"project_id": 10, "iid": 5}}]
+    await _make_poller(conn, api).tick()
+    assert _roles(conn, 5) == expected
+
+
+async def test_roles_from_mr_data_and_removal(conn):
+    api = StubApi()
+    mr = _mr(10, 1, author="me", reviewers=["me"])
+    mr["assignees"] = [{"username": "me"}]
+    api.mrs = [mr]
+    poller = _make_poller(conn, api)
+    await poller.tick()
+    assert _roles(conn, 1) == "assignee,author,reviewer"
+
+    changed = _mr(10, 1, author="other", reviewers=[], updated_at="2026-01-02T12:00:00Z")
+    changed["assignees"] = []
+    api.mrs = [changed]
+    await poller.tick()
+    assert _roles(conn, 1) == ""
+
+
+async def test_mention_role_kept_while_open_and_union(conn):
+    api = StubApi()
+    api.details[(10, 5)] = _detail(10, 5)
+    api.todos = [{"id": 1, "target_type": "MergeRequest", "action_name": "mentioned",
+                  "target": {"project_id": 10, "iid": 5}}]
+    poller = _make_poller(conn, api)
+    await poller.tick()
+    api.details[(10, 5)] = _detail(10, 5, reviewers=["me"])
+    api.todos = [{"id": 2, "target_type": "MergeRequest", "action_name": "review_requested",
+                  "target": {"project_id": 10, "iid": 5}}]
+    await poller.tick()
+    assert _roles(conn, 5) == "mentioned,reviewer"

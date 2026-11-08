@@ -372,7 +372,8 @@ def test_migration_v1_to_v2_adds_severity_columns(tmp_path):
     assert {"crit_count", "major_count", "minor_count", "nit_count"} <= columns
     mr_columns = {r[1] for r in conn.execute("PRAGMA table_info(mr)")}
     assert "author_name" in mr_columns
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == 4
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 5
+    assert "my_roles" in mr_columns
     conn.close()
 
 
@@ -392,4 +393,44 @@ def test_upsert_mr_stores_author_name(tmp_path):
     )
     row = conn.execute("SELECT author_name FROM mr WHERE iid = 1").fetchone()
     assert row["author_name"] == "Иван Петров"
+    conn.close()
+
+
+def test_migration_v5_idempotent_and_keeps_data(tmp_path):
+    from mrwatch.db import _migrate_to_v5, _run_migration
+
+    conn = connect(tmp_path / "t.db")
+    init_schema(conn)
+    mapping = sync_projects(conn, [(10, "g/p", "agent-a", False, True)])
+    upsert_mr(
+        conn, mapping[10], 1, "t", "u1", "b", "http://x", "opened", "a" * 40,
+        "2026-01-01T12:00:00Z", signal_roles={"mentioned"},
+    )
+    conn.execute("PRAGMA user_version = 4")
+    conn.commit()
+    init_schema(conn)
+    _run_migration(conn, 5, _migrate_to_v5)
+    init_schema(conn)
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 5
+    assert conn.execute("SELECT my_roles FROM mr").fetchone()["my_roles"] == "mentioned"
+    conn.close()
+
+
+def test_roles_union_recompute_and_clear_on_close(tmp_path):
+    conn = connect(tmp_path / "t.db")
+    init_schema(conn)
+    mapping = sync_projects(conn, [(10, "g/p", "agent-a", False, True)])
+
+    def put(state="opened", derived=None, signal=None):
+        upsert_mr(
+            conn, mapping[10], 1, "t", "u1", "b", "http://x", state, "a" * 40,
+            "2026-01-01T12:00:00Z", derived_roles=derived, signal_roles=signal,
+        )
+        return conn.execute("SELECT my_roles FROM mr").fetchone()["my_roles"]
+
+    assert put(derived={"reviewer", "author"}) == "author,reviewer"
+    assert put(signal={"mentioned"}) == "author,mentioned,reviewer"
+    assert put(derived={"author"}) == "author,mentioned"
+    assert put(derived=set()) == "mentioned"
+    assert put(state="merged", derived=set()) == ""
     conn.close()

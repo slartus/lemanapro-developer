@@ -7,7 +7,10 @@ from pathlib import Path
 
 MAX_REVIEW_MD_LENGTH = 1_000_000
 TRUNCATION_MARKER = "...[truncated]"
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
+
+DERIVED_ROLES = frozenset({"reviewer", "assignee", "author"})
+MENTIONED_ROLE = "mentioned"
 
 
 SEVERITY_COLUMNS = ("crit_count", "major_count", "minor_count", "nit_count")
@@ -99,6 +102,8 @@ def init_schema(conn: sqlite3.Connection) -> None:
         _run_migration(conn, 3, _migrate_to_v3)
     if version < 4:
         _run_migration(conn, 4, _migrate_to_v4)
+    if version < 5:
+        _run_migration(conn, 5, _migrate_to_v5)
     conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
     conn.commit()
 
@@ -129,6 +134,29 @@ def _migrate_to_v2(conn: sqlite3.Connection) -> None:
 
 def _migrate_to_v3(conn: sqlite3.Connection) -> None:
     _add_column(conn, "mr", "author_name", "TEXT")
+
+
+def _migrate_to_v5(conn: sqlite3.Connection) -> None:
+    _add_column(conn, "mr", "my_roles", "TEXT NOT NULL DEFAULT ''")
+
+
+def _parse_roles(value: str | None) -> set[str]:
+    return {role for role in (value or "").split(",") if role}
+
+
+def _merge_roles(
+    existing: str | None,
+    derived_roles: frozenset[str] | set[str] | None,
+    signal_roles: frozenset[str] | set[str] | None,
+    state: str | None,
+) -> str:
+    roles = _parse_roles(existing)
+    if derived_roles is not None:
+        roles = (roles - DERIVED_ROLES) | set(derived_roles)
+    roles |= set(signal_roles or ())
+    if state not in (None, "opened", "locked"):
+        roles.discard(MENTIONED_ROLE)
+    return ",".join(sorted(roles))
 
 
 SCAN_DONE_KEY = "mr_scan_done:{}"
@@ -235,9 +263,11 @@ def upsert_mr(
     head_sha: str | None,
     updated_at: str | None,
     author_name: str | None = None,
+    derived_roles: frozenset[str] | set[str] | None = None,
+    signal_roles: frozenset[str] | set[str] | None = None,
 ) -> MrUpsertResult:
     row = conn.execute(
-        "SELECT id, head_sha, state FROM mr WHERE project_id = ? AND iid = ?",
+        "SELECT id, head_sha, state, my_roles FROM mr WHERE project_id = ? AND iid = ?",
         (project_db_id, iid),
     ).fetchone()
     if row is None:
@@ -245,8 +275,8 @@ def upsert_mr(
             """
             INSERT INTO mr
                 (project_id, iid, title, author_username, author_name, source_branch,
-                 web_url, state, head_sha, first_seen_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 web_url, state, head_sha, first_seen_at, updated_at, my_roles)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 project_db_id,
@@ -260,6 +290,7 @@ def upsert_mr(
                 head_sha,
                 utcnow_iso(),
                 updated_at or utcnow_iso(),
+                _merge_roles(None, derived_roles, signal_roles, state),
             ),
         )
         conn.commit()
@@ -276,7 +307,8 @@ def upsert_mr(
         UPDATE mr
         SET title = ?, author_username = ?, author_name = COALESCE(?, author_name),
             source_branch = ?, web_url = ?,
-            state = COALESCE(?, state), head_sha = COALESCE(?, head_sha), updated_at = ?
+            state = COALESCE(?, state), head_sha = COALESCE(?, head_sha), updated_at = ?,
+            my_roles = ?
         WHERE id = ?
         """,
         (
@@ -288,6 +320,9 @@ def upsert_mr(
             state,
             head_sha,
             updated_at or utcnow_iso(),
+            _merge_roles(
+                row["my_roles"], derived_roles, signal_roles, state or row["state"]
+            ),
             row["id"],
         ),
     )

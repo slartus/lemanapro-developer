@@ -53,7 +53,9 @@ async def index(request: Request):
     ctx = _ctx(request)
     mrs = list_mrs(ctx.conn)
     return templates.TemplateResponse(
-        request, "index.html", {"mrs": mrs, "project_ids": ctx.project_ids}
+        request,
+        "index.html",
+        {"mrs": mrs, "project_ids": ctx.project_ids, "role_labels": ROLE_LABELS},
     )
 
 
@@ -121,6 +123,20 @@ MR_ROW_FIELDS = (
 )
 
 
+ROLE_LABELS = {
+    "reviewer": "ревьюер",
+    "mentioned": "упомянули",
+    "assignee": "назначен",
+    "author": "мой MR",
+}
+
+
+def _mr_payload(row) -> dict:
+    payload = {field: row[field] for field in MR_ROW_FIELDS}
+    payload["my_roles"] = [role for role in (row["my_roles"] or "").split(",") if role]
+    return payload
+
+
 def _wake_workers(request: Request) -> None:
     work_event = getattr(request.app.state, "work_event", None)
     if work_event is not None:
@@ -143,7 +159,7 @@ async def api_review(request: Request, review_id: int):
 @router.get("/api/mrs")
 async def api_mrs(request: Request):
     rows = list_mrs(_ctx(request).conn)
-    return JSONResponse([{field: row[field] for field in MR_ROW_FIELDS} for row in rows])
+    return JSONResponse([_mr_payload(row) for row in rows])
 
 
 def _config_path() -> Path:

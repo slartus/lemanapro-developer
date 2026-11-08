@@ -8,6 +8,7 @@ from typing import Any
 
 from mrwatch.config import Config
 from mrwatch.db import (
+    MENTIONED_ROLE,
     MR_CURSOR_KEY,
     SCAN_DONE_KEY,
     MrUpsertResult,
@@ -26,6 +27,7 @@ logger = logging.getLogger(__name__)
 
 CURSOR_OVERLAP_SEC = 120
 ERROR_PAUSE_SEC = 5.0
+MENTION_ACTIONS = ("mentioned", "directly_addressed")
 
 
 def get_project_row(conn: sqlite3.Connection, project_db_id: int) -> sqlite3.Row | None:
@@ -111,7 +113,12 @@ class Poller:
         row = get_project_row(self._conn, project_db_id)
         return bool(row["re_review_on_push"]) if row is not None else False
 
-    def _upsert(self, project_db_id: int, mr: dict[str, Any]) -> MrUpsertResult | None:
+    def _upsert(
+        self,
+        project_db_id: int,
+        mr: dict[str, Any],
+        signal_roles: frozenset[str] = frozenset(),
+    ) -> MrUpsertResult | None:
         head_sha = mr.get("sha")
         if not head_sha:
             logger.warning("MR %s in project %s skipped: no head sha", mr.get("iid"), project_db_id)
@@ -129,6 +136,8 @@ class Poller:
             state=mr.get("state"),
             head_sha=head_sha,
             updated_at=mr.get("updated_at"),
+            derived_roles=derive_roles(mr, self._username()),
+            signal_roles=signal_roles,
         )
 
     def _enqueue(self, mr_id: int, trigger: str, mr: dict[str, Any], project_db_id: int) -> int:
@@ -166,10 +175,10 @@ class Poller:
 
     def _handle_todo(self, todo: dict[str, Any], detail: dict[str, Any], gitlab_pid: int) -> int:
         project_db_id = self._project_ids[gitlab_pid]
-        result = self._upsert(project_db_id, detail)
+        result = self._upsert(project_db_id, detail, todo_signal_roles(todo))
         if result is None or detail.get("state") != "opened":
             return 0
-        mentioned = todo.get("action_name") in ("mentioned", "directly_addressed")
+        mentioned = todo.get("action_name") in MENTION_ACTIONS
         is_reviewer = self._username() in _reviewer_usernames(detail)
         if result.inserted or mentioned or is_reviewer:
             return self._enqueue(result.mr_id, "new", detail, project_db_id)
@@ -203,15 +212,17 @@ class Poller:
     async def _scan_one(
         self, gitlab_pid: int, project_db_id: int, mr: dict[str, Any], username: str
     ) -> int:
-        result = self._upsert(project_db_id, mr)
-        if result is None:
-            return 0
         mine = _author(mr).get("username") == username or username in _reviewer_usernames(mr)
         mentioned = False
         if not mine:
             mentioned = await self._mentioned_in_mr(
                 gitlab_pid, mr["iid"], username, mr.get("description")
             )
+        result = self._upsert(
+            project_db_id, mr, frozenset({MENTIONED_ROLE}) if mentioned else frozenset()
+        )
+        if result is None:
+            return 0
         if (mine or mentioned) and mr.get("state") in (None, "opened"):
             return self._enqueue(result.mr_id, "new", mr, project_db_id)
         return 0
@@ -303,6 +314,35 @@ class Poller:
         if self._me is None:
             raise RuntimeError("poller user not loaded")
         return self._me["username"]
+
+
+def _assignee_usernames(mr: dict[str, Any]) -> set[str]:
+    assignees = list(mr.get("assignees") or [])
+    if mr.get("assignee"):
+        assignees.append(mr["assignee"])
+    return {a.get("username") for a in assignees if a.get("username")}
+
+
+def derive_roles(mr: dict[str, Any], username: str) -> frozenset[str]:
+    roles: set[str] = set()
+    if _author(mr).get("username") == username:
+        roles.add("author")
+    if username in _reviewer_usernames(mr):
+        roles.add("reviewer")
+    if username in _assignee_usernames(mr):
+        roles.add("assignee")
+    return frozenset(roles)
+
+
+def todo_signal_roles(todo: dict[str, Any]) -> frozenset[str]:
+    action = todo.get("action_name")
+    if action in MENTION_ACTIONS:
+        return frozenset({MENTIONED_ROLE})
+    if action == "review_requested":
+        return frozenset({"reviewer"})
+    if action == "assigned":
+        return frozenset({"assignee"})
+    return frozenset()
 
 
 def _reviewer_usernames(mr: dict[str, Any]) -> set[str]:
