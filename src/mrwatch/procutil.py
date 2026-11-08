@@ -2,10 +2,17 @@ from __future__ import annotations
 
 import asyncio
 import os
+import re
 import signal
 
 KILL_GRACE_SEC = 5.0
 READ_CHUNK_BYTES = 65536
+_GLPAT_RE = re.compile(r"glpat-[A-Za-z0-9_\-]+")
+_BEARER_RE = re.compile(r"Bearer\s+\S+", re.IGNORECASE)
+
+
+def mask_secrets(text: str) -> str:
+    return _BEARER_RE.sub("Bearer ***", _GLPAT_RE.sub("glpat-***", text))
 
 
 class OutputLimitExceeded(Exception):

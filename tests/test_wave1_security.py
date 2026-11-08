@@ -263,13 +263,12 @@ async def test_foreign_next_link_not_followed():
     )
     try:
         assert await client.get_todos() == [{"id": 1}]
-        assert await client.get_project_tree(1, "", "main") == [{"id": 1}]
     finally:
         await client.aclose()
     assert all("evil.example.org" not in url for url in seen)
 
 
-async def test_same_host_next_link_followed_and_tree_capped():
+async def test_same_host_next_link_followed_and_capped():
     calls = []
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -283,7 +282,7 @@ async def test_same_host_next_link_followed_and_tree_capped():
         "https://gitlab.example.com", "tok", transport=httpx.MockTransport(handler)
     )
     try:
-        items = await client.get_project_tree(1, "", "main")
+        items = await client.get_todos()
     finally:
         await client.aclose()
     assert len(items) == len(calls) == 50

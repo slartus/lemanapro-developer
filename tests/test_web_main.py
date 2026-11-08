@@ -369,9 +369,6 @@ class _TreeApi:
             return {"id": 10, "default_branch": "develop"}
         raise LookupError(path)
 
-    async def get_project_tree(self, pid, path, ref):
-        return self._tree.get(path, [])
-
 
 async def test_project_agents_returns_only_global_readonly(ctx, monkeypatch):
     ctx_obj, _ = ctx
