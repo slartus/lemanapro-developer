@@ -177,3 +177,32 @@ def test_make_git_env_no_token(tmp_path):
     assert "GIT_LFS_SKIP_SMUDGE" in env.base_env
     assert set(env.base_env) <= {"PATH", "HOME", "TMPDIR", "GIT_TERMINAL_PROMPT", "GIT_LFS_SKIP_SMUDGE"}
     assert all("printf tok" != v for v in env.base_env.values())
+
+
+async def test_clone_removes_stale_workspace_before_clone(origin, tmp_path):
+    tmpdir = tmp_path / "tmp"
+    tmpdir.mkdir()
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    (workspace / "stale.txt").write_text("old")
+    await clone_for_review(workspace, str(origin), 1, "main", 5, NO_ENV, tmpdir, harden=False)
+    assert not (workspace / "stale.txt").exists()
+    assert (workspace / "new.py").exists()
+
+
+async def test_clone_cancelled_during_sanitize_removes_workspace(origin, tmp_path, monkeypatch):
+    import asyncio
+
+    from mrwatch import git_ops
+
+    tmpdir = tmp_path / "tmp"
+    tmpdir.mkdir()
+    workspace = tmp_path / "ws"
+
+    def cancelled(_workspace):
+        raise asyncio.CancelledError()
+
+    monkeypatch.setattr(git_ops, "sanitize_clone", cancelled)
+    with pytest.raises(asyncio.CancelledError):
+        await clone_for_review(workspace, str(origin), 1, "main", 5, NO_ENV, tmpdir, harden=False)
+    assert not workspace.exists()

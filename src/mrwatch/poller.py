@@ -184,9 +184,9 @@ class Poller:
         created = 0
         seen = todo_seen_ids(self._conn)
         todos = await self._api.get_todos()
-        for todo in sorted(todos, key=lambda t: t.get("id") or 0):
+        for todo in sorted(todos, key=_todo_sort_key):
             todo_id = todo.get("id")
-            if todo_id is None or todo_id in seen:
+            if not isinstance(todo_id, int) or todo_id in seen:
                 continue
             target = todo.get("target") or {}
             if todo.get("target_type") != "MergeRequest":
@@ -219,7 +219,7 @@ class Poller:
                 mention_url = validated_mention_url(
                     todo.get("target_url"), self._config.gitlab.url, detail.get("web_url")
                 )
-                if mention_url:
+                if mention_url and not _is_older_mention(self._conn, result.mr_id, mention_url):
                     set_mention_url(self._conn, result.mr_id, mention_url)
             except Exception:
                 logger.exception("failed to save mention url for todo %s", todo.get("id"))
@@ -408,6 +408,28 @@ def derive_roles(mr: dict[str, Any], username: str) -> frozenset[str]:
     return frozenset(roles)
 
 
+def _todo_sort_key(todo: dict[str, Any]) -> int:
+    todo_id = todo.get("id")
+    if isinstance(todo_id, int) and not isinstance(todo_id, bool):
+        return todo_id
+    return 0
+
+
+_NOTE_RE = re.compile(r"#note_(\d+)$")
+
+
+def _note_number(url: str | None) -> int | None:
+    match = _NOTE_RE.search(url or "")
+    return int(match.group(1)) if match else None
+
+
+def _is_older_mention(conn: sqlite3.Connection, mr_id: int, new_url: str) -> bool:
+    row = conn.execute("SELECT mention_url FROM mr WHERE id = ?", (mr_id,)).fetchone()
+    current = _note_number(row[0] if row else None)
+    new = _note_number(new_url)
+    return current is not None and new is not None and new < current
+
+
 _DEFAULT_PORTS = {"http": 80, "https": 443}
 
 
@@ -426,7 +448,11 @@ def _origin(parts) -> tuple[str, str, int] | None:
         host = host.lower().encode("idna").decode("ascii")
     except UnicodeError:
         return None
-    return scheme, host, port or _DEFAULT_PORTS[scheme]
+    if port is None:
+        port = _DEFAULT_PORTS[scheme]
+    elif port == 0:
+        return None
+    return scheme, host, port
 
 
 def _safe_urlsplit(url: str):

@@ -158,6 +158,8 @@ async def clone_for_review(
     expected_sha: str | None = None,
 ) -> Path:
     workspace = Path(workspace).resolve()
+    if os.path.lexists(workspace):
+        await asyncio.to_thread(remove_workspace, workspace)
     workspace.mkdir(parents=True, exist_ok=True)
     try:
         await run_git(build_clone_args(repo_url, workspace, depth), tmpdir, env, harden=harden, tmpdir=tmpdir)
@@ -197,6 +199,9 @@ async def clone_for_review(
     except (GitOpsError, OSError) as exc:
         await asyncio.to_thread(remove_workspace, workspace)
         raise GitOpsError(f"workspace sanitize failed: {exc}") from exc
+    except BaseException:
+        remove_workspace(workspace)
+        raise
     return workspace
 
 
