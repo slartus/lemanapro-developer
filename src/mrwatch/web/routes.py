@@ -147,7 +147,7 @@ ROLE_LABELS = {
     "reviewer": "ревьюер",
     "mentioned": "упомянули",
     "assignee": "назначен",
-    "author": "мой MR",
+    "author": "мой",
 }
 
 
