@@ -7,6 +7,7 @@ import stat
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
+from urllib.parse import urlsplit
 
 import yaml
 from pydantic import BaseModel, Field, ValidationError, field_validator
@@ -37,8 +38,23 @@ class GitlabConfig(BaseModel):
         url = value.rstrip("/")
         if not url:
             raise ValueError("url must not be empty")
-        if not url.startswith(("http://", "https://")):
-            raise ValueError("url must start with http:// or https://")
+        if "\\" in url or any(c.isspace() or not c.isprintable() for c in url):
+            raise ValueError("url must not contain whitespace, control characters or backslashes")
+        parts = urlsplit(url)
+        try:
+            port = parts.port
+        except ValueError:
+            raise ValueError("url has an invalid port") from None
+        if port is not None and not 1 <= port <= 65535:
+            raise ValueError("url has an invalid port")
+        if parts.scheme != "https":
+            raise ValueError("url must use https://")
+        if not parts.hostname:
+            raise ValueError("url must contain a host")
+        if "@" in parts.netloc:
+            raise ValueError("url must not contain credentials")
+        if parts.query or parts.fragment or "?" in url or "#" in url:
+            raise ValueError("url must not contain query or fragment")
         return url
 
 

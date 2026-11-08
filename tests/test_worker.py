@@ -232,3 +232,37 @@ async def test_worker_passes_model_variant_and_retries_on_length(tmp_path, db, o
     assert all("--model prov/model" in line for line in lines)
     assert "--variant" not in lines[0]
     assert "--variant low" in lines[1]
+
+
+def _repo_url_for(base: str, path: str) -> str:
+    config = Config(
+        gitlab=GitlabConfig(url=base, pat_command="printf tok"),
+        projects=[ProjectConfig(gitlab_project_id=10, slug="g/p", agent="agent-a")],
+    )
+    worker = Worker.__new__(Worker)
+    worker._static_config = config
+    worker._config_provider = None
+    return worker._repo_url({"path_with_namespace": path})
+
+
+def test_repo_url_has_no_userinfo_and_uses_https_host():
+    from urllib.parse import urlsplit
+
+    parts = urlsplit(_repo_url_for("https://gitlab.example.com", "g/p"))
+    assert parts.scheme == "https"
+    assert parts.hostname == "gitlab.example.com"
+    assert "@" not in parts.netloc
+    assert parts.username is None and parts.password is None
+
+
+def test_repo_url_trailing_slash_no_double_slash():
+    url = _repo_url_for("https://gitlab.example.com/", "g/p")
+    assert url == "https://gitlab.example.com/g/p.git"
+    assert "//" not in url.split("://", 1)[1]
+
+
+def test_repo_url_subgroups_and_subpath():
+    assert (
+        _repo_url_for("https://example.com/gitlab/", "a/b/c/repo")
+        == "https://example.com/gitlab/a/b/c/repo.git"
+    )
