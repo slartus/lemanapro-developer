@@ -21,8 +21,9 @@
   push в MR (только при `re_review_on_push`).
 - **Worker'ы** (`review.max_parallel`, по умолчанию 2) берут ревью из очереди в
   SQLite: shallow-клон ровно на `head_sha` ревью, base-ветка в
-  `refs/mrwatch/base`, diff `base...head`, затем `opencode run` с агентом
-  проекта. Ошибки клона — до 3 попыток с бэкоффом; если head MR уехал —
+  `refs/mrwatch/base`, diff `git diff <base_sha> <head_sha>` (base —
+  `diff_refs.base_sha` MR, а если head MR ушёл вперёд — merge-base с
+  `refs/mrwatch/base`), затем `opencode run` с агентом проекта. Ошибки клона — до 3 попыток с бэкоффом; если head MR уехал —
   ревью переносится на новый head. При свободном месте < 5 ГБ ревью не
   запускается.
 - **Веб-UI** на `http://127.0.0.1:8123`: таблица открытых MR (закрытые и
@@ -42,7 +43,9 @@
 - Агенты — только глобальные (`~/.config/opencode/agent/` или `agents/`) и
   только read-only: перед каждым ревью frontmatter проверяется, `edit`, `bash`,
   `webfetch` должны быть запрещены (`tools: false` или `permission: deny`),
-  иначе ревью падает с ошибкой. В `/settings` предлагаются только такие агенты.
+  иначе ревью падает с ошибкой. В `/settings` предлагаются только такие агенты;
+  если их нет — предлагается `mr-watch-reviewer` по умолчанию (при запуске
+  ревью он всё равно проходит проверку read-only).
 - Клон: без hooks и LFS, `protocol.file.allow=never`,
   `transfer.fsckObjects=true`, `core.symlinks=false`; PAT отдаётся через
   временный `GIT_ASKPASS`, в URL и `.git/config` не попадает, remote после

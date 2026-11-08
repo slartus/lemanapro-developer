@@ -47,7 +47,7 @@
 
 ## GitLab API (v4)
 
-- `GET /user` — username на старте
+- `GET /user` — username лениво, на первом тике поллера
 - Каждый тик: `GET /todos?state=pending&per_page=100`; todo с
   `target_type=MergeRequest` по отслеживаемым проектам обрабатывается один раз
   (id в `todo_seen`), в GitLab ничего не помечается
@@ -71,7 +71,9 @@
    `workspaces/<gitlab_project_id>/<iid>/<review_id>/` → fetch
    `merge-requests/<iid>/head`, пин ровно на `head_sha` ревью (при
    расхождении — ревью переносится на актуальный head или падает) → base-ветка
-   в `refs/mrwatch/base` → удаление remote → санитизация → diff base...head →
+   в `refs/mrwatch/base` → удаление remote → санитизация →
+   `git diff <base_sha> <head_sha>` (base — `diff_refs.base_sha` MR, а если head
+   MR ушёл вперёд — merge-base с `refs/mrwatch/base`) →
    `opencode run` → review_md, счётчики находок, вердикт в БД → удаление клона (finally)
 3. Ошибки клона/получения MR — до 3 попыток с бэкоффом (`not_before`);
    ошибки opencode не авторетраятся, кроме одного повтора при `reason=length`
