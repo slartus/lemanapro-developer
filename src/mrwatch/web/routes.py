@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 from functools import lru_cache
@@ -95,7 +96,9 @@ async def review_detail(request: Request, review_id: int):
         "SELECT id, status, created_at FROM review WHERE mr_id = ? ORDER BY id DESC",
         (review["mr_id"],),
     ).fetchall()
-    rows, orphans = layout_review(review["review_md"], load_snippets(review["snippets_json"]))
+    rows, orphans = await asyncio.to_thread(
+        layout_review, review["review_md"], load_snippets(review["snippets_json"])
+    )
     return templates.TemplateResponse(
         request, "review.html",
         {"review": review, "mr": mr, "siblings": siblings,

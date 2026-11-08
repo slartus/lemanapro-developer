@@ -64,8 +64,7 @@ def iter_findings(review_md: str | None) -> Iterator[Finding]:
     index = 0
     for line_no, raw in enumerate(split_review_lines(review_md)):
         if fence is not None:
-            stripped = raw.strip()
-            if stripped and stripped[0] == fence[0] and len(stripped) >= len(fence) and not stripped.strip(fence[0]):
+            if _is_fence_close(raw, fence):
                 fence = None
             continue
         opening = FENCE_OPEN.match(raw)
@@ -367,20 +366,113 @@ def _matches(finding: Finding, snippet: dict) -> bool:
     )
 
 
+LANG_ALLOWED = re.compile(r"[A-Za-z0-9_+#.-]{1,20}")
+BACKTICK_RUN = re.compile(r"`+")
+
+
+def _is_fence_close(raw: str, fence: str) -> bool:
+    stripped = raw.strip()
+    return bool(stripped) and stripped[0] == fence[0] and len(stripped) >= len(fence) and not stripped.strip(fence[0])
+
+
+def _code_lang(info: str) -> str:
+    words = info.split()
+    lang = words[0] if words else ""
+    return lang if LANG_ALLOWED.fullmatch(lang) else ""
+
+
+def _dedent(raw: str, width: int) -> str:
+    lead = len(raw) - len(raw.lstrip(" \t"))
+    return raw[min(lead, width):]
+
+
+def split_inline_code(text: str) -> list[tuple[str, bool]]:
+    runs = list(BACKTICK_RUN.finditer(text))
+    next_same_width: list[int | None] = [None] * len(runs)
+    last_seen: dict[int, int] = {}
+    for k in range(len(runs) - 1, -1, -1):
+        run_width = runs[k].end() - runs[k].start()
+        next_same_width[k] = last_seen.get(run_width)
+        last_seen[run_width] = k
+    segments: list[tuple[str, bool]] = []
+    pos = 0
+    i = 0
+    while i < len(runs):
+        opener = runs[i]
+        closer_index = next_same_width[i]
+        if closer_index is None:
+            i += 1
+            continue
+        code = text[opener.end():runs[closer_index].start()]
+        if not code.strip():
+            i = closer_index + 1
+            continue
+        if len(code) > 2 and code[0] == " " and code[-1] == " ":
+            code = code[1:-1]
+        if opener.start() > pos:
+            segments.append((text[pos:opener.start()], False))
+        segments.append((code, True))
+        pos = runs[closer_index].end()
+        i = closer_index + 1
+    if pos < len(text) or not segments:
+        segments.append((text[pos:], False))
+    return segments
+
+
+def _text_row(text: str) -> dict:
+    return {
+        "kind": "line",
+        "text": text,
+        "segments": split_inline_code(text),
+        "css": next((css for tag, css in _SEVERITY_CLASS if tag in text), ""),
+        "snippets": [],
+    }
+
+
+def _layout_rows(review_md: str) -> tuple[list[dict], dict[int, dict]]:
+    rows: list[dict] = []
+    row_by_line: dict[int, dict] = {}
+    fence: str | None = None
+    block: dict | None = None
+    prefix_width = 0
+    for line_no, raw in enumerate(split_review_lines(review_md)):
+        if fence is not None:
+            if _is_fence_close(raw, fence):
+                fence = None
+            else:
+                block["lines"].append(_dedent(raw, prefix_width))
+            continue
+        opening = FENCE_OPEN.match(raw)
+        if opening:
+            fence = opening.group(1)
+            prefix_width = len(raw) - len(raw.lstrip(" \t"))
+            block = {
+                "kind": "code",
+                "lang": _code_lang(raw[opening.end():]),
+                "indent": len(raw[:prefix_width].expandtabs(4)),
+                "lines": [],
+                "css": "",
+                "snippets": [],
+            }
+            rows.append(block)
+            continue
+        row = _text_row(raw)
+        rows.append(row)
+        row_by_line[line_no] = row
+    return rows, row_by_line
+
+
 def layout_review(review_md: str | None, snippets: list[dict]) -> tuple[list[dict], list[dict]]:
     if not review_md:
         return [], list(snippets)
-    rows = [
-        {"text": text, "css": next((css for tag, css in _SEVERITY_CLASS if tag in text), ""), "snippets": []}
-        for text in split_review_lines(review_md)
-    ]
+    rows, row_by_line = _layout_rows(review_md)
     by_line = {f.line: f for f in iter_findings(review_md)}
     orphans: list[dict] = []
     for snippet in snippets:
         line = snippet.get("line")
         finding = by_line.get(line) if line is not None else None
-        if finding is not None and _matches(finding, snippet):
-            rows[line]["snippets"].append(snippet)
+        if finding is not None and _matches(finding, snippet) and line in row_by_line:
+            row_by_line[line]["snippets"].append(snippet)
         else:
             orphans.append(snippet)
     return rows, orphans
