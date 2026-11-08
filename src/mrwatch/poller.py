@@ -183,7 +183,8 @@ class Poller:
     async def _process_todos(self) -> int:
         created = 0
         seen = todo_seen_ids(self._conn)
-        for todo in await self._api.get_todos():
+        todos = await self._api.get_todos()
+        for todo in sorted(todos, key=lambda t: t.get("id") or 0):
             todo_id = todo.get("id")
             if todo_id is None or todo_id in seen:
                 continue
@@ -214,11 +215,14 @@ class Poller:
             return 0
         mentioned = todo.get("action_name") in MENTION_ACTIONS
         if mentioned:
-            mention_url = validated_mention_url(
-                todo.get("target_url"), self._config.gitlab.url, detail.get("web_url")
-            )
-            if mention_url:
-                set_mention_url(self._conn, result.mr_id, mention_url)
+            try:
+                mention_url = validated_mention_url(
+                    todo.get("target_url"), self._config.gitlab.url, detail.get("web_url")
+                )
+                if mention_url:
+                    set_mention_url(self._conn, result.mr_id, mention_url)
+            except Exception:
+                logger.exception("failed to save mention url for todo %s", todo.get("id"))
         is_reviewer = self._username() in _reviewer_usernames(detail)
         if result.inserted or mentioned or is_reviewer:
             return self._enqueue(result.mr_id, "new", detail, project_db_id)
@@ -404,29 +408,54 @@ def derive_roles(mr: dict[str, Any], username: str) -> frozenset[str]:
     return frozenset(roles)
 
 
-def _origin(parts) -> tuple[str, int | None] | None:
+_DEFAULT_PORTS = {"http": 80, "https": 443}
+
+
+def _origin(parts) -> tuple[str, str, int] | None:
+    scheme = parts.scheme.lower()
+    if scheme not in _DEFAULT_PORTS:
+        return None
     try:
         port = parts.port
+        host = parts.hostname
     except ValueError:
         return None
-    if not parts.hostname:
+    if not host:
         return None
-    return parts.hostname.lower(), port
+    try:
+        host = host.lower().encode("idna").decode("ascii")
+    except UnicodeError:
+        return None
+    return scheme, host, port or _DEFAULT_PORTS[scheme]
 
 
-def validated_mention_url(url: Any, gitlab_url: str, mr_web_url: Any) -> str:
-    if not isinstance(url, str) or not isinstance(mr_web_url, str) or not url:
+def _safe_urlsplit(url: str):
+    try:
+        return urlsplit(url)
+    except ValueError:
+        return None
+
+
+def validated_mention_url(url: Any, gitlab_url: Any, mr_web_url: Any) -> str:
+    if not all(isinstance(v, str) and v for v in (url, gitlab_url, mr_web_url)):
         return ""
-    parts = urlsplit(url)
-    base = urlsplit(gitlab_url)
-    mr_parts = urlsplit(mr_web_url)
-    if parts.scheme not in ("http", "https") or parts.username or parts.password:
+    if "\\" in url or "%5c" in url.lower():
+        return ""
+    parts = _safe_urlsplit(url)
+    base = _safe_urlsplit(gitlab_url)
+    mr_parts = _safe_urlsplit(mr_web_url)
+    if parts is None or base is None or mr_parts is None:
+        return ""
+    if parts.username or parts.password:
         return ""
     origin = _origin(parts)
     if origin is None or origin != _origin(base) or origin != _origin(mr_parts):
         return ""
+    base_path = base.path.rstrip("/")
     mr_path = mr_parts.path.rstrip("/")
     if not mr_path or ".." in unquote(parts.path).split("/"):
+        return ""
+    if base_path and not mr_path.startswith(base_path + "/"):
         return ""
     if parts.path != mr_path and not parts.path.startswith(mr_path + "/"):
         return ""
