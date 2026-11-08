@@ -20,6 +20,7 @@
   #retry-msg { min-height: 1.2em; }
 {% endblock %}
 {% block content %}
+{% set verdict_labels = {"APPROVE": "approve", "APPROVE_WITH_NITS": "approve · nits", "REQUEST_CHANGES": "changes"} %}
 <p class="crumbs small"><a href="/">← к списку MR</a></p>
 <h1>{{ mr["path_with_namespace"] }} !{{ mr["iid"] }} — {{ mr["title"] or "без названия" }}</h1>
 
@@ -36,6 +37,7 @@
       {% if not (review["crit_count"] or review["major_count"] or review["minor_count"] or review["nit_count"]) %}
         <span class="sev clean">✓</span>
       {% endif %}
+      {% if review["verdict"] in verdict_labels %}<span class="verdict {{ review["verdict"] }}">{{ verdict_labels[review["verdict"]] }}</span>{% endif %}
     {% else %}<span class="muted">—</span>{% endif %}
   </dd>
   <dt>head_sha</dt><dd class="muted small">{{ review["head_sha"] }}</dd>

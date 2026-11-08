@@ -5,9 +5,11 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
-MAX_REVIEW_MD_LENGTH = 1_000_000
+from mrwatch.opencode_runner import MAX_VERDICT_INPUT_CHARS, parse_verdict
+
+MAX_REVIEW_MD_LENGTH = MAX_VERDICT_INPUT_CHARS
 TRUNCATION_MARKER = "...[truncated]"
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
 DERIVED_ROLES = frozenset({"reviewer", "assignee", "author"})
 MENTIONED_ROLE = "mentioned"
@@ -106,6 +108,8 @@ def init_schema(conn: sqlite3.Connection) -> None:
         _run_migration(conn, 5, _migrate_to_v5)
     if version < 6:
         _run_migration(conn, 6, _migrate_to_v6)
+    if version < 7:
+        _run_migration(conn, 7, _migrate_to_v7)
     conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
     conn.commit()
 
@@ -147,6 +151,31 @@ def _migrate_to_v6(conn: sqlite3.Connection) -> None:
     tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
     if "poll_state" in tables:
         conn.execute("DELETE FROM poll_state WHERE key LIKE 'roles_backfill_v5:%'")
+
+
+def _migrate_to_v7(conn: sqlite3.Connection) -> None:
+    _add_column(conn, "review", "verdict", "TEXT")
+    _backfill_verdicts(conn)
+
+
+VERDICT_BACKFILL_BATCH = 200
+
+
+def _backfill_verdicts(conn: sqlite3.Connection) -> None:
+    last_id = 0
+    while True:
+        rows = conn.execute(
+            "SELECT id, review_md FROM review WHERE status = 'done' AND verdict IS NULL AND id > ? "
+            "ORDER BY id LIMIT ?",
+            (last_id, VERDICT_BACKFILL_BATCH),
+        ).fetchall()
+        if not rows:
+            return
+        for row in rows:
+            verdict = parse_verdict(row[1])
+            if verdict is not None:
+                conn.execute("UPDATE review SET verdict = ? WHERE id = ?", (verdict, row[0]))
+        last_id = rows[-1][0]
 
 
 def _parse_roles(value: str | None) -> set[str]:
@@ -440,6 +469,7 @@ def finish_review(
     error: str | None = None,
     finished: bool = True,
     counts: tuple[int, int, int, int] = (0, 0, 0, 0),
+    verdict: str | None = None,
 ) -> None:
     if review_md is not None and len(review_md) > MAX_REVIEW_MD_LENGTH:
         review_md = review_md[:MAX_REVIEW_MD_LENGTH] + TRUNCATION_MARKER
@@ -447,7 +477,8 @@ def finish_review(
         """
         UPDATE review
         SET status = ?, review_md = ?, session_id = ?, exit_code = ?, error = ?,
-            finished_at = ?, crit_count = ?, major_count = ?, minor_count = ?, nit_count = ?
+            finished_at = ?, crit_count = ?, major_count = ?, minor_count = ?, nit_count = ?,
+            verdict = ?
         WHERE id = ?
         """,
         (
@@ -458,6 +489,7 @@ def finish_review(
             error,
             utcnow_iso() if finished else None,
             *counts,
+            verdict,
             review_id,
         ),
     )
@@ -471,7 +503,8 @@ def retry_review(conn: sqlite3.Connection, review_id: int) -> bool:
         SET status = 'queued', review_md = NULL, session_id = NULL, exit_code = NULL,
             error = NULL, started_at = NULL, finished_at = NULL,
             attempt = 0, not_before = NULL,
-            crit_count = 0, major_count = 0, minor_count = 0, nit_count = 0
+            crit_count = 0, major_count = 0, minor_count = 0, nit_count = 0,
+            verdict = NULL
         WHERE id = ? AND status IN ('error', 'done')
         """,
         (review_id,),
@@ -571,6 +604,7 @@ def list_mrs(conn: sqlite3.Connection, limit: int = 200) -> list[sqlite3.Row]:
             COALESCE(latest_done.major_count, 0) AS major_count,
             COALESCE(latest_done.minor_count, 0) AS minor_count,
             COALESCE(latest_done.nit_count, 0) AS nit_count,
+            latest_done.verdict AS verdict,
             latest_done.id AS latest_done_review_id,
             latest_any.id AS latest_review_id,
             latest_any.status AS latest_review_status
@@ -586,7 +620,8 @@ def list_mrs(conn: sqlite3.Connection, limit: int = 200) -> list[sqlite3.Row]:
             ) last ON last.max_id = r.id
         ) latest_any ON latest_any.mr_id = mr.id
         LEFT JOIN (
-            SELECT r.mr_id, r.id, r.crit_count, r.major_count, r.minor_count, r.nit_count
+            SELECT r.mr_id, r.id, r.crit_count, r.major_count, r.minor_count, r.nit_count,
+                   r.verdict
             FROM review r
             JOIN (
                 SELECT mr_id, MAX(id) AS max_id FROM review

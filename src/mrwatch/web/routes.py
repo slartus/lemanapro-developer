@@ -131,7 +131,7 @@ MR_ROW_FIELDS = (
     "id", "iid", "path_with_namespace", "title", "web_url", "author_name",
     "author_username", "source_branch", "state", "updated_at",
     "latest_review_id", "latest_review_status", "latest_done_review_id",
-    "crit_count", "major_count", "minor_count", "nit_count",
+    "crit_count", "major_count", "minor_count", "nit_count", "verdict",
 )
 
 
@@ -166,6 +166,7 @@ async def api_review(request: Request, review_id: int):
         "status": review["status"],
         "error": review["error"],
         "finished_at": review["finished_at"],
+        "verdict": review["verdict"],
     })
 
 

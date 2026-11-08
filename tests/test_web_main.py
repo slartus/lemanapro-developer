@@ -516,3 +516,34 @@ async def test_favicon_host_check(ctx, path):
     ) as client:
         response = await client.get(path)
     assert response.status_code == 403
+
+
+async def test_api_mrs_and_review_expose_verdict(ctx):
+    ctx_obj, review_id = ctx
+    finish_review(ctx_obj.conn, review_id, "done", review_md="ok", verdict="REQUEST_CHANGES")
+    async with _client(ctx_obj) as client:
+        mrs = (await client.get("/api/mrs")).json()
+        review = (await client.get(f"/api/reviews/{review_id}")).json()
+    assert mrs[0]["verdict"] == "REQUEST_CHANGES"
+    assert review["verdict"] == "REQUEST_CHANGES"
+
+
+async def test_verdict_tag_rendered_on_index_and_review(ctx):
+    ctx_obj, review_id = ctx
+    finish_review(ctx_obj.conn, review_id, "done", review_md="ok", verdict="APPROVE_WITH_NITS")
+    async with _client(ctx_obj) as client:
+        index = await client.get("/")
+        page = await client.get(f"/reviews/{review_id}")
+    assert 'class="verdict APPROVE_WITH_NITS">approve · nits</span>' in index.text
+    assert 'class="verdict APPROVE_WITH_NITS">approve · nits</span>' in page.text
+
+
+async def test_verdict_tag_absent_and_untrusted_value_ignored(ctx):
+    ctx_obj, review_id = ctx
+    finish_review(ctx_obj.conn, review_id, "done", review_md="ok", verdict="<b>x</b>")
+    async with _client(ctx_obj) as client:
+        index = await client.get("/")
+        page = await client.get(f"/reviews/{review_id}")
+    assert 'class="verdict ' not in index.text
+    assert 'class="verdict ' not in page.text
+    assert "<b>x</b>" not in index.text

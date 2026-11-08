@@ -86,6 +86,10 @@
   .sev.major { background: var(--major-bg); color: var(--major-fg); }
   .sev.minor { background: var(--warn-bg); color: var(--warn-fg); }
   .sev.nit { background: var(--neutral-bg); color: var(--neutral-fg); }
+  .verdict { display: inline-block; padding: 0.05rem 0.5rem; margin-right: 0.25rem; border-radius: 6px; font-size: 0.8rem; font-weight: 600; }
+  .verdict.APPROVE { background: var(--ok-bg); color: var(--ok-fg); }
+  .verdict.APPROVE_WITH_NITS { background: var(--neutral-bg); color: var(--ok-fg); }
+  .verdict.REQUEST_CHANGES { background: var(--err-bg); color: var(--err-fg); }
   .sev.clean { background: var(--ok-bg); color: var(--ok-fg); }
   .flash { padding: 0.65rem 1rem; border-radius: var(--radius); margin-bottom: 1rem; border: 1px solid transparent; }
   .flash.ok { background: var(--ok-bg); color: var(--ok-fg); }

@@ -12,6 +12,8 @@ from mrwatch.opencode_runner import (
     output_truncated_by_length,
     parse_opencode_output,
     parse_severity_counts,
+    MAX_VERDICT_INPUT_CHARS,
+    parse_verdict,
     run_review,
     collect_project_instructions,
 )
@@ -207,3 +209,69 @@ def test_build_review_prompt_includes_project_rules():
     prompt = build_review_prompt("t", "a", None, None, project_rules="ПРАВИЛО")
     assert "ПРАВИЛА ПРОЕКТА" in prompt
     assert "ПРАВИЛО" in prompt
+
+
+@pytest.mark.parametrize(
+    "md, expected",
+    [
+        ("## Summary\nok\n\n## Verdict\nAPPROVE", "APPROVE"),
+        ("## Verdict\nAPPROVE_WITH_NITS\n", "APPROVE_WITH_NITS"),
+        ("### verdict\nREQUEST_CHANGES", "REQUEST_CHANGES"),
+        ("Summary\n\nVerdict: REQUEST_CHANGES", "REQUEST_CHANGES"),
+        ("Verdict: APPROVE с пометкой «нет изменений для ревью»", "APPROVE"),
+        ("## Verdict\n**REQUEST_CHANGES**", "REQUEST_CHANGES"),
+        ("## Verdict\n`APPROVE_WITH_NITS` — мелочи", "APPROVE_WITH_NITS"),
+        ("**Verdict:** **APPROVE**", "APPROVE"),
+        ("## Verdict: APPROVE", "APPROVE"),
+        ("## Verdict\n\nAPPROVE с пометкой «пусто»\n", "APPROVE"),
+        ("## Summary\nнужно APPROVE\n\n## Verdict\nREQUEST_CHANGES", "REQUEST_CHANGES"),
+        ("## Summary\nREQUEST_CHANGES вероятно\n\nVerdict: APPROVE", "APPROVE"),
+        ("## Verdict\nAPPROVE\n## Risks\nREQUEST_CHANGES", "APPROVE"),
+        ("## Summary\nAPPROVE", None),
+        ("## Verdict\nMAYBE", None),
+        ("## Verdict\nNOT_APPROVE", None),
+        ("## Verdict\nAPPROVED", None),
+        ("## Verdict\nAPPROVE\n\n```\n## Verdict\nREQUEST_CHANGES\n```\n", "APPROVE"),
+        ("## Verdict\nAPPROVE\n\n~~~md\n## Verdict\nREQUEST_CHANGES\n~~~\n", "APPROVE"),
+        ("````\n```\n## Verdict\nREQUEST_CHANGES\n````\n## Verdict\nAPPROVE", "APPROVE"),
+        ("```python\n# Verdict: APPROVE\n```\nVerdict: REQUEST_CHANGES", "REQUEST_CHANGES"),
+        ("## Verdict\nREQUEST_CHANGES\n\n> ## Verdict APPROVE", "REQUEST_CHANGES"),
+        ("> ## Verdict APPROVE", None),
+        ("```\nVerdict: APPROVE\n```", None),
+        ("## Verdict\nAPPROVE | APPROVE_WITH_NITS | REQUEST_CHANGES", None),
+        ("Verdict: APPROVE | REQUEST_CHANGES", None),
+        ("", None),
+        (None, None),
+    ],
+)
+def test_parse_verdict(md, expected):
+    assert parse_verdict(md) == expected
+
+
+def _padded(tail: str, total: int) -> str:
+    return "x" * (total - len(tail)) + tail
+
+
+def test_parse_verdict_over_limit_returns_none():
+    tail = "\n## Verdict\nAPPROVE\n"
+    assert parse_verdict(_padded(tail, MAX_VERDICT_INPUT_CHARS + 1)) is None
+
+
+def test_parse_verdict_exactly_at_limit_is_parsed():
+    tail = "\n## Verdict\nAPPROVE\n"
+    assert parse_verdict(_padded(tail, MAX_VERDICT_INPUT_CHARS)) == "APPROVE"
+
+
+def test_parse_verdict_unclosed_fence_before_verdict_returns_none():
+    assert parse_verdict("text\n```\ncode\n## Verdict\nAPPROVE\n") is None
+
+
+def test_parse_verdict_is_linear_on_hostile_input():
+    import time
+
+    many_headings = "#Verdict\n" * 50_000
+    big_text = ("текст ревью без вердикта " * 40 + "\n") * 5_000
+    for text in (many_headings, big_text):
+        started = time.perf_counter()
+        parse_verdict(text)
+        assert time.perf_counter() - started < 0.5
