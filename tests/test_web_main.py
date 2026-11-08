@@ -539,3 +539,63 @@ async def test_foreign_mention_url_not_exposed_or_rendered(ctx):
         page = await client.get("/")
     assert api.json()[0]["mention_url"] == ""
     assert "evil.example.org" not in page.text
+
+
+def _seed_updated(conn, project_id, values):
+    from mrwatch.db import upsert_mr
+
+    ids = {}
+    for iid, updated in values.items():
+        res = upsert_mr(
+            conn, project_db_id=project_id, iid=iid, title=f"MR {iid}", author_username="me",
+            source_branch="b", web_url="https://x/y", state="opened", head_sha="a" * 40,
+            updated_at="2026-01-01T00:00:00Z",
+        )
+        conn.execute("UPDATE mr SET updated_at = ? WHERE id = ?", (updated, res.mr_id))
+        ids[iid] = res.mr_id
+    conn.commit()
+    return ids
+
+
+UPDATED_ORDER_CASES = {
+    11: "2026-03-01T10:00:00.000Z",
+    12: "2026-03-01T12:00:00+03:00",
+    13: "2026-03-01T10:00:00.000Z",
+    14: "",
+    15: "2026-03-02T00:00:00Z",
+}
+
+
+async def test_list_mrs_and_api_sorted_by_updated_at(ctx):
+    from mrwatch.db import list_mrs
+
+    ctx_obj, _ = ctx
+    ids = _seed_updated(ctx_obj.conn, ctx_obj.project_ids[10], UPDATED_ORDER_CASES)
+    expected = [ids[15], ids[13], ids[11], ids[12], ids[14]]
+    ordered = [r["id"] for r in list_mrs(ctx_obj.conn) if r["id"] in ids.values()]
+    assert ordered == expected
+    async with _client(ctx_obj) as client:
+        api = [r["id"] for r in (await client.get("/api/mrs")).json() if r["id"] in ids.values()]
+    assert api == expected
+
+
+async def test_index_has_adaptive_refresh_logic(ctx):
+    ctx_obj, _ = ctx
+    async with _client(ctx_obj) as client:
+        page = await client.get("/")
+    assert "ACTIVE_INTERVAL_MS = 5000" in page.text
+    assert "IDLE_INTERVAL_MS = 30000" in page.text
+    assert "visibilitychange" in page.text
+    assert "inFlight" in page.text
+
+
+async def test_force_check_reschedules_followup_refreshes(ctx):
+    ctx_obj, _ = ctx
+    async with _client(ctx_obj) as client:
+        page = await client.get("/")
+    text = page.text
+    assert "FORCE_CHECK_FOLLOWUP_MS = [2000, 4000]" in text
+    body = text[text.index("async function forceCheck()"):]
+    body = body[: body.index("\n}\n")]
+    assert "scheduleFollowups(FORCE_CHECK_FOLLOWUP_MS)" in body
+    assert "if (id === cycle) after();" in text

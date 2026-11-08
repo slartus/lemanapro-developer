@@ -197,8 +197,11 @@ function renderRow(m) {
   return tr;
 }
 
+let inFlight = false;
+
 async function refresh() {
-  if (document.hidden) return;
+  if (document.hidden || inFlight) return;
+  inFlight = true;
   try {
     const r = await fetch("/api/mrs", {cache: "no-store"});
     if (!r.ok) return;
@@ -206,15 +209,46 @@ async function refresh() {
     document.getElementById("mr-body").replaceChildren(...rows.map(renderRow));
     MRW.renderTimes();
     applyFilter();
-  } catch (e) {}
+  } catch (e) {
+  } finally {
+    inFlight = false;
+  }
+}
+
+const ACTIVE_INTERVAL_MS = 5000;
+const IDLE_INTERVAL_MS = 30000;
+
+const FORCE_CHECK_FOLLOWUP_MS = [2000, 4000];
+let cycle = 0;
+
+function planNext(delay, after) {
+  if (timer) clearTimeout(timer);
+  const id = ++cycle;
+  timer = setTimeout(async function () {
+    await refresh();
+    if (id === cycle) after();
+  }, delay);
 }
 
 function schedule() {
-  if (timer) clearInterval(timer);
-  timer = setInterval(function () {
-    if (hasActive()) refresh();
-  }, 5000);
+  planNext(hasActive() ? ACTIVE_INTERVAL_MS : IDLE_INTERVAL_MS, schedule);
 }
+
+function scheduleFollowups(delays) {
+  if (!delays.length) {
+    schedule();
+    return;
+  }
+  planNext(delays[0], function () {
+    scheduleFollowups(delays.slice(1));
+  });
+}
+
+document.addEventListener("visibilitychange", async function () {
+  if (document.hidden) return;
+  await refresh();
+  schedule();
+});
 
 async function forceCheck() {
   const btn = document.getElementById("fc-btn");
@@ -229,7 +263,7 @@ async function forceCheck() {
     });
     if (r.ok) {
       status.textContent = "готово";
-      await refresh();
+      scheduleFollowups(FORCE_CHECK_FOLLOWUP_MS);
       return;
     }
     status.textContent = "ошибка: " + (await r.text());
