@@ -9,7 +9,7 @@ import yaml
 
 from jinja2 import pass_context
 from fastapi import APIRouter, Request
-from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse, RedirectResponse, Response
 from fastapi.templating import Jinja2Templates
 
 from mrwatch.agents import list_readonly_agents
@@ -22,6 +22,18 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 templates = Jinja2Templates(directory=str(Path(__file__).parent / "templates"))
+
+FAVICON_PATH = Path(__file__).parent / "static" / "favicon.svg"
+
+
+@router.get("/favicon.svg", include_in_schema=False)
+@router.get("/favicon.ico", include_in_schema=False)
+async def favicon():
+    return Response(
+        FAVICON_PATH.read_bytes(),
+        media_type="image/svg+xml",
+        headers={"Cache-Control": "public, max-age=86400"},
+    )
 
 
 def safe_url(value: str | None, gitlab_url: str) -> str:
