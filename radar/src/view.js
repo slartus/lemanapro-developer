@@ -41,15 +41,22 @@ const AUTHOR_TURN_REVIEW_STATES = new Set(['requested_changes', 'reviewed']);
 export const awaitsAuthor = (item) => AUTHOR_TURN_REVIEW_STATES.has(item.myReviewState);
 const awaitsMyReview = (item) => !item.approvedByMe && !item.draft && !awaitsAuthor(item);
 
-function countActionable({ reviewing, assigned, mentioned, awaitingApproval, threads, authored }) {
-  const waiting = new Set([
-    ...mentioned.map((item) => item.key),
-    ...reviewing.filter(awaitsMyReview).map((item) => item.key),
-    ...assigned.filter(awaitsMyReview).map((item) => item.key),
-    ...awaitingApproval.filter((item) => !awaitsAuthor(item)).map((item) => item.key),
-    ...threads.map((item) => item.key),
-  ]);
-  return { waiting: waiting.size, failedCi: authored.filter(isFailedPipeline).length };
+export function actionableKeys({ reviewing, assigned, mentioned, awaitingApproval, threads, authored }) {
+  return {
+    waiting: new Set([
+      ...mentioned.map((item) => item.key),
+      ...reviewing.filter(awaitsMyReview).map((item) => item.key),
+      ...assigned.filter(awaitsMyReview).map((item) => item.key),
+      ...awaitingApproval.filter((item) => !awaitsAuthor(item)).map((item) => item.key),
+      ...threads.map((item) => item.key),
+    ]),
+    failedCi: new Set(authored.filter(isFailedPipeline).map((item) => item.key)),
+  };
+}
+
+function countActionable(sections) {
+  const { waiting, failedCi } = actionableKeys(sections);
+  return { waiting: waiting.size, failedCi: failedCi.size };
 }
 
 export function itemsByKey(dashboard) {
@@ -114,7 +121,7 @@ export function withStableStatuses(previous, next) {
   };
 }
 
-export function tokenProblems(token, dismissed = {}, now = Date.now()) {
+export function tokenProblems(token, dismissed = {}, now = Date.now(), allowedScopes = [REQUIRED_TOKEN_SCOPE]) {
   if (!token) {
     return [];
   }
@@ -137,12 +144,12 @@ export function tokenProblems(token, dismissed = {}, now = Date.now()) {
       problems.push({ kind: 'expiry', text: `Токен истекает через ${Math.floor(msLeft / DAY_MS)} дн.` });
     }
   }
-  const extraScopes = token.scopes.filter((scope) => scope !== REQUIRED_TOKEN_SCOPE).sort();
+  const extraScopes = token.scopes.filter((scope) => !allowedScopes.includes(scope)).sort();
   const extraScopesKey = extraScopes.join(',');
   if (extraScopes.length && dismissed.extraScopes !== extraScopesKey) {
     problems.push({
       kind: 'extraScopes',
-      text: `У токена лишние права: ${extraScopes.join(', ')} — достаточно ${REQUIRED_TOKEN_SCOPE}`,
+      text: `У токена лишние права: ${extraScopes.join(', ')} — достаточно ${allowedScopes.join(', ')}`,
       dismissKey: extraScopesKey,
     });
   }

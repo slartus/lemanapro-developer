@@ -6,8 +6,10 @@
 - `src/dashboard.js` — конвейер `fetchRaw` → `enrich` → `classify`.
 - `src/view.js` — секции и счётчики из дашборда (`deriveView`), стабилизация статусов, проблемы токена.
 - `src/snooze.js` — отложенные MR.
-- `src/links.js`, `src/config.js` — ссылки и константы.
-- `src/popup.js`, `src/popup.css` — UI бывшего расширения, исходник для переноса в общую таблицу MR; нигде не загружается.
+- `src/links.js` — проверка ссылок.
+- `src/runner.mjs` — точка входа для бэкенда: JSON на stdin, дашборд на stdout; в GitLab ходит только через прокси бэкенда.
+
+`view.js`, `snooze.js` и `links.js` также грузятся в браузер общей таблицей MR (`src/lpdev/web/static/board.js`).
 
 Тесты: `node --test` (Node 22+).
 

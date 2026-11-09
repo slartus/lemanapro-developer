@@ -38,3 +38,6 @@ jobs:
           node-version: "22"
       - name: Test
         run: node --test
+      - name: Test board
+        working-directory: .
+        run: node --test "tests/js/*.test.mjs"

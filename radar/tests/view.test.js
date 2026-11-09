@@ -4,6 +4,7 @@ import { describe, it } from 'node:test';
 import { failureUrl, isHttpsUrl, isUnderBaseUrl } from '../src/links.js';
 import {
   SECTION_IDS,
+  actionableKeys,
   deriveView,
   hasActivePipelines,
   sectionsToSkip,
@@ -201,5 +202,30 @@ describe('withStableStatuses', () => {
         assert.equal(withStableStatuses({ ...stable, ...source }, checking).sections.authored[0].status, 'checking');
       },
     );
+  });
+});
+
+describe('actionableKeys', () => {
+  it('returns the keys behind the badge counts', () => {
+    const sections = {
+      reviewing: [{ key: 'a' }, { key: 'b', approvedByMe: true }],
+      assigned: [],
+      mentioned: [{ key: 'c' }],
+      awaitingApproval: [{ key: 'd', myReviewState: 'requested_changes' }, { key: 'e' }],
+      threads: [{ key: 'a' }],
+      authored: [{ key: 'f', pipeline: { status: 'failed' } }, { key: 'g', pipeline: { status: 'success' } }],
+    };
+    const { waiting, failedCi } = actionableKeys(sections);
+    assert.deepEqual([...waiting].sort(), ['a', 'c', 'e']);
+    assert.deepEqual([...failedCi], ['f']);
+  });
+});
+
+describe('tokenProblems with allowed scopes', () => {
+  it('does not flag scopes the caller allows', () => {
+    const token = { expiresAt: '2027-01-01T00:00:00Z', scopes: ['read_api', 'read_repository'] };
+    const now = Date.parse('2026-11-09T00:00:00Z');
+    assert.deepEqual(tokenProblems(token, {}, now, ['read_api', 'read_repository']), []);
+    assert.match(tokenProblems({ ...token, scopes: ['api'] }, {}, now, ['read_api', 'read_repository'])[0].text, /достаточно read_api, read_repository/);
   });
 });

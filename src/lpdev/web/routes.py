@@ -31,6 +31,7 @@ from lpdev.db import (
 )
 from lpdev.gitlab_client import GitlabApiError
 from lpdev.review_findings import layout_review, load_snippets
+from lpdev.web.radar_routes import radar_payload, ui_state_payload
 
 logger = logging.getLogger(__name__)
 
@@ -87,12 +88,14 @@ def _ctx(request: Request):
 @router.get("/", response_class=HTMLResponse)
 async def index(request: Request):
     ctx = _ctx(request)
-    mrs = list_mrs(ctx.conn)
-    return templates.TemplateResponse(
-        request,
-        "index.html",
-        {"mrs": mrs, "project_ids": ctx.project_ids, "role_labels": ROLE_LABELS},
-    )
+    gitlab_url = ctx.config.gitlab.url
+    initial = {
+        "gitlabUrl": gitlab_url,
+        "mrs": [_mr_payload(row, gitlab_url) for row in list_mrs(ctx.conn)],
+        "radar": radar_payload(ctx),
+        "userState": ui_state_payload(ctx, "radar"),
+    }
+    return templates.TemplateResponse(request, "board.html", {"initial": initial})
 
 
 @router.get("/reviews/{review_id}", response_class=HTMLResponse)
@@ -246,19 +249,12 @@ async def review_retry(request: Request, review_id: int):
 
 ACTIVE_STATUSES = ("queued", "cloning", "reviewing")
 MR_ROW_FIELDS = (
-    "id", "iid", "path_with_namespace", "title", "web_url", "author_name",
+    "id", "iid", "gitlab_project_id", "path_with_namespace", "title", "web_url", "author_name",
     "author_username", "source_branch", "state", "updated_at",
     "latest_review_id", "latest_review_status", "latest_done_review_id",
     "crit_count", "major_count", "minor_count", "nit_count", "verdict",
 )
 
-
-ROLE_LABELS = {
-    "reviewer": "ревьюер",
-    "mentioned": "упомянули",
-    "assignee": "назначен",
-    "author": "мой",
-}
 
 
 def _mr_payload(row, gitlab_url: str) -> dict:

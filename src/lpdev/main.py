@@ -11,6 +11,7 @@ from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
 from fastapi import FastAPI
+from fastapi.staticfiles import StaticFiles
 from fastapi.responses import JSONResponse, PlainTextResponse
 
 from lpdev.config import Config, ResolvedPaths, default_config_path, get_pat, load_config, resolve_paths
@@ -18,7 +19,7 @@ from lpdev.db import backup, connect, init_schema, poll_state_get, requeue_incom
 from lpdev.git_ops import cleanup_old_review_logs, cleanup_old_workspaces, cleanup_stale_askpass
 from lpdev.gitlab_client import GitLabClient
 from lpdev.poller import Poller
-from lpdev.radar_scheduler import RadarScheduler
+from lpdev.radar_scheduler import RUNNER_PATH, RadarScheduler
 from lpdev.web.gitlab_proxy import PROXY_PREFIX
 from lpdev.web.gitlab_proxy import router as gitlab_proxy_router
 from lpdev.web.radar_routes import router as radar_router
@@ -229,6 +230,8 @@ def create_app(ctx: AppContext, port: int = DEFAULT_PORT) -> FastAPI:
     app.include_router(web_router)
     app.include_router(gitlab_proxy_router)
     app.include_router(radar_router)
+    app.mount("/static/radar", StaticFiles(directory=RUNNER_PATH.parent), name="radar-static")
+    app.mount("/static", StaticFiles(directory=Path(__file__).parent / "web" / "static"), name="static")
 
     @app.get("/healthz")
     async def healthz() -> JSONResponse:

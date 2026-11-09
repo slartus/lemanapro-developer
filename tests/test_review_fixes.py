@@ -219,7 +219,8 @@ async def test_index_renders_gitlab_link(ctx):
     ctx_obj, _ = ctx
     async with _client(ctx_obj) as client:
         index = await client.get("/")
-    assert 'href="https://gitlab.example.com/g/p/-/mr/1"' in index.text
+    assert '"web_url": "https://gitlab.example.com/g/p/-/mr/1"' in index.text
+    assert '"gitlabUrl": "https://gitlab.example.com"' in index.text
 
 
 async def test_settings_has_no_pull_agents(ctx, tmp_path, monkeypatch):

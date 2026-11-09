@@ -1142,5 +1142,5 @@ async def test_templates_use_json_endpoints(tmp_path):
     async with _http(create_app(ctx)) as client:
         index = await client.get("/")
         review = await client.get(f"/reviews/{review_id}")
-    assert "/api/mrs" in index.text
+    assert "/static/board.js" in index.text
     assert f"/api/reviews/{review_id}" in review.text

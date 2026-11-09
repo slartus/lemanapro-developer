@@ -20,7 +20,7 @@ dependencies = [
 where = ["src"]
 
 [tool.setuptools.package-data]
-"lpdev.web" = ["templates/*.html", "static/*.svg"]
+"lpdev.web" = ["templates/*.html", "static/*.svg", "static/*.js"]
 
 [dependency-groups]
 dev = ["pytest", "pytest-asyncio", "pytest-cov", "ruff"]

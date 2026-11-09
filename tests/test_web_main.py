@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 
 import httpx
 import pytest
@@ -7,6 +9,11 @@ import yaml
 
 from lpdev.db import finish_review
 from lpdev.main import create_app
+
+
+def _initial(page) -> dict:
+    raw = page.text.split('<script type="application/json" id="initial-data">', 1)[1].split("</script>", 1)[0]
+    return json.loads(raw)
 
 
 def _client(ctx_obj) -> httpx.AsyncClient:
@@ -86,17 +93,16 @@ async def test_retry_requires_header(ctx):
     assert get_review(ctx_obj.conn, review_id)["status"] == "queued"
 
 
-async def test_index_shows_severity_counts(ctx):
+async def test_index_embeds_severity_counts(ctx):
     ctx_obj, review_id = ctx
     from lpdev.db import finish_review
 
     finish_review(ctx_obj.conn, review_id, "done", review_md="ok", counts=(1, 2, 0, 3))
     async with _client(ctx_obj) as client:
         response = await client.get("/")
-    assert ">1</span>" in response.text
-    assert ">2</span>" in response.text
-    assert ">3</span>" in response.text
-    assert "крит" in response.text  # легенда
+    mr = _initial(response)["mrs"][0]
+    assert (mr["crit_count"], mr["major_count"], mr["minor_count"], mr["nit_count"]) == (1, 2, 0, 3)
+    assert mr["latest_done_review_id"] == review_id
 
 
 async def test_force_check_requires_header(ctx, monkeypatch):
@@ -407,18 +413,17 @@ async def test_api_mrs_and_index_include_roles(ctx):
         api = await client.get("/api/mrs")
         page = await client.get("/")
     assert api.json()[0]["my_roles"] == ["mentioned", "reviewer"]
-    assert 'data-roles="mentioned,reviewer"' in page.text
-    assert "упомянули" in page.text
-    assert "ревьюер" in page.text
-    assert 'id="rf"' in page.text
+    assert _initial(page)["mrs"][0]["my_roles"] == ["mentioned", "reviewer"]
+    assert api.json()[0]["gitlab_project_id"] == 10
 
 
-async def test_index_marks_open_mr_time_for_staleness(ctx):
+async def test_index_embeds_update_time_and_state(ctx):
     ctx_obj, _ = ctx
     async with _client(ctx_obj) as client:
         page = await client.get("/")
-    assert 'data-ts="2026-01-01T12:00:00Z" data-open="1"' in page.text
-    assert "MRW.staleness" in page.text
+    mr = _initial(page)["mrs"][0]
+    assert mr["updated_at"] == "2026-01-01T12:00:00Z"
+    assert mr["state"] == "opened"
 
 
 async def test_api_mrs_exposes_updated_at_and_state(ctx):
@@ -440,11 +445,8 @@ async def test_api_mrs_and_index_expose_draft(ctx):
         api = await client.get("/api/mrs")
         page = await client.get("/")
     assert api.json()[0]["is_draft"] is True
-    assert 'class="badge role draft"' not in plain.text.split("<tbody", 1)[1]
-    body = page.text.split("<tbody", 1)[1]
-    assert 'class="badge role draft">draft</span>' in body
-    assert 'id="hd"' not in page.text
-    assert "скрыть draft" not in page.text
+    assert _initial(plain)["mrs"][0]["is_draft"] is False
+    assert _initial(page)["mrs"][0]["is_draft"] is True
 
 
 async def test_favicon_svg(ctx):
@@ -493,13 +495,13 @@ async def test_api_mrs_and_review_expose_verdict(ctx):
     assert review["verdict"] == "REQUEST_CHANGES"
 
 
-async def test_verdict_tag_rendered_on_index_and_review(ctx):
+async def test_verdict_on_index_data_and_review_page(ctx):
     ctx_obj, review_id = ctx
     finish_review(ctx_obj.conn, review_id, "done", review_md="ok", verdict="APPROVE_WITH_NITS")
     async with _client(ctx_obj) as client:
         index = await client.get("/")
         page = await client.get(f"/reviews/{review_id}")
-    assert 'class="verdict APPROVE_WITH_NITS">approve · nits</span>' in index.text
+    assert _initial(index)["mrs"][0]["verdict"] == "APPROVE_WITH_NITS"
     assert 'class="verdict APPROVE_WITH_NITS">approve · nits</span>' in page.text
 
 
@@ -514,7 +516,7 @@ async def test_verdict_tag_absent_and_untrusted_value_ignored(ctx):
     assert "<b>x</b>" not in index.text
 
 
-async def test_mention_url_in_api_and_badge_link(ctx):
+async def test_mention_url_in_api_and_index_data(ctx):
     ctx_obj, _ = ctx
     url = "https://gitlab.example.com/g/p/-/mr/1#note_5"
     ctx_obj.conn.execute("UPDATE mr SET my_roles = 'mentioned', mention_url = ?", (url,))
@@ -523,10 +525,7 @@ async def test_mention_url_in_api_and_badge_link(ctx):
         api = await client.get("/api/mrs")
         page = await client.get("/")
     assert api.json()[0]["mention_url"] == url
-    assert (
-        f'<a href="{url}" title="Открыть комментарий с упоминанием" rel="noopener noreferrer">'
-        '<span class="badge role mentioned">'
-    ) in page.text
+    assert _initial(page)["mrs"][0]["mention_url"] == url
 
 
 async def test_foreign_mention_url_not_exposed_or_rendered(ctx):
@@ -580,40 +579,36 @@ async def test_list_mrs_and_api_sorted_by_updated_at(ctx):
     assert api == expected
 
 
-async def test_index_has_adaptive_refresh_logic(ctx):
+async def test_board_script_polls_with_adaptive_intervals(ctx):
     ctx_obj, _ = ctx
     async with _client(ctx_obj) as client:
         page = await client.get("/")
-    assert "ACTIVE_INTERVAL_MS = 5000" in page.text
-    assert "IDLE_INTERVAL_MS = 30000" in page.text
-    assert "visibilitychange" in page.text
-    assert "inFlight" in page.text
+        script = await client.get("/static/board.js")
+    assert '<script type="module" src="/static/board.js"></script>' in page.text
+    assert script.status_code == 200
+    assert "javascript" in script.headers["content-type"]
+    for marker in ("REFRESH_ACTIVE_MS = 5000", "REFRESH_IDLE_MS = 30000", "REFRESH_HIDDEN_MS = 60000", "visibilitychange", "inFlight"):
+        assert marker in script.text
 
 
-async def test_index_has_hidden_tab_badge_logic(ctx):
+async def test_board_marks_reviews_finished_while_hidden(ctx):
     ctx_obj, _ = ctx
     async with _client(ctx_obj) as client:
-        page = await client.get("/")
-    text = page.text
-    assert "HIDDEN_INTERVAL_MS = 60000" in text
-    assert "function newlyFinished(baseline, current, counted)" in text
-    assert 'const FINISHED = ["done", "error"];' in text
-    assert "resetBadge();" in text
-    assert "if (document.hidden || inFlight) return;" not in text
-    body = text.split("<tbody", 1)[1]
-    assert "data-review=" in body and "data-done=" in body
+        script = await client.get("/static/board.js")
+        dot = await client.get("/static/favicon-dot.svg")
+    assert "function trackFinishedReviews()" in script.text
+    assert "/static/favicon-dot.svg" in script.text
+    assert dot.status_code == 200
 
 
 async def test_force_check_reschedules_followup_refreshes(ctx):
     ctx_obj, _ = ctx
     async with _client(ctx_obj) as client:
-        page = await client.get("/")
-    text = page.text
-    assert "FORCE_CHECK_FOLLOWUP_MS = [2000, 4000]" in text
-    body = text[text.index("async function forceCheck()"):]
+        script = (await client.get("/static/board.js")).text
+    body = script[script.index("async function forceCheck("):]
     body = body[: body.index("\n}\n")]
-    assert "scheduleFollowups(FORCE_CHECK_FOLLOWUP_MS)" in body
-    assert "if (id === cycle) after();" in text
+    assert "'/force-check'" in body
+    assert "setTimeout(refresh, delay)" in body
 
 
 H = {"X-Requested-With": "lpdev"}

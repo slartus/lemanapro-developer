@@ -1,7 +1,6 @@
 import assert from 'node:assert/strict';
 import { afterEach, describe, it, mock } from 'node:test';
 
-import { compareVersions, normalizeBaseUrl, parseCheckNames, refreshDelayMinutes } from '../src/config.js';
 import {
   GitLabClient,
   GitLabError,
@@ -76,22 +75,6 @@ describe('GitLabClient', () => {
   });
 });
 
-describe('refreshDelayMinutes', () => {
-  const NOW = Date.parse('2026-03-10T15:00:00Z');
-
-  it('waits one minute while fast refresh is on and the full interval otherwise', () => {
-    assert.equal(refreshDelayMinutes({ intervalMinutes: 15, now: NOW }), 15);
-    assert.equal(refreshDelayMinutes({ intervalMinutes: 15, fastSince: NOW - 60_000, now: NOW }), 1);
-    assert.equal(refreshDelayMinutes({ intervalMinutes: 15, fastSince: NOW, immediately: true, now: NOW }), 0);
-    assert.equal(refreshDelayMinutes({ intervalMinutes: undefined, now: NOW }), 5);
-  });
-
-  it('falls back to the interval after an hour of fast refresh', () => {
-    assert.equal(refreshDelayMinutes({ intervalMinutes: 15, fastSince: NOW - 59 * 60_000, now: NOW }), 1);
-    assert.equal(refreshDelayMinutes({ intervalMinutes: 15, fastSince: NOW - 60 * 60_000, now: NOW }), 15);
-  });
-});
-
 describe('fetchPipelineFailures', () => {
   const pipeline = { projectPath: 'group/project', id: 7, sha: 'abc' };
   const root = '/projects/group%2Fproject';
@@ -127,23 +110,6 @@ describe('fetchPipelineFailures', () => {
   it('tolerates unavailable commit statuses', async () => {
     const client = new FakeClient({ [`${root}/pipelines/7/jobs`]: [], [`${root}/pipelines/7/bridges`]: [] });
     assert.deepEqual(await fetchPipelineFailures(client, pipeline), []);
-  });
-});
-
-describe('config helpers', () => {
-  it('compares versions', () => {
-    assert.equal(compareVersions('v1.10.0', '1.9.9'), 1);
-    assert.equal(compareVersions('1.2', '1.2.0'), 0);
-    assert.equal(compareVersions('1.2.0', '1.2.1'), -1);
-  });
-
-  it('parses check names', () => {
-    assert.deepEqual(parseCheckNames('approves, lint\n\napproves\n sonar '), ['approves', 'lint', 'sonar']);
-  });
-
-  it('normalizes the base URL and rejects plain http', () => {
-    assert.equal(normalizeBaseUrl(' https://gitlab.example.com/gitlab/// '), 'https://gitlab.example.com/gitlab');
-    assert.throws(() => normalizeBaseUrl('http://gitlab.example.com'), /https/);
   });
 });
 
