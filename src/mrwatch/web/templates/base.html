@@ -78,6 +78,7 @@
   .status.queued { background: var(--neutral-bg); color: var(--neutral-fg); }
   .status.cloning { background: var(--info-bg); color: var(--info-fg); }
   .status.reviewing { background: var(--warn-bg); color: var(--warn-fg); }
+  .status.cancelled { background: var(--surface-2); color: var(--muted); box-shadow: inset 0 0 0 1px var(--border); }
   .status.cloning::before, .status.reviewing::before { content: ""; display: inline-block; width: 0.5em; height: 0.5em; margin-right: 0.4em; border-radius: 50%; background: currentColor; animation: pulse 1.2s ease-in-out infinite; }
   @keyframes pulse { 50% { opacity: 0.2; } }
   @media (prefers-reduced-motion: reduce) { .status::before { animation: none !important; } }

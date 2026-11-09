@@ -1,19 +1,24 @@
 from __future__ import annotations
 
+import asyncio
 import stat
+import time
 import subprocess
 from pathlib import Path
 
+import pytest
 
+import mrwatch.worker as worker_module
 from mrwatch.config import Config, GitlabConfig, PathsConfig, ProjectConfig, ReviewConfig
 from mrwatch.config import resolve_paths
 from mrwatch.db import (
     create_review,
     get_review,
+    supersede_reviews,
     sync_projects,
     upsert_mr,
 )
-from mrwatch.worker import Worker
+from mrwatch.worker import ReviewRegistry, Worker
 
 NDJSON_OUTPUT = (
     '{"type":"session.started","sessionID":"sess-w1"}\n'
@@ -97,7 +102,13 @@ def _queued_review(conn, origin: Path) -> int:
     return review_id
 
 
-def _worker(tmp_path: Path, db_conn, origin: Path, opencode_bin: str) -> Worker:
+def _worker(
+    tmp_path: Path,
+    db_conn,
+    origin: Path,
+    opencode_bin: str,
+    registry: ReviewRegistry | None = None,
+) -> Worker:
     config = _config(tmp_path, opencode_bin)
     paths = resolve_paths(config)
     (paths.workspaces.parent / "tmp").mkdir(parents=True, exist_ok=True)
@@ -113,7 +124,8 @@ def _worker(tmp_path: Path, db_conn, origin: Path, opencode_bin: str) -> Worker:
     agents_dir.mkdir(exist_ok=True)
     (agents_dir / "agent-a.md").write_text(READONLY_AGENT)
     return LocalWorker(
-        0, db_conn, api, config, paths, clone_harden=False, agents_dirs=(agents_dir,)
+        0, db_conn, api, config, paths, clone_harden=False, agents_dirs=(agents_dir,),
+        registry=registry,
     )
 
 
@@ -266,3 +278,136 @@ def test_repo_url_subgroups_and_subpath():
         _repo_url_for("https://example.com/gitlab/", "a/b/c/repo")
         == "https://example.com/gitlab/a/b/c/repo.git"
     )
+
+
+async def _wait_until(predicate, timeout: float = 10.0) -> None:
+    deadline = time.monotonic() + timeout
+    while not predicate():
+        if time.monotonic() > deadline:
+            raise AssertionError("condition not met in time")
+        await asyncio.sleep(0.01)
+
+
+def _workspace(tmp_path: Path, review_id: int) -> Path:
+    return tmp_path / "workspaces" / "10" / "1" / str(review_id)
+
+
+def _spy_finish(monkeypatch) -> list[int]:
+    calls: list[int] = []
+    real = worker_module.finish_review
+
+    def spy(conn, review_id, *args, **kwargs):
+        calls.append(review_id)
+        return real(conn, review_id, *args, **kwargs)
+
+    monkeypatch.setattr(worker_module, "finish_review", spy)
+    return calls
+
+
+async def test_cancel_during_clone_removes_workspace_and_worker_continues(
+    tmp_path, db, origin, monkeypatch
+):
+    sync_projects(db, [(10, "g/p", "agent-a", False, True)])
+    head_sha = _git("rev-parse", "merge-requests/1/head", cwd=origin).strip()
+    mr_id = upsert_mr(
+        db, project_db_id=1, iid=1, title="MR 1", author_username="other",
+        source_branch="feature", web_url="https://gitlab.example.com/g/p/-/merge_requests/1",
+        state="opened", head_sha="f" * 40, updated_at="2026-01-01T12:00:00Z",
+    ).mr_id
+    stale_id = create_review(db, mr_id, "new", "f" * 40, "agent-a")
+    registry = ReviewRegistry()
+    opencode_bin = _fake_opencode(tmp_path, f"#!/bin/sh\nprintf '%s' '{NDJSON_OUTPUT}'\n")
+    worker = _worker(tmp_path, db, origin, opencode_bin, registry)
+    finished = _spy_finish(monkeypatch)
+    real_clone = worker_module.clone_for_review
+    clone_started = asyncio.Event()
+
+    async def blocking_clone(**kwargs):
+        if kwargs["expected_sha"] != "f" * 40:
+            return await real_clone(**kwargs)
+        kwargs["workspace"].mkdir(parents=True)
+        clone_started.set()
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(worker_module, "clone_for_review", blocking_clone)
+    run_task = asyncio.create_task(worker.run())
+    try:
+        await asyncio.wait_for(clone_started.wait(), timeout=10)
+        assert _workspace(tmp_path, stale_id).exists()
+
+        supersede_reviews(db, mr_id, head_sha)
+        assert registry.cancel(stale_id) is True
+        fresh_id = create_review(db, mr_id, "push", head_sha, "agent-a")
+
+        await _wait_until(lambda: get_review(db, fresh_id)["status"] == "done")
+    finally:
+        run_task.cancel()
+        await asyncio.gather(run_task, return_exceptions=True)
+
+    stale = get_review(db, stale_id)
+    assert stale["status"] == "cancelled"
+    assert stale["review_md"] is None
+    assert stale_id not in finished
+    assert not _workspace(tmp_path, stale_id).exists()
+    assert not registry.was_cancelled(stale_id)
+    assert registry.cancel(stale_id) is False
+
+
+async def test_cancel_during_review_discards_result(tmp_path, db, origin, monkeypatch):
+    review_id = _queued_review(db, origin)
+    registry = ReviewRegistry()
+    worker = _worker(tmp_path, db, origin, "/bin/true", registry)
+    finished = _spy_finish(monkeypatch)
+    started = asyncio.Event()
+    observed: list[str] = []
+
+    async def blocking_review(**kwargs):
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            observed.append("killed")
+            raise
+
+    monkeypatch.setattr(worker_module, "run_review", blocking_review)
+    task = asyncio.create_task(worker.process_one())
+    await asyncio.wait_for(started.wait(), timeout=10)
+    assert get_review(db, review_id)["status"] == "reviewing"
+    assert _workspace(tmp_path, review_id).exists()
+
+    supersede_reviews(db, get_review(db, review_id)["mr_id"], "e" * 40)
+    registry.cancel(review_id)
+
+    assert await task is True
+    review = get_review(db, review_id)
+    assert review["status"] == "cancelled"
+    assert review["review_md"] is None
+    assert observed == ["killed"]
+    assert review_id not in finished
+    assert not _workspace(tmp_path, review_id).exists()
+
+
+async def test_worker_shutdown_propagates_cancel(tmp_path, db, origin, monkeypatch):
+    review_id = _queued_review(db, origin)
+    registry = ReviewRegistry()
+    worker = _worker(tmp_path, db, origin, "/bin/true", registry)
+    finished = _spy_finish(monkeypatch)
+    started = asyncio.Event()
+
+    async def blocking_review(**kwargs):
+        started.set()
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(worker_module, "run_review", blocking_review)
+    task = asyncio.create_task(worker.process_one())
+    await asyncio.wait_for(started.wait(), timeout=10)
+
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert get_review(db, review_id)["status"] == "reviewing"
+    assert finished == []
+    assert not _workspace(tmp_path, review_id).exists()
+    assert registry.cancel(review_id) is False
+

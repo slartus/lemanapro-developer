@@ -9,6 +9,7 @@
   .actions { display: flex; flex-wrap: wrap; gap: 0.7rem; align-items: center; margin: 1rem 0; }
   .error-block { border: 1px solid var(--err-fg); background: var(--err-bg); color: var(--err-fg); border-radius: var(--radius); padding: 0.8rem 1rem; margin: 1rem 0; }
   .error-block strong { display: block; margin-bottom: 0.3rem; }
+  .error-block.cancelled { border-color: var(--border); background: var(--surface-2); color: var(--muted); }
   .error-block pre { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; font-family: var(--mono); font-size: 0.85rem; }
   .review-text { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 0.8rem 0; font-family: inherit; font-size: 1rem; line-height: 1.5; overflow-x: auto; }
   .review-text .ln { display: block; white-space: pre-wrap; overflow-wrap: anywhere; padding: 0 1rem; min-height: 1.5em; border-left: 3px solid transparent; }
@@ -63,12 +64,14 @@
 </dl>
 </div>
 
-{% if review["error"] %}
+{% if review["error"] and review["status"] == "cancelled" %}
+<div class="error-block cancelled" role="status"><strong>Ревью отменено</strong><pre>{{ review["error"] }}</pre></div>
+{% elif review["error"] %}
 <div class="error-block" role="alert"><strong>Ревью завершилось ошибкой</strong><pre>{{ review["error"] }}</pre></div>
 {% endif %}
 
 <div class="actions">
-{% if review["status"] in ("error", "done") %}
+{% if review["status"] in ("error", "done", "cancelled") %}
 <button id="retry-btn" class="primary" onclick="retry()">Re-review</button>
 {% endif %}
 <span id="retry-msg" class="small" role="status"></span>
