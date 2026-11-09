@@ -15,7 +15,9 @@ from mrwatch.db import (
     ROLES_BACKFILL_KEY,
     SCAN_DONE_KEY,
     MrUpsertResult,
+    cancel_draft_reviews,
     create_review,
+    mr_wants_review,
     poll_state_delete,
     review_exists_for_head,
     poll_state_get,
@@ -174,7 +176,45 @@ class Poller:
             return 0
         return self._enqueue(result.mr_id, "push", mr, project_db_id)
 
+    def _reconcile(
+        self, result: MrUpsertResult, mr: dict[str, Any], project_db_id: int
+    ) -> int | None:
+        if result.became_draft:
+            self._cancel_for_draft(result.mr_id, mr)
+        superseded = self._supersede_stale(result, mr, project_db_id)
+        if not result.became_ready:
+            return superseded
+        ready = self._enqueue_ready(result, mr, project_db_id)
+        if not ready:
+            return superseded
+        return (superseded or 0) + ready
+
+    def _cancel_for_draft(self, mr_id: int, mr: dict[str, Any]) -> None:
+        outcome = cancel_draft_reviews(self._conn, mr_id)
+        if not outcome.touched:
+            return
+        logger.info(
+            "MR %s moved to draft: cancelled %s",
+            mr.get("iid"), outcome.cancelled_active + outcome.cancelled_queued,
+        )
+        if self._registry is not None:
+            for review_id in outcome.cancelled_active:
+                self._registry.cancel(review_id)
+
+    def _enqueue_ready(
+        self, result: MrUpsertResult, mr: dict[str, Any], project_db_id: int
+    ) -> int:
+        if mr.get("state") not in (None, "opened"):
+            return 0
+        if not mr_wants_review(self._conn, result.mr_id):
+            return 0
+        if review_exists_for_head(self._conn, result.mr_id, mr["sha"]):
+            return 0
+        return self._enqueue(result.mr_id, "new", mr, project_db_id)
+
     def _enqueue(self, mr_id: int, trigger: str, mr: dict[str, Any], project_db_id: int) -> int:
+        if parse_draft(mr) is True:
+            return 0
         review_id = create_review(
             self._conn, mr_id, trigger, mr["sha"], self._agent_for(project_db_id)
         )
@@ -239,7 +279,7 @@ class Poller:
         result = self._upsert(project_db_id, detail, todo_signal_roles(todo))
         if result is None:
             return 0
-        superseded = self._supersede_stale(result, detail, project_db_id)
+        superseded = self._reconcile(result, detail, project_db_id)
         if detail.get("state") != "opened":
             return superseded or 0
         mentioned = todo.get("action_name") in MENTION_ACTIONS
@@ -296,7 +336,7 @@ class Poller:
         )
         if result is None:
             return 0
-        superseded = self._supersede_stale(result, mr, project_db_id)
+        superseded = self._reconcile(result, mr, project_db_id)
         if superseded is not None:
             return superseded
         if (mine or mentioned) and mr.get("state") in (None, "opened"):
@@ -376,7 +416,7 @@ class Poller:
         result = self._upsert(project_db_id, mr)
         if result is None:
             return 0
-        superseded = self._supersede_stale(result, mr, project_db_id)
+        superseded = self._reconcile(result, mr, project_db_id)
         if superseded is not None:
             return superseded
         username = self._username()
