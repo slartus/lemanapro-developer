@@ -271,3 +271,68 @@ async def test_board_lists_projects_configured_for_review(ctx):
         page = await client.get("/")
     raw = page.text.split('<script type="application/json" id="initial-data">', 1)[1].split("</script>", 1)[0]
     assert json.loads(raw)["reviewProjects"] == [10]
+
+
+async def test_todo_with_stale_detail_is_kept_for_the_next_tick(conn):
+    from lpdev.db import todo_seen_ids
+
+    api, registry, _, poller, _ = await _active_review_on_old_head(conn)
+    poller.ingest([_mr(10, 1, sha="b" * 40, updated_at=NEW)])
+    api.details[(10, 1)] = _mr(10, 1, sha="a" * 40, updated_at=OLD)
+    api.todos = [{"id": 501, "target_type": "MergeRequest", "action_name": "mentioned",
+                  "target": {"project_id": 10, "iid": 1}}]
+    await poller.tick()
+    assert 501 not in todo_seen_ids(conn)
+    api.details[(10, 1)] = _mr(10, 1, sha="b" * 40, updated_at=NEW)
+    await poller.tick()
+    assert 501 in todo_seen_ids(conn)
+    roles = conn.execute("SELECT my_roles FROM mr WHERE iid = 1").fetchone()["my_roles"]
+    assert "mentioned" in roles
+
+
+async def test_ingest_does_not_insert_closed_or_merged_mrs(conn):
+    api = StubApi()
+    poller = _make_poller(conn, api)
+    await poller.tick()
+    closed = _mr(10, 8, author="me", updated_at=NEW) | {"state": "merged"}
+    assert poller.ingest([closed]) == 0
+    assert conn.execute("SELECT COUNT(*) FROM mr WHERE iid = 8").fetchone()[0] == 0
+
+
+async def test_radar_wakes_for_the_first_update_after_a_restart(conn):
+    api = StubApi()
+    api.mrs = [_mr(10, 1, updated_at=OLD)]
+    first = _make_poller(conn, api)
+    await first.tick()
+    seen: list[tuple[int, int]] = []
+    restarted = _make_poller(conn, api)
+    restarted._on_mr_updated = lambda pid, iid: seen.append((pid, iid))
+    await restarted.tick()
+    api.mrs = [_mr(10, 1, updated_at=NEW)]
+    await restarted.tick()
+    assert seen == [(10, 1)]
+
+
+async def test_start_review_of_my_new_mr_reports_the_review_ingest_queued(ctx):
+    def gitlab(request):
+        return httpx.Response(200, json=_mr(10, 43, author="me", updated_at=NEW) | {"project_id": 10})
+
+    app, ctx_obj = _review_app(ctx, gitlab)
+    async with _client(app) as client:
+        response = await client.post("/api/mr/10/43/review", headers=H)
+    assert response.status_code == 201
+    review = get_review(ctx_obj.conn, response.json()["review_id"])
+    assert (review["trigger"], review["status"]) == ("new", "queued")
+
+
+async def test_start_review_uses_the_current_head_from_gitlab(ctx):
+    def gitlab(request):
+        return httpx.Response(200, json=_mr(10, 1, sha="c" * 40, author="other", updated_at=NEW) | {"project_id": 10})
+
+    app, ctx_obj = _review_app(ctx, gitlab)
+    ctx_obj.conn.execute("UPDATE review SET status = 'done'")
+    ctx_obj.conn.commit()
+    async with _client(app) as client:
+        response = await client.post("/api/mr/10/1/review", headers=H)
+    assert response.status_code == 201
+    assert get_review(ctx_obj.conn, response.json()["review_id"])["head_sha"] == "c" * 40

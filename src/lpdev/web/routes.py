@@ -268,25 +268,31 @@ async def start_mr_review(request: Request, gitlab_project_id: int, iid: int):
     project_db_id = ctx.project_ids.get(gitlab_project_id)
     if project_db_id is None:
         return PlainTextResponse("проект не настроен для авторевью", status_code=404)
-    mr = _find_mr(ctx.conn, project_db_id, iid)
     poller = getattr(request.app.state, "poller", None)
-    if mr is None and poller is not None:
+    queued_by_ingest = 0
+    if poller is not None:
         try:
             detail = await ctx.api.get_project_mr(gitlab_project_id, iid)
         except GitlabApiError as exc:
-            return PlainTextResponse(f"GitLab: {exc.message}", status_code=502)
-        poller.ingest([{**detail, "project_id": gitlab_project_id}])
-        mr = _find_mr(ctx.conn, project_db_id, iid)
+            if _find_mr(ctx.conn, project_db_id, iid) is None:
+                return PlainTextResponse(f"GitLab: {exc.message}", status_code=502)
+        else:
+            queued_by_ingest = poller.ingest([{**detail, "project_id": gitlab_project_id}])
+    mr = _find_mr(ctx.conn, project_db_id, iid)
     if mr is None:
         return PlainTextResponse("MR ещё не загружен, попробуй через минуту", status_code=409)
-    if mr["state"] not in (None, "opened"):
-        return PlainTextResponse("MR не открыт", status_code=409)
     active = ctx.conn.execute(
-        f"SELECT 1 FROM review WHERE mr_id = ? AND status IN ({','.join('?' * len(ACTIVE_STATUSES))}) LIMIT 1",
+        f"SELECT id FROM review WHERE mr_id = ? AND status IN ({','.join('?' * len(ACTIVE_STATUSES))})"
+        " ORDER BY id DESC LIMIT 1",
         (mr["id"], *ACTIVE_STATUSES),
     ).fetchone()
+    if active and queued_by_ingest:
+        _wake_workers(request)
+        return JSONResponse({"review_id": active["id"]}, status_code=201)
     if active:
         return PlainTextResponse("ревью уже выполняется", status_code=409)
+    if mr["state"] not in (None, "opened"):
+        return PlainTextResponse("MR не открыт", status_code=409)
     review_id = create_review(ctx.conn, mr["id"], "manual", mr["head_sha"], mr["agent"])
     if review_id is None:
         existing = ctx.conn.execute(
@@ -298,6 +304,8 @@ async def start_mr_review(request: Request, gitlab_project_id: int, iid: int):
         review_id = existing["id"]
     _wake_workers(request)
     return JSONResponse({"review_id": review_id}, status_code=201)
+
+
 MR_ROW_FIELDS = (
     "id", "iid", "gitlab_project_id", "path_with_namespace", "title", "web_url", "author_name",
     "author_username", "source_branch", "state", "updated_at",

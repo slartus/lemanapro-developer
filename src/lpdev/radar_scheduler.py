@@ -130,7 +130,7 @@ class RadarScheduler:
             self._known_mr_keys = _mr_keys(loads_or_none(_snapshot_dashboard_json(self._conn)))
         if f"{gitlab_project_id}!{iid}" not in self._known_mr_keys:
             return
-        if self._scheduled_wake is not None and not self._scheduled_wake.cancelled():
+        if self._scheduled_wake is not None:
             return
         loop = asyncio.get_running_loop()
         since_last = None if self._last_refresh_started is None else self._clock() - self._last_refresh_started
@@ -144,6 +144,14 @@ class RadarScheduler:
         self.wake()
 
     async def run(self) -> None:
+        try:
+            await self._run()
+        finally:
+            if self._scheduled_wake is not None:
+                self._scheduled_wake.cancel()
+                self._scheduled_wake = None
+
+    async def _run(self) -> None:
         if self._startup_delay_sec:
             await asyncio.sleep(self._startup_delay_sec)
         while True:

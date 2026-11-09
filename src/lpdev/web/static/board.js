@@ -289,7 +289,9 @@ async function startReview(row, button) {
   button.disabled = true;
   const reviewId = row.watch?.latest_review_id;
   const [projectId, iid] = row.key.split('!');
-  const url = reviewId ? `/reviews/${Number(reviewId)}/retry` : `/api/mr/${Number(projectId)}/${Number(iid)}/review`;
+  const url = state.reviewProjects.has(Number(projectId))
+    ? `/api/mr/${Number(projectId)}/${Number(iid)}/review`
+    : `/reviews/${Number(reviewId)}/retry`;
   try {
     const response = await fetch(url, {
       method: 'POST',

@@ -68,7 +68,6 @@ class Poller:
         self._me: dict[str, Any] | None = None
         self._wake = asyncio.Event()
         self._on_mr_updated = on_mr_updated
-        self._seen_updated: dict[tuple[int, int], datetime] = {}
 
     async def run(self) -> None:
         while True:
@@ -276,6 +275,9 @@ class Poller:
             except Exception:
                 logger.exception("failed to fetch MR %s/%s, todo kept", gitlab_pid, iid)
                 continue
+            if self._is_older_than_stored(self._project_ids[gitlab_pid], detail):
+                logger.info("todo %s kept: MR %s/%s detail is older than stored", todo_id, gitlab_pid, iid)
+                continue
             try:
                 created += self._handle_todo(todo, detail, gitlab_pid)
             except Exception:
@@ -416,25 +418,21 @@ class Poller:
                 continue
             for mr in mrs:
                 try:
+                    updated = self._is_update_of_known(project_db_id, mr)
                     created += self._sweep_one(project_db_id, mr)
+                    if updated and self._on_mr_updated is not None:
+                        self._on_mr_updated(gitlab_pid, mr["iid"])
                 except Exception:
                     logger.exception("sweep: MR %s/%s failed", gitlab_pid, mr.get("iid"))
-                self._note_updated(gitlab_pid, mr, notify=True)
             self._advance_cursor(gitlab_pid, mrs)
         return created, first_error
 
-    def _note_updated(self, gitlab_pid: int, mr: dict[str, Any], notify: bool) -> None:
-        updated = _parse_iso(mr.get("updated_at"))
-        iid = mr.get("iid")
-        if updated is None or not isinstance(iid, int):
-            return
-        key = (gitlab_pid, iid)
-        previous = self._seen_updated.get(key)
-        if previous is not None and updated <= previous:
-            return
-        self._seen_updated[key] = updated
-        if notify and previous is not None and self._on_mr_updated is not None:
-            self._on_mr_updated(gitlab_pid, iid)
+    def _is_update_of_known(self, project_db_id: int, mr: dict[str, Any]) -> bool:
+        pair = self._stored_and_incoming(project_db_id, mr)
+        if pair is None:
+            return False
+        stored, incoming = pair
+        return stored is not None and incoming is not None and incoming > stored
 
     def _stored_and_incoming(
         self, project_db_id: int, mr: dict[str, Any]
@@ -452,6 +450,11 @@ class Poller:
             return True
         stored, incoming = pair
         return incoming is not None and (stored is None or incoming > stored)
+
+    def _may_insert(self, project_db_id: int, mr: dict[str, Any]) -> bool:
+        if mr.get("state") in (None, "opened"):
+            return True
+        return self._stored_and_incoming(project_db_id, mr) is not None
 
     def _is_older_than_stored(self, project_db_id: int, mr: dict[str, Any]) -> bool:
         pair = self._stored_and_incoming(project_db_id, mr)
@@ -472,11 +475,10 @@ class Poller:
             if project_db_id is None or poll_state_get(self._conn, SCAN_DONE_KEY.format(gitlab_pid)) is None:
                 continue
             try:
-                if self._is_newer_than_stored(project_db_id, mr):
+                if self._is_newer_than_stored(project_db_id, mr) and self._may_insert(project_db_id, mr):
                     created += self._sweep_one(project_db_id, mr)
             except Exception:
                 logger.exception("ingest: MR %s/%s failed", gitlab_pid, mr.get("iid"))
-            self._note_updated(gitlab_pid, mr, notify=False)
         if created and self._work_event is not None:
             self._work_event.set()
         return created
