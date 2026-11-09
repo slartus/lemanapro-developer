@@ -151,6 +151,7 @@ MUTATING_ROUTES = [
     "/reviews/1/retry",
     "/reviews/1/questions",
     "/settings",
+    "/api/mr/1/1/review",
 ]
 
 
@@ -186,7 +187,7 @@ def test_all_post_routes_are_covered_by_csrf_parametrization(ctx):
     ctx_obj, _ = ctx
     app = create_app(ctx_obj)
     post_paths = {
-        path.replace("{review_id}", "1")
+        path.replace("{review_id}", "1").replace("{gitlab_project_id}", "1").replace("{iid}", "1")
         for path, methods in app.openapi()["paths"].items()
         if "post" in methods
     }
