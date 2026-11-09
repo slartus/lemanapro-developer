@@ -231,3 +231,65 @@ async def test_rate_limit_from_poller_requests_pauses_proxy(ctx):
         response = await client.get("/gl/api/v4/user", headers=_auth(app))
     assert response.status_code == 429
     assert calls["n"] == 0
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"query": "{ currentUser { id } }", "_json": [{"query": "mutation { x }"}]},
+        {"query": "{ currentUser { id } }", "extensions": {"persistedQuery": {"sha256Hash": "abc"}}},
+        {"query": "{ a }", "variables": ["x"]},
+        {"query": "{ a }", "operationName": 1},
+        {"query": "{ a }", "extra": 1},
+    ],
+)
+async def test_rejects_graphql_bodies_with_unexpected_shape(ctx, payload):
+    upstream = Upstream()
+    app = _app(ctx, upstream)
+    async with _client(app) as client:
+        response = await client.post("/gl/api/graphql", headers=_auth(app), json=payload)
+    assert response.status_code == 403
+    assert upstream.requests == []
+
+
+async def test_graphql_body_is_rebuilt_from_validated_fields(ctx):
+    upstream = Upstream(lambda request: httpx.Response(200, json={"data": {}}))
+    app = _app(ctx, upstream)
+    raw = b'{"query": "query A($x: ID!) { a(id: $x) }", "variables": {"x": "1"}, "operationName": "A"}'
+    async with _client(app) as client:
+        response = await client.post(
+            "/gl/api/graphql", headers={**_auth(app), "Content-Type": "application/json"}, content=raw
+        )
+    assert response.status_code == 200
+    assert json.loads(upstream.requests[0].content) == {
+        "query": "query A($x: ID!) { a(id: $x) }",
+        "variables": {"x": "1"},
+        "operationName": "A",
+    }
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/gl/api/v4/projects/a%2F..%2F..%2Fusers/merge_requests",
+        "/gl/api/v4/projects/a%2F.%2Fb/merge_requests",
+        "/gl/api/v4/projects/a%5Cb/merge_requests",
+        "/gl/api/v4/projects/42/repository/commits/a%2Fb/statuses",
+        "/gl/api/v4/projects/42/merge_requests%2F5/approvals",
+    ],
+)
+async def test_rejects_encoded_traversal_and_slashes_outside_the_project_segment(ctx, path):
+    upstream = Upstream()
+    app = _app(ctx, upstream)
+    async with _client(app) as client:
+        response = await client.get(path, headers=_auth(app))
+    assert response.status_code == 403
+    assert upstream.requests == []
+
+
+async def test_non_ascii_secret_header_is_forbidden_not_an_error(ctx):
+    upstream = Upstream()
+    app = _app(ctx, upstream)
+    async with _client(app) as client:
+        response = await client.get("/gl/api/v4/user", headers={"PRIVATE-TOKEN": b"\xe9"})
+    assert response.status_code == 403

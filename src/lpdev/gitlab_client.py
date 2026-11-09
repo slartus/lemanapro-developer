@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 from typing import Any
 
 import httpx
@@ -15,6 +16,7 @@ _RETRY_AFTER_CAP_SEC = 10.0
 _MAX_PAGES = 50
 _MAX_CONCURRENT_REQUESTS = 8
 _MAX_FORWARD_PAUSE_SEC = 25.0
+_MAX_SHARED_PAUSE_SEC = 120.0
 
 
 class GitlabApiError(Exception):
@@ -34,9 +36,10 @@ def parse_draft(mr: dict[str, Any]) -> bool | None:
 
 def _retry_after_sec(response: httpx.Response, default: float) -> float:
     try:
-        return max(0.0, float(response.headers["Retry-After"]))
+        value = float(response.headers["Retry-After"])
     except (KeyError, ValueError):
         return default
+    return value if math.isfinite(value) and value >= 0 else default
 
 
 def _origin(url: str) -> tuple[str, str, int | None]:
@@ -71,13 +74,13 @@ class GitLabClient:
         return max(0.0, self._paused_until - asyncio.get_running_loop().time())
 
     def _pause_for(self, seconds: float) -> None:
-        self._paused_until = max(self._paused_until, asyncio.get_running_loop().time() + seconds)
+        pause = min(seconds, _MAX_SHARED_PAUSE_SEC)
+        self._paused_until = max(self._paused_until, asyncio.get_running_loop().time() + pause)
 
     async def _send(self, method: str, url: str, **kwargs: Any) -> httpx.Response:
-        remaining = self._pause_remaining()
-        if remaining > 0:
-            await asyncio.sleep(remaining)
         async with self._semaphore:
+            while (remaining := self._pause_remaining()) > 0:
+                await asyncio.sleep(remaining)
             return await self._client.request(method, url, **kwargs)
 
     async def forward(
@@ -85,7 +88,7 @@ class GitLabClient:
     ) -> httpx.Response:
         remaining = self._pause_remaining()
         if remaining > _MAX_FORWARD_PAUSE_SEC:
-            return httpx.Response(429, headers={"Retry-After": str(int(remaining) + 1)})
+            return httpx.Response(429, headers={"Retry-After": str(math.ceil(remaining))})
         headers = {"Content-Type": "application/json", "Authorization": f"Bearer {self._token}"} if graphql else None
         try:
             response = await self._send(method, url, content=content, headers=headers)
@@ -124,8 +127,9 @@ class GitLabClient:
                     )
                 delay = _RETRY_BASE_DELAY_SEC * attempt
                 if response.status_code == 429:
-                    delay = min(_retry_after_sec(response, default=delay), _RETRY_AFTER_CAP_SEC)
-                    self._pause_for(delay)
+                    retry_after = _retry_after_sec(response, default=delay)
+                    self._pause_for(retry_after)
+                    delay = min(retry_after, _RETRY_AFTER_CAP_SEC)
                 await asyncio.sleep(delay)
                 continue
             raise GitlabApiError(

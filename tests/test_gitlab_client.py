@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+
 
 import httpx
 import pytest
@@ -195,6 +197,7 @@ async def test_rate_limit_seen_by_the_proxy_delays_poller_requests(monkeypatch):
 
     async def fake_sleep(delay):
         sleeps.append(delay)
+        client._paused_until = 0.0
 
     forwarded = await client.forward("GET", "/api/v4/user")
     monkeypatch.setattr("lpdev.gitlab_client.asyncio.sleep", fake_sleep)
@@ -203,3 +206,67 @@ async def test_rate_limit_seen_by_the_proxy_delays_poller_requests(monkeypatch):
     assert forwarded.status_code == 429
     assert user == {"username": "me"}
     assert len(sleeps) == 1 and 6 < sleeps[0] <= 7
+
+
+@pytest.mark.parametrize(("retry_after", "expected_max"), [("inf", 5.0), ("1e308", 120.0), ("nan", 5.0), ("soon", 5.0), ("3600", 120.0), ("-5", 5.0)])
+async def test_shared_pause_is_bounded_and_ignores_bad_retry_after(retry_after, expected_max):
+    client = GitLabClient(
+        "https://gitlab.example.com",
+        "tok",
+        transport=httpx.MockTransport(lambda request: httpx.Response(429, headers={"Retry-After": retry_after})),
+    )
+    response = await client.forward("GET", "/api/v4/user")
+    remaining = client._pause_remaining()
+    await client.aclose()
+    assert response.status_code == 429
+    assert 0 < remaining <= expected_max
+
+
+async def test_poller_sets_the_full_retry_after_as_shared_pause(monkeypatch):
+    responses = iter([httpx.Response(429, headers={"Retry-After": "60"}), httpx.Response(200, json={"username": "me"})])
+    client = GitLabClient(
+        "https://gitlab.example.com", "tok", transport=httpx.MockTransport(lambda request: next(responses))
+    )
+    sleeps: list[float] = []
+    pauses: list[float] = []
+
+    async def fake_sleep(delay):
+        sleeps.append(delay)
+        pauses.append(client._pause_remaining())
+        client._paused_until = 0.0
+
+    monkeypatch.setattr("lpdev.gitlab_client.asyncio.sleep", fake_sleep)
+    assert await client.get_user() == {"username": "me"}
+    await client.aclose()
+    assert sleeps[0] == 10.0
+    assert pauses[0] > 50
+
+
+async def test_requests_waiting_on_the_semaphore_respect_a_pause_set_meanwhile(monkeypatch):
+    sent: list[httpx.Request] = []
+    client = GitLabClient(
+        "https://gitlab.example.com",
+        "tok",
+        transport=httpx.MockTransport(lambda request: sent.append(request) or httpx.Response(200, json={})),
+    )
+    sleeps: list[float] = []
+    real_sleep = asyncio.sleep
+
+    async def fake_sleep(delay):
+        sleeps.append(delay)
+        client._paused_until = 0.0
+        await real_sleep(0)
+
+    monkeypatch.setattr("lpdev.gitlab_client.asyncio.sleep", fake_sleep)
+    for _ in range(8):
+        await client._semaphore.acquire()
+    waiting = asyncio.create_task(client.forward("GET", "/api/v4/user"))
+    await real_sleep(0)
+    client._pause_for(10)
+    for _ in range(8):
+        client._semaphore.release()
+    response = await waiting
+    await client.aclose()
+    assert response.status_code == 200
+    assert len(sleeps) == 1 and 9 < sleeps[0] <= 10
+    assert len(sent) == 1
