@@ -292,3 +292,27 @@ async def test_cross_site_get_of_a_page_is_allowed(ctx):
     ) as client:
         response = await client.get("/", headers={"Sec-Fetch-Site": "cross-site"})
     assert response.status_code == 200
+
+
+@pytest.mark.parametrize("method", ["HEAD", "OPTIONS"])
+async def test_safe_methods_skip_the_same_origin_check(ctx, method):
+    ctx_obj, _ = ctx
+    app = create_app(ctx_obj)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://127.0.0.1:8123"
+    ) as client:
+        response = await client.request(
+            method, "/healthz", headers={"Sec-Fetch-Site": "cross-site", "Origin": "https://evil.example.com"}
+        )
+    assert response.status_code != 403
+
+
+async def test_cross_site_get_of_settings_is_allowed(ctx, monkeypatch):
+    ctx_obj, _ = ctx
+    monkeypatch.setattr("lpdev.web.routes.load_config", lambda *a, **k: ctx_obj.config)
+    app = create_app(ctx_obj)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://127.0.0.1:8123"
+    ) as client:
+        response = await client.get("/settings", headers={"Sec-Fetch-Site": "cross-site"})
+    assert response.status_code == 200

@@ -791,3 +791,10 @@ async def test_sidebar_marks_current_section(ctx, path, active_href, monkeypatch
     assert 'id="sidebar"' in response.text
     assert f'<a href="{active_href}" class="active" aria-current="page"' in response.text
     assert response.text.count('aria-current="page"') == 1
+
+
+async def test_review_page_highlights_merge_requests(ctx):
+    ctx_obj, review_id = ctx
+    async with _client(ctx_obj) as client:
+        response = await client.get(f"/reviews/{review_id}")
+    assert '<a href="/" class="active" aria-current="page"' in response.text

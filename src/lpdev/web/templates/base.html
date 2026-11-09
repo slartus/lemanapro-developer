@@ -73,12 +73,14 @@ try { if (localStorage.getItem("lpdev.sidebar") === "collapsed") document.docume
   .collapse-btn:hover:not(:disabled) { background: var(--surface-2); color: var(--text); }
   .collapse-btn svg { flex: none; width: 20px; height: 20px; transition: transform 0.15s ease; }
   :root { --sidebar-w: 220px; }
-  :root[data-sidebar="collapsed"] { --sidebar-w: 60px; }
-  :root[data-sidebar="collapsed"] .label, :root[data-sidebar="collapsed"] .nav-count { display: none; }
-  :root[data-sidebar="collapsed"] .collapse-btn svg { transform: rotate(180deg); }
-  :root[data-sidebar="collapsed"] .nav a, :root[data-sidebar="collapsed"] .collapse-btn { justify-content: center; }
-  :root[data-sidebar="collapsed"] .brand { padding: 0 1rem; }
-  .shell { margin-left: var(--sidebar-w); transition: margin-left 0.15s ease; min-width: 0; }
+  @media (min-width: 761px) {
+    :root[data-sidebar="collapsed"] { --sidebar-w: 60px; }
+    :root[data-sidebar="collapsed"] .nav-label, :root[data-sidebar="collapsed"] .nav-count { display: none; }
+    :root[data-sidebar="collapsed"] .collapse-btn svg { transform: rotate(180deg); }
+    :root[data-sidebar="collapsed"] .nav a, :root[data-sidebar="collapsed"] .collapse-btn { justify-content: center; }
+    :root[data-sidebar="collapsed"] .brand { padding: 0 1rem; }
+  }
+  .shell { margin-left: var(--sidebar-w); transition: margin-left 0.15s ease; }
   .mobilebar { display: none; }
   .backdrop { display: none; }
   main { max-width: 1200px; margin: 0 auto; padding: 1.25rem 1rem 3rem; }
@@ -122,11 +124,9 @@ try { if (localStorage.getItem("lpdev.sidebar") === "collapsed") document.docume
   .flash.warn { background: var(--warn-bg); color: var(--warn-fg); }
   .flash.err { background: var(--err-bg); color: var(--err-fg); }
   @media (max-width: 760px) {
-    :root, :root[data-sidebar="collapsed"] { --sidebar-w: 240px; }
-    :root[data-sidebar="collapsed"] .label, :root[data-sidebar="collapsed"] .nav-count { display: revert; }
-    :root[data-sidebar="collapsed"] .nav a { justify-content: flex-start; }
-    .sidebar { transform: translateX(-100%); box-shadow: none; }
-    :root.sidebar-open .sidebar { transform: none; box-shadow: 0 0 24px rgba(0, 0, 0, 0.25); }
+    :root { --sidebar-w: 240px; }
+    .sidebar { transform: translateX(-100%); visibility: hidden; transition: transform 0.2s ease, visibility 0s linear 0.2s; }
+    :root.sidebar-open .sidebar { transform: none; visibility: visible; transition: transform 0.2s ease; box-shadow: 0 0 24px rgba(0, 0, 0, 0.25); }
     :root.sidebar-open .backdrop { display: block; position: fixed; inset: 0; background: rgba(0, 0, 0, 0.35); z-index: 15; }
     .collapse-btn { display: none; }
     .shell { margin-left: 0; }
@@ -143,22 +143,22 @@ try { if (localStorage.getItem("lpdev.sidebar") === "collapsed") document.docume
 </head>
 <body>
 <aside class="sidebar" id="sidebar" aria-label="Навигация">
-  <a class="brand" href="/" title="lemanapro-developer"><span class="brand-mark">LP</span><span class="label">lemanapro-developer</span></a>
+  <a class="brand" href="/" title="lemanapro-developer"><span class="brand-mark">LP</span><span class="nav-label">lemanapro-developer</span></a>
   <nav class="nav">
     <a href="/" {% if active == "index" %}class="active" aria-current="page"{% endif %} title="Merge requests">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="6" cy="6" r="2.5"/><circle cx="6" cy="18" r="2.5"/><circle cx="18" cy="18" r="2.5"/><path d="M6 8.5v7M18 15.5V9a3 3 0 0 0-3-3h-4"/><path d="M13 3.5 10.5 6 13 8.5"/></svg>
-      <span class="label">Merge requests</span><span class="nav-count" id="nav-count-mr"></span>
+      <span class="nav-label">Merge requests</span><span class="nav-count" id="nav-count-mr"></span>
     </a>
     <a href="/settings" {% if active == "settings" %}class="active" aria-current="page"{% endif %} title="Настройки">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg>
-      <span class="label">Настройки</span>
+      <span class="nav-label">Настройки</span>
     </a>
   </nav>
   <div class="sidebar-foot">
-    <div class="health" id="health" title="состояние сервиса"><span class="dot" id="health-dot"></span><span class="label" id="health-text">…</span></div>
-    <button type="button" class="collapse-btn" id="collapse-btn" aria-controls="sidebar" aria-expanded="true" title="Свернуть меню">
+    <div class="health" id="health" title="состояние сервиса"><span class="dot" id="health-dot"></span><span class="nav-label" id="health-text">…</span></div>
+    <button type="button" class="collapse-btn" id="collapse-btn" aria-controls="sidebar" aria-pressed="false" title="Свернуть меню">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m11 17-5-5 5-5M18 17l-5-5 5-5"/></svg>
-      <span class="label">Свернуть</span>
+      <span class="nav-label">Свернуть</span>
     </button>
   </div>
 </aside>
@@ -220,15 +220,17 @@ const MRW = {
     } catch (e) {}
     dot.className = "dot " + state;
     text.textContent = label;
+    document.getElementById("health").title = label;
   }
 };
 (function () {
   const root = document.documentElement;
   const collapseBtn = document.getElementById("collapse-btn");
   const menuBtn = document.getElementById("menu-btn");
+  const sidebar = document.getElementById("sidebar");
   function syncCollapse() {
     const collapsed = root.dataset.sidebar === "collapsed";
-    collapseBtn.setAttribute("aria-expanded", String(!collapsed));
+    collapseBtn.setAttribute("aria-pressed", String(collapsed));
     collapseBtn.title = collapsed ? "Развернуть меню" : "Свернуть меню";
   }
   collapseBtn.addEventListener("click", function () {
@@ -237,13 +239,19 @@ const MRW = {
     try { localStorage.setItem("lpdev.sidebar", collapsed ? "collapsed" : "expanded"); } catch (e) {}
     syncCollapse();
   });
+  const isOpen = function () { return root.classList.contains("sidebar-open"); };
   function setOpen(open) {
+    const focusWasInside = sidebar.contains(document.activeElement);
     root.classList.toggle("sidebar-open", open);
     menuBtn.setAttribute("aria-expanded", String(open));
+    if (open) sidebar.querySelector(".nav a").focus();
+    else if (focusWasInside) menuBtn.focus();
   }
-  menuBtn.addEventListener("click", function () { setOpen(!root.classList.contains("sidebar-open")); });
+  menuBtn.addEventListener("click", function () { setOpen(!isOpen()); });
   document.getElementById("backdrop").addEventListener("click", function () { setOpen(false); });
-  document.addEventListener("keydown", function (e) { if (e.key === "Escape") setOpen(false); });
+  document.addEventListener("keydown", function (e) { if (e.key === "Escape" && isOpen()) setOpen(false); });
+  const mobile = window.matchMedia("(max-width: 760px)");
+  mobile.addEventListener("change", function (e) { if (!e.matches && isOpen()) setOpen(false); });
   syncCollapse();
 })();
 MRW.renderTimes();
