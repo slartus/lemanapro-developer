@@ -101,3 +101,23 @@ describe('adding a project by link or path', async () => {
     ]);
   });
 });
+
+describe('projects added by link survive reloading the list', () => {
+  it('keeps every unresolved project and folds a listed path into the known project', () => {
+    const pending = [
+      { gitlab_project_id: null, slug: 'other/one', agent: 'a', re_review_on_push: false },
+      { gitlab_project_id: null, slug: 'other/two', agent: 'b', re_review_on_push: true },
+      { gitlab_project_id: null, slug: 'TOOLS/ci', agent: 'c', re_review_on_push: false },
+    ];
+    const projects = mergeProjects(gitlab, pending, []);
+    const keys = projects.map((project) => project.key);
+    assert.ok(keys.includes('new:other/one') && keys.includes('new:other/two'));
+    assert.equal(projects.filter((project) => project.path.toLowerCase() === 'tools/ci').length, 1);
+    assert.deepEqual(projects.find((project) => project.id === 3).review, { agent: 'c', push: false });
+    assert.deepEqual(settingsPayloadProjects(projects, 'd').review.map((project) => project.gitlab_project_id ?? project.slug), [
+      'other/one',
+      'other/two',
+      3,
+    ]);
+  });
+});

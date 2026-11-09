@@ -11,7 +11,7 @@ from typing import Literal
 from urllib.parse import urlsplit
 
 import yaml
-from pydantic import BaseModel, Field, ValidationError, field_validator, model_validator
+from pydantic import BaseModel, Field, ValidationError, field_validator
 
 DEFAULT_PAT_COMMAND = "security find-generic-password -s mr-watch -a gitlab -w"
 
@@ -131,12 +131,6 @@ class RadarConfig(BaseModel):
     hidden_sections: list[RadarSectionId] = []
     node_bin: str = "node"
     timeout_sec: int = Field(default=300, ge=10)
-
-    @model_validator(mode="after")
-    def selected_mode_needs_projects(self) -> RadarConfig:
-        if self.project_filter_mode == "selected" and not self.selected_project_ids:
-            raise ValueError("selected_project_ids must not be empty in selected mode")
-        return self
 
 
 class PathsConfig(BaseModel):

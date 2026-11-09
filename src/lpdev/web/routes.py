@@ -508,11 +508,10 @@ RADAR_SETTINGS_FIELDS = (
 async def settings_projects(request: Request):
     ctx = _ctx(request)
     try:
-        projects = await ctx.api.get_member_projects(REPORTER_ACCESS)
-        maintained = {
-            project.get("id") for project in await ctx.api.get_member_projects(MAINTAINER_ACCESS)
-            if isinstance(project, dict)
-        }
+        projects, maintainer_projects = await asyncio.gather(
+            ctx.api.get_member_projects(REPORTER_ACCESS), ctx.api.get_member_projects(MAINTAINER_ACCESS)
+        )
+        maintained = {project.get("id") for project in maintainer_projects if isinstance(project, dict)}
     except GitlabApiError as exc:
         logger.warning("settings: project list failed: %s", exc)
         return PlainTextResponse("GitLab не отдал список проектов", status_code=502)
@@ -606,6 +605,8 @@ async def settings_save(request: Request):
     except Exception as exc:
         logger.warning("settings: invalid config: %s", exc)
         return PlainTextResponse("невалидные значения: проверьте числа и заполненность проектов", status_code=400)
+    if config.radar.project_filter_mode == "selected" and not config.radar.selected_project_ids:
+        return PlainTextResponse("радар: отметь хотя бы один проект или выбери «все проекты»", status_code=400)
     if isinstance(radar, dict):
         validated = config.radar.model_dump()
         raw["radar"].update({key: validated[key] for key in RADAR_SETTINGS_FIELDS if key in radar})

@@ -1,30 +1,32 @@
 export function mergeProjects(gitlabProjects, reviewProjects, radarIds) {
-  const byId = new Map(
-    gitlabProjects.map((project) => [project.id, { id: project.id, path: project.path, name: project.name, maintainer: project.maintainer, known: true }]),
+  const byKey = new Map(
+    gitlabProjects.map((project) => [
+      String(project.id),
+      { id: project.id, key: String(project.id), path: project.path, name: project.name, maintainer: project.maintainer, known: true },
+    ]),
   );
+  const keyByPath = new Map([...byKey.values()].map((project) => [project.path.toLowerCase(), project.key]));
+  const reviewByKey = new Map();
   reviewProjects.forEach((project) => {
-    if (!byId.has(project.gitlab_project_id)) {
-      byId.set(project.gitlab_project_id, {
-        id: project.gitlab_project_id,
-        path: project.slug || `#${project.gitlab_project_id}`,
-        name: project.slug || `#${project.gitlab_project_id}`,
-        maintainer: true,
-        known: false,
-      });
+    const id = project.gitlab_project_id;
+    const slug = project.slug || (id === null || id === undefined ? '' : `#${id}`);
+    const key = id === null || id === undefined ? keyByPath.get(slug.toLowerCase()) ?? `new:${slug}` : String(id);
+    if (!byKey.has(key)) {
+      byKey.set(key, { id: id ?? null, key, path: slug, name: slug, maintainer: id !== null && id !== undefined, known: false });
     }
+    reviewByKey.set(key, project);
   });
   radarIds.forEach((id) => {
-    if (!byId.has(id)) byId.set(id, { id, path: `#${id}`, name: `#${id}`, maintainer: true, known: false });
+    const key = String(id);
+    if (!byKey.has(key)) byKey.set(key, { id, key, path: `#${id}`, name: `#${id}`, maintainer: true, known: false });
   });
-  const review = new Map(reviewProjects.map((project) => [project.gitlab_project_id, project]));
-  const radar = new Set(radarIds);
-  return [...byId.values()]
+  const radar = new Set(radarIds.map(String));
+  return [...byKey.values()]
     .map((project) => ({
       ...project,
-      key: String(project.id),
-      radar: radar.has(project.id),
-      review: review.has(project.id)
-        ? { agent: review.get(project.id).agent, push: Boolean(review.get(project.id).re_review_on_push) }
+      radar: radar.has(project.key),
+      review: reviewByKey.has(project.key)
+        ? { agent: reviewByKey.get(project.key).agent, push: Boolean(reviewByKey.get(project.key).re_review_on_push) }
         : null,
     }))
     .sort((a, b) => a.path.localeCompare(b.path));
@@ -65,7 +67,7 @@ export function matchesQuery(project, query) {
 export function projectPathFromInput(input, gitlabUrl) {
   let value = input.trim();
   if (gitlabUrl && value.toLowerCase().startsWith(`${gitlabUrl.toLowerCase()}/`)) value = value.slice(gitlabUrl.length + 1);
-  value = value.split('/-/')[0].replace(/\.git$/, '').replace(/^\/+|\/+$/g, '');
+  value = value.split(/[?#]/)[0].split('/-/')[0].replace(/\.git$/, '').replace(/^\/+|\/+$/g, '');
   return /^[A-Za-z0-9_.-]+(\/[A-Za-z0-9_.-]+)+$/.test(value) ? value : null;
 }
 

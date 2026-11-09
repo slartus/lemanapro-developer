@@ -299,9 +299,10 @@ function init() {
       setStatus('Укажи ссылку на проект или путь вида group/project', 'err');
       return;
     }
+    const already = state.projects.some((project) => project.path.toLowerCase() === path.toLowerCase() && project.review);
     state.projects = addProjectByPath(state.projects, path, DEFAULT_AGENT);
     input.value = '';
-    setStatus(`${path}: авторевью включится после сохранения`, 'muted');
+    setStatus(already ? `${path}: авторевью уже включено` : `${path}: авторевью включится после сохранения`, 'muted');
     render();
   });
   $('save').addEventListener('click', save);
