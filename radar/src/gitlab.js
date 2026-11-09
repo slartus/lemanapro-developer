@@ -80,10 +80,10 @@ export class GitLabError extends Error {
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 export class GitLabClient {
-  constructor(baseUrl, token) {
+  constructor(baseUrl, token, { apiBase = baseUrl } = {}) {
     this.baseUrl = baseUrl;
-    this.apiUrl = `${baseUrl}/api/v4`;
-    this.graphqlUrl = `${baseUrl}/api/graphql`;
+    this.apiUrl = `${apiBase}/api/v4`;
+    this.graphqlUrl = `${apiBase}/api/graphql`;
     this.token = token;
     this.pausedUntil = 0;
     this.requestCount = 0;

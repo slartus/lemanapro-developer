@@ -18,8 +18,10 @@ from lpdev.db import backup, connect, init_schema, poll_state_get, requeue_incom
 from lpdev.git_ops import cleanup_old_review_logs, cleanup_old_workspaces, cleanup_stale_askpass
 from lpdev.gitlab_client import GitLabClient
 from lpdev.poller import Poller
+from lpdev.radar_scheduler import RadarScheduler
 from lpdev.web.gitlab_proxy import PROXY_PREFIX
 from lpdev.web.gitlab_proxy import router as gitlab_proxy_router
+from lpdev.web.radar_routes import router as radar_router
 from lpdev.web.routes import router as web_router
 from lpdev.worker import QuestionWorker, ReviewRegistry, start_workers
 
@@ -199,6 +201,14 @@ def create_app(ctx: AppContext, port: int = DEFAULT_PORT) -> FastAPI:
         tasks.append(
             asyncio.create_task(question_worker.run(), name="lpdev-question-worker")
         )
+        radar = RadarScheduler(
+            ctx.conn,
+            lambda: ctx.config,
+            api_base=f"http://127.0.0.1:{port}{PROXY_PREFIX}",
+            proxy_secret=app.state.proxy_secret,
+        )
+        app.state.radar = radar
+        tasks.append(asyncio.create_task(radar.run(), name="lpdev-radar"))
         tasks.append(asyncio.create_task(_backup_loop(ctx), name="lpdev-backup"))
         for task in tasks:
             _supervise(task)
@@ -218,6 +228,7 @@ def create_app(ctx: AppContext, port: int = DEFAULT_PORT) -> FastAPI:
     app.state.proxy_secret = secrets.token_urlsafe(32)
     app.include_router(web_router)
     app.include_router(gitlab_proxy_router)
+    app.include_router(radar_router)
 
     @app.get("/healthz")
     async def healthz() -> JSONResponse:

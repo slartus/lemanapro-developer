@@ -57,6 +57,24 @@ opencode:
   # и не выдала текста. null отключает повтор.
   length_retry_variant: low
 
+radar:
+  enabled: true
+  # Интервал обновления радара, минуты (1–120). Пока в моих MR идёт CI — раз в минуту, не дольше часа подряд.
+  interval_minutes: 5
+  fast_refresh_while_ci: true
+  # all — все проекты с правами Maintainer+; selected — только selected_project_ids
+  # (для «Ждут моего апрува», «Возможные MR», «Сломан default branch»).
+  project_filter_mode: all
+  selected_project_ids: []
+  # Проверки CI, падение которых не считается упавшим CI.
+  ignored_check_names: []
+  # Не показывать в «Ждут моего апрува» MR, у которых апрувов уже не меньше порога (0 — выкл).
+  approval_threshold: 0
+  # reviewing, assigned, mentioned, awaitingApproval, threads, authored, possibleMrs, brokenBranches
+  hidden_sections: []
+  node_bin: node
+  timeout_sec: 300
+
 paths:
   # Файл базы SQLite (каталог создаётся автоматически).
   db: ~/projects/lemanapro-developer/data/lpdev.db

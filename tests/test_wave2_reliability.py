@@ -19,6 +19,7 @@ from lpdev.config import (
     OpenCodeConfig,
     PathsConfig,
     ProjectConfig,
+    RadarConfig,
     ReviewConfig,
     resolve_paths,
 )
@@ -349,6 +350,7 @@ def _app_ctx(tmp_path, max_parallel=1):
         gitlab=GitlabConfig(url="https://gitlab.example.com", pat_command="printf tok"),
         projects=[ProjectConfig(gitlab_project_id=10, slug="g/p", agent="agent-a")],
         review=ReviewConfig(max_parallel=max_parallel),
+        radar=RadarConfig(enabled=False),
         paths=PathsConfig(
             db=str(tmp_path / "data" / "lpdev.db"),
             workspaces=str(tmp_path / "workspaces"),
@@ -408,11 +410,11 @@ async def test_lifespan_starts_supervised_tasks(tmp_path):
     ctx = _app_ctx(tmp_path, max_parallel=2)
     app = create_app(ctx)
     async with app.router.lifespan_context(app):
-        assert len(app.state.tasks) == 5
+        assert len(app.state.tasks) == 6
         assert app.state.worker_count == 2
         assert isinstance(app.state.work_event, asyncio.Event)
         assert isinstance(app.state.question_event, asyncio.Event)
-        assert "lpdev-question-worker" in {t.get_name() for t in app.state.tasks}
+        assert {"lpdev-question-worker", "lpdev-radar"} <= {t.get_name() for t in app.state.tasks}
     assert all(t.done() for t in app.state.tasks)
 
 
@@ -728,7 +730,7 @@ def test_migration_v3_to_v4_moves_legacy_cursor(tmp_path):
     assert poll_state_get(c, MR_CURSOR_KEY.format(10)) == "2026-01-01T00:00:00+00:00"
     assert poll_state_get(c, MR_CURSOR_KEY.format(20)) is None
     assert poll_state_get(c, "mr_cursor") is None
-    assert c.execute("PRAGMA user_version").fetchone()[0] == 11
+    assert c.execute("PRAGMA user_version").fetchone()[0] == 12
     assert {r[1] for r in c.execute("PRAGMA table_info(review)")} >= {"not_before"}
     c.close()
 

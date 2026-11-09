@@ -7,6 +7,7 @@ import stat
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Literal
 from urllib.parse import urlsplit
 
 import yaml
@@ -102,6 +103,36 @@ class OpenCodeConfig(BaseModel):
         return str(Path(value).expanduser())
 
 
+RADAR_SECTION_IDS = (
+    "reviewing",
+    "assigned",
+    "mentioned",
+    "awaitingApproval",
+    "threads",
+    "authored",
+    "possibleMrs",
+    "brokenBranches",
+)
+RadarSectionId = Literal[
+    "reviewing", "assigned", "mentioned", "awaitingApproval", "threads", "authored", "possibleMrs", "brokenBranches"
+]
+
+
+class RadarConfig(BaseModel):
+    model_config = {"extra": "forbid"}
+
+    enabled: bool = True
+    interval_minutes: int = Field(default=5, ge=1, le=120)
+    fast_refresh_while_ci: bool = True
+    project_filter_mode: Literal["all", "selected"] = "all"
+    selected_project_ids: list[int] = []
+    ignored_check_names: list[str] = []
+    approval_threshold: int = Field(default=0, ge=0, le=20)
+    hidden_sections: list[RadarSectionId] = []
+    node_bin: str = "node"
+    timeout_sec: int = Field(default=300, ge=10)
+
+
 class PathsConfig(BaseModel):
     model_config = {"extra": "forbid"}
 
@@ -117,6 +148,7 @@ class Config(BaseModel):
     projects: list[ProjectConfig]
     review: ReviewConfig = ReviewConfig()
     opencode: OpenCodeConfig = OpenCodeConfig()
+    radar: RadarConfig = RadarConfig()
     paths: PathsConfig = PathsConfig()
 
     @field_validator("projects")

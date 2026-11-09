@@ -392,6 +392,9 @@ def _apply_config(request: Request, config: Config):
     if poller is not None:
         poller.reload(config, mapping)
         poller.wake()
+    radar = getattr(request.app.state, "radar", None)
+    if radar is not None:
+        radar.wake()
 
 
 def _list_agents() -> list[str]:

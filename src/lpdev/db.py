@@ -9,7 +9,7 @@ from lpdev.opencode_runner import MAX_VERDICT_INPUT_CHARS, parse_verdict
 
 MAX_REVIEW_MD_LENGTH = MAX_VERDICT_INPUT_CHARS
 TRUNCATION_MARKER = "...[truncated]"
-SCHEMA_VERSION = 11
+SCHEMA_VERSION = 12
 
 DERIVED_ROLES = frozenset({"reviewer", "assignee", "author"})
 MENTIONED_ROLE = "mentioned"
@@ -149,6 +149,8 @@ def init_schema(conn: sqlite3.Connection) -> None:
         _run_migration(conn, 10, _migrate_to_v10)
     if version < 11:
         _run_migration(conn, 11, _migrate_to_v11)
+    if version < 12:
+        _run_migration(conn, 12, _migrate_to_v12)
     conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
     conn.commit()
 
@@ -573,6 +575,31 @@ def _migrate_to_v10(conn: sqlite3.Connection) -> None:
         )
     conn.execute("CREATE INDEX IF NOT EXISTS idx_review_status ON review(status)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_review_mr ON review(mr_id)")
+
+
+def _migrate_to_v12(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS radar_snapshot (
+            id INTEGER PRIMARY KEY CHECK(id = 1),
+            version INTEGER NOT NULL,
+            fetched_at TEXT,
+            failed_at TEXT,
+            error TEXT,
+            dashboard_json TEXT,
+            thread_cache_json TEXT
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS ui_state (
+            key TEXT PRIMARY KEY,
+            value_json TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+        """
+    )
 
 
 def _migrate_to_v11(conn: sqlite3.Connection) -> None:
@@ -1006,3 +1033,58 @@ def backup(db_path: Path, backup_dir: Path) -> Path:
         source.close()
     dest.chmod(0o600)
     return dest
+
+
+def radar_snapshot_get(conn: sqlite3.Connection) -> sqlite3.Row | None:
+    return conn.execute("SELECT * FROM radar_snapshot WHERE id = 1").fetchone()
+
+
+def radar_snapshot_save_success(
+    conn: sqlite3.Connection, fetched_at: str, dashboard_json: str, thread_cache_json: str
+) -> int:
+    with conn:
+        row = conn.execute("SELECT version FROM radar_snapshot WHERE id = 1").fetchone()
+        version = (row["version"] if row else 0) + 1
+        conn.execute(
+            """
+            INSERT INTO radar_snapshot (id, version, fetched_at, failed_at, error, dashboard_json, thread_cache_json)
+            VALUES (1, ?, ?, NULL, NULL, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET
+                version = excluded.version, fetched_at = excluded.fetched_at, failed_at = NULL,
+                error = NULL, dashboard_json = excluded.dashboard_json,
+                thread_cache_json = excluded.thread_cache_json
+            """,
+            (version, fetched_at, dashboard_json, thread_cache_json),
+        )
+    return version
+
+
+def radar_snapshot_save_failure(conn: sqlite3.Connection, failed_at: str, error: str) -> int:
+    with conn:
+        row = conn.execute("SELECT version FROM radar_snapshot WHERE id = 1").fetchone()
+        version = (row["version"] if row else 0) + 1
+        conn.execute(
+            """
+            INSERT INTO radar_snapshot (id, version, failed_at, error) VALUES (1, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET
+                version = excluded.version, failed_at = excluded.failed_at, error = excluded.error
+            """,
+            (version, failed_at, error),
+        )
+    return version
+
+
+def ui_state_get(conn: sqlite3.Connection, key: str) -> str | None:
+    row = conn.execute("SELECT value_json FROM ui_state WHERE key = ?", (key,)).fetchone()
+    return row["value_json"] if row else None
+
+
+def ui_state_set(conn: sqlite3.Connection, key: str, value_json: str) -> None:
+    with conn:
+        conn.execute(
+            """
+            INSERT INTO ui_state (key, value_json, updated_at) VALUES (?, ?, ?)
+            ON CONFLICT(key) DO UPDATE SET value_json = excluded.value_json, updated_at = excluded.updated_at
+            """,
+            (key, value_json, utcnow_iso()),
+        )
