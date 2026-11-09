@@ -22,15 +22,7 @@ export const STORAGE_KEYS = {
   update: 'update',
   userState: 'userState',
   threadCache: 'threadCache',
-  pendingNotifications: 'pendingNotifications',
 };
-
-export const notificationTargetKey = (notificationId) => `notificationTarget:${notificationId}`;
-
-export const NOTIFICATIONS_PERMISSION = 'notifications';
-
-export const hasNotificationsPermission = () =>
-  chrome.permissions.contains({ permissions: [NOTIFICATIONS_PERMISSION] });
 
 export const UPDATE_REPOSITORY = 'slartus/gitlab-mr-radar';
 export const UPDATE_CHECK_ORIGIN = 'https://api.github.com/*';
