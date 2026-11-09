@@ -77,21 +77,24 @@ class GitLabClient:
         pause = min(seconds, _MAX_SHARED_PAUSE_SEC)
         self._paused_until = max(self._paused_until, asyncio.get_running_loop().time() + pause)
 
-    async def _send(self, method: str, url: str, **kwargs: Any) -> httpx.Response:
+    async def _send(
+        self, method: str, url: str, max_wait: float | None = None, **kwargs: Any
+    ) -> httpx.Response:
         async with self._semaphore:
             while (remaining := self._pause_remaining()) > 0:
+                if max_wait is not None and remaining > max_wait:
+                    return httpx.Response(429, headers={"Retry-After": str(math.ceil(remaining))})
                 await asyncio.sleep(remaining)
             return await self._client.request(method, url, **kwargs)
 
     async def forward(
         self, method: str, url: str, content: bytes | None = None, graphql: bool = False
     ) -> httpx.Response:
-        remaining = self._pause_remaining()
-        if remaining > _MAX_FORWARD_PAUSE_SEC:
-            return httpx.Response(429, headers={"Retry-After": str(math.ceil(remaining))})
         headers = {"Content-Type": "application/json", "Authorization": f"Bearer {self._token}"} if graphql else None
         try:
-            response = await self._send(method, url, content=content, headers=headers)
+            response = await self._send(
+                method, url, max_wait=_MAX_FORWARD_PAUSE_SEC, content=content, headers=headers
+            )
         except httpx.HTTPError as exc:
             raise GitlabApiError(f"request failed: {type(exc).__name__}") from exc
         if response.status_code == 429:

@@ -270,3 +270,24 @@ async def test_requests_waiting_on_the_semaphore_respect_a_pause_set_meanwhile(m
     assert response.status_code == 200
     assert len(sleeps) == 1 and 9 < sleeps[0] <= 10
     assert len(sent) == 1
+
+
+async def test_forward_does_not_wait_out_a_long_pause_set_while_queued():
+    sent: list[httpx.Request] = []
+    client = GitLabClient(
+        "https://gitlab.example.com",
+        "tok",
+        transport=httpx.MockTransport(lambda request: sent.append(request) or httpx.Response(200, json={})),
+    )
+    for _ in range(8):
+        await client._semaphore.acquire()
+    waiting = asyncio.create_task(client.forward("GET", "/api/v4/user"))
+    await asyncio.sleep(0)
+    client._pause_for(120)
+    for _ in range(8):
+        client._semaphore.release()
+    response = await asyncio.wait_for(waiting, timeout=2)
+    await client.aclose()
+    assert response.status_code == 429
+    assert int(response.headers["Retry-After"]) > 25
+    assert sent == []
