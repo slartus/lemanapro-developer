@@ -74,6 +74,35 @@ class HostCheckMiddleware:
         await self.app(scope, receive, send)
 
 
+SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
+ALLOWED_FETCH_SITES = frozenset({"same-origin", "none"})
+
+
+class SameOriginMiddleware:
+    def __init__(self, app, allowed_hosts: set[str], protected_prefixes: tuple[str, ...] = ()) -> None:
+        self.app = app
+        self.allowed_origins = {f"http://{host}" for host in allowed_hosts}
+        self.protected_prefixes = protected_prefixes
+
+    def _is_protected(self, scope) -> bool:
+        return scope["method"] not in SAFE_METHODS or scope["path"].startswith(self.protected_prefixes)
+
+    def _is_same_origin(self, scope) -> bool:
+        headers = {key: value.decode("latin-1") for key, value in scope["headers"]}
+        fetch_site = headers.get(b"sec-fetch-site")
+        if fetch_site is not None and fetch_site not in ALLOWED_FETCH_SITES:
+            return False
+        origin = headers.get(b"origin")
+        return origin is None or origin in self.allowed_origins
+
+    async def __call__(self, scope, receive, send) -> None:
+        if scope["type"] == "http" and self._is_protected(scope) and not self._is_same_origin(scope):
+            response = PlainTextResponse("forbidden", status_code=403)
+            await response(scope, receive, send)
+            return
+        await self.app(scope, receive, send)
+
+
 def setup_logging(logs_dir: Path) -> None:
     logs_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
     root = logging.getLogger()
@@ -203,10 +232,10 @@ def create_app(ctx: AppContext, port: int = DEFAULT_PORT) -> FastAPI:
             status_code=503 if degraded else 200,
         )
 
+    allowed_hosts = {f"127.0.0.1:{port}", f"localhost:{port}"}
     app.add_middleware(NoStoreHtmlMiddleware)
-    app.add_middleware(HostCheckMiddleware, allowed_hosts={
-        f"127.0.0.1:{port}", f"localhost:{port}",
-    })
+    app.add_middleware(SameOriginMiddleware, allowed_hosts=allowed_hosts)
+    app.add_middleware(HostCheckMiddleware, allowed_hosts=allowed_hosts)
     return app
 
 

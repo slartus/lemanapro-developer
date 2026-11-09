@@ -779,3 +779,15 @@ async def test_retry_blocked_by_active_question(ctx):
         response = await client.post(f"/reviews/{review_id}/retry", headers=H)
     assert response.status_code == 409
     assert get_review(ctx_obj.conn, review_id)["status"] == "done"
+
+
+@pytest.mark.parametrize(("path", "active_href"), [("/", "/"), ("/settings", "/settings")])
+async def test_sidebar_marks_current_section(ctx, path, active_href, monkeypatch):
+    monkeypatch.setattr("lpdev.web.routes.load_config", lambda *a, **k: ctx[0].config)
+    ctx_obj, _ = ctx
+    async with _client(ctx_obj) as client:
+        response = await client.get(path)
+    assert response.status_code == 200
+    assert 'id="sidebar"' in response.text
+    assert f'<a href="{active_href}" class="active" aria-current="page"' in response.text
+    assert response.text.count('aria-current="page"') == 1

@@ -241,3 +241,54 @@ async def test_x_forwarded_host_does_not_widen_allowed_hosts(ctx):
     ) as client:
         response = await client.get("/", headers={"X-Forwarded-Host": "evil.com"})
     assert response.status_code == 200
+
+
+@pytest.mark.parametrize("path", MUTATING_ROUTES)
+@pytest.mark.parametrize(
+    "headers",
+    [
+        {"Sec-Fetch-Site": "cross-site"},
+        {"Sec-Fetch-Site": "same-site"},
+        {"Origin": "https://evil.example.com"},
+        {"Origin": "http://127.0.0.1:9999"},
+        {"Origin": "null"},
+    ],
+)
+async def test_mutating_routes_reject_cross_origin_requests(ctx, path, headers):
+    ctx_obj, _ = ctx
+    app = create_app(ctx_obj)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://127.0.0.1:8123"
+    ) as client:
+        response = await client.post(path, headers={"X-Requested-With": "lpdev", **headers}, json={})
+    assert response.status_code == 403
+    assert response.text == "forbidden"
+
+
+@pytest.mark.parametrize(
+    "headers",
+    [
+        {},
+        {"Sec-Fetch-Site": "same-origin", "Origin": "http://127.0.0.1:8123"},
+        {"Sec-Fetch-Site": "none"},
+        {"Origin": "http://localhost:8123"},
+    ],
+)
+async def test_force_check_accepts_same_origin_requests(ctx, headers):
+    ctx_obj, _ = ctx
+    app = create_app(ctx_obj)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://127.0.0.1:8123"
+    ) as client:
+        response = await client.post("/force-check", headers={"X-Requested-With": "lpdev", **headers})
+    assert response.status_code != 403
+
+
+async def test_cross_site_get_of_a_page_is_allowed(ctx):
+    ctx_obj, _ = ctx
+    app = create_app(ctx_obj)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://127.0.0.1:8123"
+    ) as client:
+        response = await client.get("/", headers={"Sec-Fetch-Site": "cross-site"})
+    assert response.status_code == 200
