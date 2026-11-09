@@ -577,31 +577,6 @@ def _migrate_to_v10(conn: sqlite3.Connection) -> None:
     conn.execute("CREATE INDEX IF NOT EXISTS idx_review_mr ON review(mr_id)")
 
 
-def _migrate_to_v12(conn: sqlite3.Connection) -> None:
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS radar_snapshot (
-            id INTEGER PRIMARY KEY CHECK(id = 1),
-            version INTEGER NOT NULL,
-            fetched_at TEXT,
-            failed_at TEXT,
-            error TEXT,
-            dashboard_json TEXT,
-            thread_cache_json TEXT
-        )
-        """
-    )
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS ui_state (
-            key TEXT PRIMARY KEY,
-            value_json TEXT NOT NULL,
-            updated_at TEXT NOT NULL
-        )
-        """
-    )
-
-
 def _migrate_to_v11(conn: sqlite3.Connection) -> None:
     _add_column(conn, "review", "extra_instructions", "TEXT")
     conn.execute(
@@ -629,6 +604,31 @@ def _migrate_to_v11(conn: sqlite3.Connection) -> None:
     )
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_review_question_status ON review_question(status)"
+    )
+
+
+def _migrate_to_v12(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS radar_snapshot (
+            id INTEGER PRIMARY KEY CHECK(id = 1),
+            version INTEGER NOT NULL,
+            fetched_at TEXT,
+            failed_at TEXT,
+            error TEXT,
+            dashboard_json TEXT,
+            thread_cache_json TEXT
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS ui_state (
+            key TEXT PRIMARY KEY,
+            value_json TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+        """
     )
 
 

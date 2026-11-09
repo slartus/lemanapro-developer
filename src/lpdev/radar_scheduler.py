@@ -24,6 +24,7 @@ logger = logging.getLogger(__name__)
 RUNNER_PATH = Path(__file__).resolve().parents[2] / "radar" / "src" / "runner.mjs"
 FAST_REFRESH_SEC = 60
 MAX_FAST_REFRESH_SEC = 60 * 60
+STARTUP_DELAY_SEC = 3.0
 MAX_RUNNER_OUTPUT_BYTES = 32 * 1024 * 1024
 STDERR_TAIL_CHARS = 500
 
@@ -48,24 +49,30 @@ async def run_node_runner(payload: dict[str, Any], radar: RadarConfig) -> dict[s
     node = shutil.which(radar.node_bin)
     if node is None:
         raise RadarRunnerError(f"node не найден: {radar.node_bin}")
-    proc = await asyncio.create_subprocess_exec(
-        node,
-        str(RUNNER_PATH),
-        stdin=asyncio.subprocess.PIPE,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-        cwd=str(RUNNER_PATH.parent),
-        env={"PATH": os.environ.get("PATH", ""), "HOME": os.environ.get("HOME", "")},
-        start_new_session=True,
-    )
     try:
-        proc.stdin.write(json.dumps(payload).encode())
-        await proc.stdin.drain()
-        proc.stdin.close()
-        out, err = await asyncio.wait_for(
-            communicate_capped(proc, MAX_RUNNER_OUTPUT_BYTES), timeout=radar.timeout_sec
+        proc = await asyncio.create_subprocess_exec(
+            node,
+            str(RUNNER_PATH),
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            cwd=str(RUNNER_PATH.parent),
+            env={"PATH": os.environ.get("PATH", ""), "HOME": os.environ.get("HOME", "")},
+            start_new_session=True,
         )
-    except asyncio.TimeoutError:
+    except OSError as exc:
+        raise RadarRunnerError(f"не удалось запустить node: {exc}") from None
+    secret = str(payload.get("token") or "")
+    try:
+        async with asyncio.timeout(radar.timeout_sec):
+            try:
+                proc.stdin.write(json.dumps(payload).encode())
+                await proc.stdin.drain()
+                proc.stdin.close()
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+            out, err = await communicate_capped(proc, MAX_RUNNER_OUTPUT_BYTES)
+    except TimeoutError:
         await kill_group(proc)
         raise RadarRunnerError(f"radar не уложился в {radar.timeout_sec} с") from None
     except OutputLimitExceeded:
@@ -75,7 +82,10 @@ async def run_node_runner(payload: dict[str, Any], radar: RadarConfig) -> dict[s
         await kill_on_exit(proc)
         raise
     if proc.returncode != 0:
-        tail = mask_secrets(err.decode("utf-8", "replace"))[-STDERR_TAIL_CHARS:]
+        stderr = err.decode("utf-8", "replace")
+        if secret:
+            stderr = stderr.replace(secret, "***")
+        tail = mask_secrets(stderr)[-STDERR_TAIL_CHARS:]
         raise RadarRunnerError(f"radar завершился с кодом {proc.returncode}: {tail}")
     try:
         result = json.loads(out)
@@ -95,6 +105,7 @@ class RadarScheduler:
         proxy_secret: str,
         runner: RunnerFn = run_node_runner,
         clock: Callable[[], float] | None = None,
+        startup_delay_sec: float = STARTUP_DELAY_SEC,
     ) -> None:
         self._conn = conn
         self._config_provider = config_provider
@@ -104,17 +115,24 @@ class RadarScheduler:
         self._clock = clock or (lambda: asyncio.get_running_loop().time())
         self._wake = asyncio.Event()
         self._fast_since: float | None = None
+        self._startup_delay_sec = startup_delay_sec
 
     def wake(self) -> None:
         self._wake.set()
 
     async def run(self) -> None:
+        if self._startup_delay_sec:
+            await asyncio.sleep(self._startup_delay_sec)
         while True:
             self._wake.clear()
             radar = self._config_provider().radar
             delay: float | None = None
             if radar.enabled:
-                active = await self.refresh_once()
+                try:
+                    active = await self.refresh_once()
+                except Exception:
+                    logger.exception("radar refresh crashed")
+                    active = False
                 delay = self._next_delay(active, radar)
             try:
                 await asyncio.wait_for(self._wake.wait(), timeout=delay)
@@ -133,29 +151,36 @@ class RadarScheduler:
             return min(FAST_REFRESH_SEC, interval)
         return interval
 
+    def _source_of(self, config: Config) -> tuple[str, dict[str, Any]]:
+        return config.gitlab.url, runner_settings(config.radar)
+
     async def refresh_once(self) -> bool:
         config = self._config_provider()
+        source = self._source_of(config)
         snapshot = radar_snapshot_get(self._conn)
         payload = {
             "baseUrl": config.gitlab.url,
             "apiBase": self._api_base,
             "token": self._proxy_secret,
             "settings": runner_settings(config.radar),
-            "previous": _loads(snapshot["dashboard_json"]) if snapshot else None,
-            "threadCache": _loads(snapshot["thread_cache_json"]) if snapshot else None,
+            "previous": loads_or_none(snapshot["dashboard_json"]) if snapshot else None,
+            "threadCache": loads_or_none(snapshot["thread_cache_json"]) if snapshot else None,
         }
         try:
             result = await self._runner(payload, config.radar)
         except RadarRunnerError as exc:
-            logger.warning("radar refresh failed: %s", exc)
-            radar_snapshot_save_failure(self._conn, utcnow_iso(), str(exc))
+            result = {"ok": False, "error": str(exc)}
+        if self._source_of(self._config_provider()) != source:
+            logger.info("radar settings changed during refresh, result dropped")
             return False
+        dashboard = result.get("dashboard")
+        if result.get("ok") and not isinstance(dashboard, dict):
+            result = {"ok": False, "error": "radar вернул дашборд неверного формата"}
         if not result.get("ok"):
             error = str(result.get("error") or "неизвестная ошибка radar")
             logger.warning("radar refresh failed: %s", error)
             radar_snapshot_save_failure(self._conn, utcnow_iso(), error)
             return False
-        dashboard = result.get("dashboard") or {}
         radar_snapshot_save_success(
             self._conn,
             str(dashboard.get("fetchedAt") or utcnow_iso()),
@@ -165,7 +190,7 @@ class RadarScheduler:
         return bool(result.get("activePipelines"))
 
 
-def _loads(value: str | None) -> Any:
+def loads_or_none(value: str | None) -> Any:
     if not value:
         return None
     try:

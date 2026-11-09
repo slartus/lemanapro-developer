@@ -64,7 +64,7 @@ export async function refreshDashboard(
       ok: true,
       dashboard,
       threadCache: { ...nextThreadCache, baseUrl },
-      activePipelines: hasActivePipelines(dashboard),
+      activePipelines: hasActivePipelines(collected),
     };
   } catch (error) {
     return { ok: false, status: error.status ?? null, error: describeError(error) };

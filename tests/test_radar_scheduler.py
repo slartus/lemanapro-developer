@@ -47,7 +47,9 @@ class FakeRunner:
 def _scheduler(ctx, runner, clock=None, **radar):
     ctx_obj, _ = ctx
     ctx_obj.config = ctx_obj.config.model_copy(update={"radar": RadarConfig(**radar)})
-    return RadarScheduler(ctx_obj.conn, lambda: ctx_obj.config, API_BASE, "secret", runner=runner, clock=clock)
+    return RadarScheduler(
+        ctx_obj.conn, lambda: ctx_obj.config, API_BASE, "secret", runner=runner, clock=clock, startup_delay_sec=0
+    )
 
 
 async def test_refresh_passes_settings_and_previous_snapshot(ctx):
@@ -196,6 +198,81 @@ async def test_node_runner_is_killed_on_timeout(tmp_path):
 async def test_node_runner_reports_missing_node():
     with pytest.raises(RadarRunnerError, match="node не найден"):
         await run_node_runner({}, RadarConfig(node_bin="/nonexistent/node"))
+
+
+async def test_node_runner_survives_an_early_exit_with_a_large_input(tmp_path):
+    radar = _script(tmp_path, "import sys\nsys.stderr.write('died secret-xyz')\nsys.exit(1)")
+    payload = {"token": "secret-xyz", "previous": {"blob": "x" * (5 * 1024 * 1024)}}
+    with pytest.raises(RadarRunnerError, match="кодом 1") as error:
+        await run_node_runner(payload, radar)
+    assert "secret-xyz" not in str(error.value)
+
+
+async def test_node_runner_times_out_when_the_process_does_not_read_stdin(tmp_path):
+    radar = _script(tmp_path, "import time\ntime.sleep(30)").model_copy(update={"timeout_sec": 1})
+    with pytest.raises(RadarRunnerError, match="не уложился"):
+        await asyncio.wait_for(run_node_runner({"blob": "x" * (5 * 1024 * 1024)}, radar), timeout=15)
+
+
+async def test_node_runner_reports_a_binary_that_cannot_start(tmp_path):
+    broken = tmp_path / "node"
+    broken.write_text("not a program")
+    broken.chmod(0o755)
+    with pytest.raises(RadarRunnerError, match="не удалось запустить node"):
+        await run_node_runner({}, RadarConfig(node_bin=str(broken)))
+
+
+async def test_unexpected_errors_do_not_stop_the_loop(ctx):
+    calls = []
+
+    async def runner(payload, radar):
+        calls.append(payload)
+        if len(calls) == 1:
+            raise ValueError("boom")
+        return _ok()
+
+    scheduler = _scheduler(ctx, runner)
+    task = asyncio.create_task(scheduler.run())
+    for _ in range(20):
+        await asyncio.sleep(0)
+    scheduler.wake()
+    for _ in range(50):
+        await asyncio.sleep(0)
+    task.cancel()
+    await asyncio.gather(task, return_exceptions=True)
+    assert len(calls) == 2
+    assert radar_snapshot_get(ctx[0].conn)["error"] is None
+
+
+async def test_result_is_dropped_when_settings_change_during_the_refresh(ctx):
+    ctx_obj, _ = ctx
+
+    async def runner(payload, radar):
+        ctx_obj.config = ctx_obj.config.model_copy(update={"radar": RadarConfig(approval_threshold=3)})
+        return _ok()
+
+    scheduler = _scheduler(ctx, runner)
+    assert await scheduler.refresh_once() is False
+    assert radar_snapshot_get(ctx_obj.conn) is None
+
+
+async def test_dashboard_of_the_wrong_shape_is_an_error(ctx):
+    scheduler = _scheduler(ctx, FakeRunner({"ok": True, "dashboard": [1, 2]}))
+    assert await scheduler.refresh_once() is False
+    assert "неверного формата" in radar_snapshot_get(ctx[0].conn)["error"]
+
+
+async def test_api_radar_survives_a_corrupted_snapshot(ctx):
+    ctx_obj, _ = ctx
+    ctx_obj.conn.execute(
+        "INSERT INTO radar_snapshot (id, version, dashboard_json) VALUES (1, 1, '{broken')"
+    )
+    ctx_obj.conn.commit()
+    app = create_app(ctx_obj)
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://127.0.0.1:8123") as client:
+        response = await client.get("/api/radar")
+    assert response.status_code == 200
+    assert response.json()["dashboard"] is None
 
 
 def test_runner_path_points_to_the_radar_runner():

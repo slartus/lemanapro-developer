@@ -798,3 +798,37 @@ async def test_review_page_highlights_merge_requests(ctx):
     async with _client(ctx_obj) as client:
         response = await client.get(f"/reviews/{review_id}")
     assert '<a href="/" class="active" aria-current="page"' in response.text
+
+
+class _FakeRadar:
+    def __init__(self) -> None:
+        self.wakes = 0
+
+    def wake(self) -> None:
+        self.wakes += 1
+
+
+@pytest.mark.parametrize(
+    ("update", "force", "expected"),
+    [
+        ({}, False, 0),
+        ({}, True, 1),
+        ({"radar": {"approval_threshold": 2}}, False, 1),
+        ({"gitlab": {"url": "https://other.example.com"}}, False, 1),
+        ({"review": {"timeout_sec": 99}}, False, 0),
+    ],
+)
+async def test_apply_config_wakes_radar_only_when_needed(ctx, update, force, expected):
+    from types import SimpleNamespace
+
+    from lpdev.config import Config
+    from lpdev.web.routes import _apply_config
+
+    ctx_obj, _ = ctx
+    radar = _FakeRadar()
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(ctx=ctx_obj, radar=radar)))
+    data = ctx_obj.config.model_dump()
+    for section, values in update.items():
+        data[section] = {**data[section], **values}
+    _apply_config(request, Config(**data), force_radar=force)
+    assert radar.wakes == expected
