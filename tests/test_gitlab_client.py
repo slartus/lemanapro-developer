@@ -291,3 +291,20 @@ async def test_forward_does_not_wait_out_a_long_pause_set_while_queued():
     assert response.status_code == 429
     assert int(response.headers["Retry-After"]) > 25
     assert sent == []
+
+
+async def test_synthetic_rate_limit_does_not_extend_the_pause():
+    sent: list[httpx.Request] = []
+    client = GitLabClient(
+        "https://gitlab.example.com",
+        "tok",
+        transport=httpx.MockTransport(lambda request: sent.append(request) or httpx.Response(200, json={})),
+    )
+    client._pause_for(60)
+    paused_until = client._paused_until
+    first = await client.forward("GET", "/api/v4/user")
+    second = await client.forward("GET", "/api/v4/user")
+    await client.aclose()
+    assert first.status_code == second.status_code == 429
+    assert client._paused_until == paused_until
+    assert sent == []
