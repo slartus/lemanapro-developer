@@ -418,6 +418,8 @@ async def _resolve_projects(request: Request, projects: list[dict], gitlab_url: 
         elif not slug:
             detail = await api.get_project_by_path(str(pid))
             item["slug"] = str(detail.get("path_with_namespace") or "")
+        if any(existing["gitlab_project_id"] == item["gitlab_project_id"] for existing in resolved):
+            continue
         resolved.append(item)
     return resolved
 
@@ -507,14 +509,18 @@ RADAR_SETTINGS_FIELDS = (
 @router.get("/api/settings/projects")
 async def settings_projects(request: Request):
     ctx = _ctx(request)
+    failure: GitlabApiError | None = None
     try:
-        projects, maintainer_projects = await asyncio.gather(
-            ctx.api.get_member_projects(REPORTER_ACCESS), ctx.api.get_member_projects(MAINTAINER_ACCESS)
-        )
-        maintained = {project.get("id") for project in maintainer_projects if isinstance(project, dict)}
-    except GitlabApiError as exc:
-        logger.warning("settings: project list failed: %s", exc)
+        async with asyncio.TaskGroup() as group:
+            reporter_task = group.create_task(ctx.api.get_member_projects(REPORTER_ACCESS))
+            maintainer_task = group.create_task(ctx.api.get_member_projects(MAINTAINER_ACCESS))
+    except* GitlabApiError as group_error:
+        failure = group_error.exceptions[0]
+    if failure is not None:
+        logger.warning("settings: project list failed: %s", failure)
         return PlainTextResponse("GitLab не отдал список проектов", status_code=502)
+    projects = reporter_task.result()
+    maintained = {project.get("id") for project in maintainer_task.result() if isinstance(project, dict)}
     return JSONResponse(
         [
             {

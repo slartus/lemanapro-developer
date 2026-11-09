@@ -172,3 +172,26 @@ async def test_settings_save_resolves_a_project_added_by_path(ctx, tmp_path, mon
     saved = yaml.safe_load(cfg.read_text())["projects"]
     assert saved[-1]["gitlab_project_id"] == 77 and saved[-1]["slug"] == "other/team/app"
     assert 77 in ctx_obj.project_ids
+
+
+async def test_settings_save_drops_duplicate_projects_after_resolving(ctx, tmp_path, monkeypatch):
+    cfg = _config(tmp_path)
+    monkeypatch.setenv("LPDEV_CONFIG", str(cfg))
+    app, _ = _app(ctx, lambda request: httpx.Response(200, json={"id": 10, "path_with_namespace": "g/p"}))
+    projects = BASE_PAYLOAD["projects"] + [{"gitlab_project_id": None, "slug": "g/old-name", "agent": "agent-a"}]
+    async with _client(app) as client:
+        response = await client.post("/settings", json={**BASE_PAYLOAD, "projects": projects}, headers=H)
+    assert response.status_code == 303
+    assert [p["gitlab_project_id"] for p in yaml.safe_load(cfg.read_text())["projects"]] == [10]
+
+
+async def test_projects_api_fails_cleanly_when_one_list_fails(ctx):
+    def gitlab(request):
+        if request.url.params["min_access_level"] == "40":
+            return httpx.Response(403)
+        return httpx.Response(200, json=[])
+
+    app, _ = _app(ctx, gitlab)
+    async with _client(app) as client:
+        response = await client.get("/api/settings/projects")
+    assert response.status_code == 502
