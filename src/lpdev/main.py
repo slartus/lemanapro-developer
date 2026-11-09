@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import secrets
 import sqlite3
 import time
 from contextlib import asynccontextmanager
@@ -17,6 +18,8 @@ from lpdev.db import backup, connect, init_schema, poll_state_get, requeue_incom
 from lpdev.git_ops import cleanup_old_review_logs, cleanup_old_workspaces, cleanup_stale_askpass
 from lpdev.gitlab_client import GitLabClient
 from lpdev.poller import Poller
+from lpdev.web.gitlab_proxy import PROXY_PREFIX
+from lpdev.web.gitlab_proxy import router as gitlab_proxy_router
 from lpdev.web.routes import router as web_router
 from lpdev.worker import QuestionWorker, ReviewRegistry, start_workers
 
@@ -212,7 +215,9 @@ def create_app(ctx: AppContext, port: int = DEFAULT_PORT) -> FastAPI:
 
     app = FastAPI(title="lemanapro-developer", lifespan=lifespan)
     app.state.ctx = ctx
+    app.state.proxy_secret = secrets.token_urlsafe(32)
     app.include_router(web_router)
+    app.include_router(gitlab_proxy_router)
 
     @app.get("/healthz")
     async def healthz() -> JSONResponse:
@@ -234,7 +239,7 @@ def create_app(ctx: AppContext, port: int = DEFAULT_PORT) -> FastAPI:
 
     allowed_hosts = {f"127.0.0.1:{port}", f"localhost:{port}"}
     app.add_middleware(NoStoreHtmlMiddleware)
-    app.add_middleware(SameOriginMiddleware, allowed_hosts=allowed_hosts)
+    app.add_middleware(SameOriginMiddleware, allowed_hosts=allowed_hosts, protected_prefixes=(PROXY_PREFIX + "/",))
     app.add_middleware(HostCheckMiddleware, allowed_hosts=allowed_hosts)
     return app
 

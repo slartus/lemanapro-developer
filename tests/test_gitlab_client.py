@@ -181,3 +181,25 @@ async def test_project_merge_requests_capped_at_max_pages():
     finally:
         await client.aclose()
     assert len(mrs) == len(calls) == _MAX_PAGES
+
+
+async def test_rate_limit_seen_by_the_proxy_delays_poller_requests(monkeypatch):
+    responses = iter([
+        httpx.Response(429, headers={"Retry-After": "7"}),
+        httpx.Response(200, json={"username": "me"}),
+    ])
+    client = GitLabClient(
+        "https://gitlab.example.com", "tok", transport=httpx.MockTransport(lambda request: next(responses))
+    )
+    sleeps: list[float] = []
+
+    async def fake_sleep(delay):
+        sleeps.append(delay)
+
+    forwarded = await client.forward("GET", "/api/v4/user")
+    monkeypatch.setattr("lpdev.gitlab_client.asyncio.sleep", fake_sleep)
+    user = await client.get_user()
+    await client.aclose()
+    assert forwarded.status_code == 429
+    assert user == {"username": "me"}
+    assert len(sleeps) == 1 and 6 < sleeps[0] <= 7
