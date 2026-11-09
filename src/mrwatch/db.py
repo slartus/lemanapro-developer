@@ -13,7 +13,10 @@ SCHEMA_VERSION = 10
 
 DERIVED_ROLES = frozenset({"reviewer", "assignee", "author"})
 MENTIONED_ROLE = "mentioned"
+READY_REVIEW_ROLES = frozenset({"reviewer", "author", MENTIONED_ROLE})
 
+
+DRAFT_CANCEL_ERROR = "отменено: MR переведён в draft"
 
 SEVERITY_COLUMNS = ("crit_count", "major_count", "minor_count", "nit_count")
 
@@ -27,6 +30,8 @@ class MrUpsertResult:
     mr_id: int
     inserted: bool
     head_sha_changed: bool
+    became_ready: bool = False
+    became_draft: bool = False
 
 
 @dataclass(frozen=True)
@@ -356,7 +361,7 @@ def upsert_mr(
     is_draft: bool | None = None,
 ) -> MrUpsertResult:
     row = conn.execute(
-        "SELECT id, head_sha, state, my_roles FROM mr WHERE project_id = ? AND iid = ?",
+        "SELECT id, head_sha, state, my_roles, is_draft FROM mr WHERE project_id = ? AND iid = ?",
         (project_db_id, iid),
     ).fetchone()
     if row is None:
@@ -390,6 +395,7 @@ def upsert_mr(
             head_sha_changed=True,
         )
     head_sha_changed = head_sha is not None and row["head_sha"] != head_sha
+    was_draft = bool(row["is_draft"])
     conn.execute(
         """
         UPDATE mr
@@ -421,6 +427,8 @@ def upsert_mr(
         mr_id=int(row["id"]),
         inserted=False,
         head_sha_changed=head_sha_changed,
+        became_ready=was_draft and is_draft is False,
+        became_draft=not was_draft and is_draft is True,
     )
 
 
@@ -443,6 +451,17 @@ def create_review(
     if cursor.rowcount == 0:
         return None
     return int(cursor.lastrowid)
+
+
+def mr_wants_review(conn: sqlite3.Connection, mr_id: int) -> bool:
+    row = conn.execute("SELECT my_roles FROM mr WHERE id = ?", (mr_id,)).fetchone()
+    if row is None:
+        return False
+    if _parse_roles(row["my_roles"]) & READY_REVIEW_ROLES:
+        return True
+    return conn.execute(
+        "SELECT 1 FROM review WHERE mr_id = ? LIMIT 1", (mr_id,)
+    ).fetchone() is not None
 
 
 def review_exists_for_head(conn: sqlite3.Connection, mr_id: int, head_sha: str) -> bool:
@@ -576,6 +595,34 @@ def supersede_reviews(conn: sqlite3.Connection, mr_id: int, new_sha: str) -> Sup
         conn.rollback()
         raise
     return SupersedeResult(cancelled_active, rebased, cancelled_queued)
+
+
+def cancel_draft_reviews(conn: sqlite3.Connection, mr_id: int) -> SupersedeResult:
+    cancelled_active: list[int] = []
+    cancelled_queued: list[int] = []
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        rows = conn.execute(
+            """
+            SELECT id, status FROM review
+            WHERE mr_id = ? AND status IN ('queued', 'cloning', 'reviewing')
+            ORDER BY id
+            """,
+            (mr_id,),
+        ).fetchall()
+        now = utcnow_iso()
+        for row in rows:
+            target = cancelled_queued if row["status"] == "queued" else cancelled_active
+            target.append(row["id"])
+            conn.execute(
+                "UPDATE review SET status = 'cancelled', finished_at = ?, error = ? WHERE id = ?",
+                (now, DRAFT_CANCEL_ERROR, row["id"]),
+            )
+        conn.commit()
+    except BaseException:
+        conn.rollback()
+        raise
+    return SupersedeResult(cancelled_active, [], cancelled_queued)
 
 
 def finish_review(

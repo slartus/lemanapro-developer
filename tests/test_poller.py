@@ -961,3 +961,147 @@ async def test_head_change_keeps_finished_reviews(conn):
     assert get_review(conn, failed)["status"] == "error"
     assert len(list_reviews(conn)) == 2
 
+
+
+def _draft(mr, value=True):
+    return mr | {"draft": value}
+
+
+async def test_draft_todo_does_not_enqueue(conn):
+    api = StubApi()
+    api.details[(10, 5)] = _draft(_detail(10, 5, reviewers=["me"]))
+    api.todos = [{"id": 1, "target_type": "MergeRequest", "action_name": "mentioned",
+                  "target": {"project_id": 10, "iid": 5}}]
+    poller = _make_poller(conn, api)
+    assert await poller.tick() == 0
+    assert list_reviews(conn) == []
+    assert 1 in todo_seen_ids(conn)
+
+
+async def test_draft_full_scan_does_not_enqueue(conn):
+    api = StubApi()
+    api.mrs = [_draft(_mr(10, 1, author="me")), _draft(_mr(10, 2, reviewers=["me"]))]
+    assert await _make_poller(conn, api).tick() == 0
+    assert list_reviews(conn) == []
+
+
+async def test_draft_sweep_new_and_push_do_not_enqueue(conn):
+    api = StubApi()
+    poller = _make_poller(conn, api, config=_config(re_review_on_push=True))
+    await poller.tick()
+    api.mrs = [_draft(_mr(10, 1, author="me"))]
+    assert await poller.tick() == 0
+    api.mrs = [_draft(_mr(10, 1, sha="b" * 40, author="me", updated_at="2026-01-02T12:00:00Z"))]
+    assert await poller.tick() == 0
+    assert list_reviews(conn) == []
+
+
+async def test_missing_draft_field_is_not_draft(conn):
+    api = StubApi()
+    api.mrs = [_draft(_mr(10, 1, author="me"), None)]
+    assert await _make_poller(conn, api).tick() == 1
+    assert [r["trigger"] for r in list_reviews(conn)] == ["new"]
+
+
+async def test_draft_to_ready_enqueues_review(conn):
+    api = StubApi()
+    work_event = asyncio.Event()
+    api.mrs = [_draft(_mr(10, 1, author="me"))]
+    poller = _make_poller(conn, api, work_event=work_event)
+    assert await poller.tick() == 0
+
+    api.mrs = [_draft(_mr(10, 1, author="me", updated_at="2026-01-02T12:00:00Z"), False)]
+    assert await poller.tick() == 1
+
+    reviews = list_reviews(conn)
+    assert [(r["trigger"], r["head_sha"], r["status"]) for r in reviews] == [
+        ("new", "a" * 40, "queued")
+    ]
+    assert work_event.is_set()
+
+
+async def test_draft_to_ready_skips_irrelevant_or_reviewed_head(conn):
+    api = StubApi()
+    api.mrs = [_draft(_mr(10, 1, author="other")), _draft(_mr(10, 2, author="other"))]
+    poller = _make_poller(conn, api)
+    await poller.tick()
+    reviewed = conn.execute("SELECT id FROM mr WHERE iid = 2").fetchone()["id"]
+    review_id = create_review(conn, reviewed, "manual", "a" * 40, "agent-a")
+    finish_review(conn, review_id, "done", review_md="ok")
+
+    api.mrs = [
+        _draft(_mr(10, 1, author="other", updated_at="2026-01-02T12:00:00Z"), False),
+        _draft(_mr(10, 2, author="other", updated_at="2026-01-02T12:00:00Z"), False),
+    ]
+    assert await poller.tick() == 0
+    assert [r["id"] for r in list_reviews(conn)] == [review_id]
+
+
+async def test_draft_to_ready_with_review_history_enqueues(conn):
+    api = StubApi()
+    api.mrs = [_draft(_mr(10, 1, author="other"))]
+    poller = _make_poller(conn, api)
+    await poller.tick()
+    mr_id = conn.execute("SELECT id FROM mr WHERE iid = 1").fetchone()["id"]
+    old = create_review(conn, mr_id, "manual", "0" * 40, "agent-a")
+    finish_review(conn, old, "done", review_md="ok")
+
+    api.mrs = [_draft(_mr(10, 1, author="other", updated_at="2026-01-02T12:00:00Z"), False)]
+    assert await poller.tick() == 1
+    fresh = [r for r in list_reviews(conn) if r["head_sha"] == "a" * 40]
+    assert [r["trigger"] for r in fresh] == ["new"]
+
+
+async def test_draft_to_ready_via_todo_enqueues_once(conn):
+    api = StubApi()
+    api.details[(10, 5)] = _draft(_detail(10, 5, reviewers=["me"]))
+    api.todos = [{"id": 1, "target_type": "MergeRequest", "action_name": "review_requested",
+                  "target": {"project_id": 10, "iid": 5}}]
+    poller = _make_poller(conn, api)
+    assert await poller.tick() == 0
+
+    api.details[(10, 5)] = _draft(_detail(10, 5, reviewers=["me"]), False)
+    api.todos.append({"id": 2, "target_type": "MergeRequest", "action_name": "mentioned",
+                      "target": {"project_id": 10, "iid": 5}})
+    assert await poller.tick() == 1
+    assert [r["trigger"] for r in list_reviews(conn)] == ["new"]
+
+
+async def test_ready_to_draft_cancels_active_reviews(conn):
+    api = StubApi()
+    registry = FakeRegistry()
+    poller, mr_id = await _seen_foreign_mr(conn, api, registry)
+    active = create_review(conn, mr_id, "manual", "a" * 40, "agent-a")
+    assert claim_next_review(conn)["id"] == active
+    queued = create_review(conn, mr_id, "push", "a" * 40, "agent-a")
+    done = create_review(conn, mr_id, "new", "a" * 40, "agent-a")
+    finish_review(conn, done, "done", review_md="ok")
+
+    api.mrs = [_draft(_mr(10, 1, author="other", updated_at="2026-01-02T12:00:00Z"))]
+    assert await poller.tick() == 0
+
+    assert registry.cancelled == [active]
+    for review_id in (active, queued):
+        row = get_review(conn, review_id)
+        assert row["status"] == "cancelled"
+        assert row["error"] == "отменено: MR переведён в draft"
+    assert get_review(conn, done)["status"] == "done"
+    assert len(list_reviews(conn)) == 3
+
+
+async def test_push_in_draft_cancels_without_new_review(conn):
+    api = StubApi()
+    registry = FakeRegistry()
+    api.mrs = [_draft(_mr(10, 1, author="me"))]
+    poller = _make_poller(conn, api, config=_config(re_review_on_push=True), registry=registry)
+    await poller.tick()
+    mr_id = conn.execute("SELECT id FROM mr WHERE iid = 1").fetchone()["id"]
+    active = create_review(conn, mr_id, "manual", "a" * 40, "agent-a")
+    claim_next_review(conn)
+
+    api.mrs = [_draft(_mr(10, 1, sha="b" * 40, author="me", updated_at="2026-01-02T12:00:00Z"))]
+    assert await poller.tick() == 0
+
+    assert registry.cancelled == [active]
+    assert get_review(conn, active)["status"] == "cancelled"
+    assert [r["id"] for r in list_reviews(conn)] == [active]

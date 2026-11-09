@@ -7,6 +7,7 @@ from helpers import list_reviews
 from mrwatch.db import (
     MAX_REVIEW_MD_LENGTH,
     backup,
+    cancel_draft_reviews,
     claim_next_review,
     connect,
     create_review,
@@ -15,6 +16,7 @@ from mrwatch.db import (
     init_schema,
     list_mrs,
     mark_reviewing,
+    mr_wants_review,
     poll_state_get,
     poll_state_set,
     rebase_review_head,
@@ -795,3 +797,81 @@ def test_list_mrs_ignores_cancelled_for_verdict(conn):
     assert row["crit_count"] == 1
     assert row["latest_review_status"] == "cancelled"
 
+
+
+def _upsert_draft(conn, project_db_id, is_draft):
+    return upsert_mr(
+        conn,
+        project_db_id=project_db_id,
+        iid=1,
+        title="MR title",
+        author_username="alice",
+        source_branch="feature",
+        web_url="https://gitlab.example.com/group/proj/-/merge_requests/1",
+        state="opened",
+        head_sha="a" * 40,
+        updated_at="2026-01-01T00:00:00Z",
+        is_draft=is_draft,
+    )
+
+
+def test_upsert_reports_draft_transitions(conn):
+    project_id = _sync_projects(conn)[10]
+    inserted = _upsert_draft(conn, project_id, True)
+    assert not inserted.became_ready and not inserted.became_draft
+
+    unknown = _upsert_draft(conn, project_id, None)
+    assert not unknown.became_ready and not unknown.became_draft
+
+    ready = _upsert_draft(conn, project_id, False)
+    assert ready.became_ready and not ready.became_draft
+
+    still_ready = _upsert_draft(conn, project_id, None)
+    assert not still_ready.became_ready and not still_ready.became_draft
+
+    drafted = _upsert_draft(conn, project_id, True)
+    assert drafted.became_draft and not drafted.became_ready
+
+    still_draft = _upsert_draft(conn, project_id, True)
+    assert not still_draft.became_ready and not still_draft.became_draft
+
+
+def test_cancel_draft_reviews_cancels_active_only(conn):
+    mr_id = _mr_with_reviews(conn)
+    done = create_review(conn, mr_id, "new", "a" * 40, "agent-a")
+    finish_review(conn, done, "done", review_md="ok")
+    queued = create_review(conn, mr_id, "push", "a" * 40, "agent-a")
+    cloning = create_review(conn, mr_id, "manual", "a" * 40, "agent-a")
+    _set_status(conn, cloning, "cloning")
+    reviewing = create_review(conn, mr_id, "new", "b" * 40, "agent-a")
+    _set_status(conn, reviewing, "reviewing")
+
+    result = cancel_draft_reviews(conn, mr_id)
+
+    assert result.cancelled_active == [cloning, reviewing]
+    assert result.cancelled_queued == [queued]
+    assert result.rebased == []
+    for review_id in (queued, cloning, reviewing):
+        row = get_review(conn, review_id)
+        assert row["status"] == "cancelled"
+        assert row["finished_at"] is not None
+        assert row["error"] == "отменено: MR переведён в draft"
+    assert get_review(conn, done)["status"] == "done"
+    assert not cancel_draft_reviews(conn, mr_id).touched
+
+
+def test_mr_wants_review_by_roles_or_history(conn):
+    project_id = _sync_projects(conn)[10]
+    mr_id = _upsert_mr(conn, project_id).mr_id
+    assert not mr_wants_review(conn, mr_id)
+    assert not mr_wants_review(conn, mr_id + 100)
+
+    conn.execute("UPDATE mr SET my_roles = 'assignee' WHERE id = ?", (mr_id,))
+    assert not mr_wants_review(conn, mr_id)
+    for roles in ("reviewer", "author", "assignee,mentioned"):
+        conn.execute("UPDATE mr SET my_roles = ? WHERE id = ?", (roles, mr_id))
+        assert mr_wants_review(conn, mr_id)
+
+    conn.execute("UPDATE mr SET my_roles = '' WHERE id = ?", (mr_id,))
+    create_review(conn, mr_id, "manual", "a" * 40, "agent-a")
+    assert mr_wants_review(conn, mr_id)

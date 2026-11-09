@@ -442,8 +442,8 @@ async def test_api_mrs_and_index_expose_draft(ctx):
     assert 'class="badge role draft"' not in plain.text.split("<tbody", 1)[1]
     body = page.text.split("<tbody", 1)[1]
     assert 'class="badge role draft">draft</span>' in body
-    assert 'data-draft="1"' in body
-    assert 'id="hd"' in page.text
+    assert 'id="hd"' not in page.text
+    assert "скрыть draft" not in page.text
 
 
 async def test_favicon_svg(ctx):
@@ -587,6 +587,20 @@ async def test_index_has_adaptive_refresh_logic(ctx):
     assert "IDLE_INTERVAL_MS = 30000" in page.text
     assert "visibilitychange" in page.text
     assert "inFlight" in page.text
+
+
+async def test_index_has_hidden_tab_badge_logic(ctx):
+    ctx_obj, _ = ctx
+    async with _client(ctx_obj) as client:
+        page = await client.get("/")
+    text = page.text
+    assert "HIDDEN_INTERVAL_MS = 60000" in text
+    assert "function newlyFinished(baseline, current, counted)" in text
+    assert 'const FINISHED = ["done", "error"];' in text
+    assert "resetBadge();" in text
+    assert "if (document.hidden || inFlight) return;" not in text
+    body = text.split("<tbody", 1)[1]
+    assert "data-review=" in body and "data-done=" in body
 
 
 async def test_force_check_reschedules_followup_refreshes(ctx):

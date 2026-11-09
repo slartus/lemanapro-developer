@@ -36,7 +36,6 @@
     <option value="{{ code }}">{{ label }}</option>
     {% endfor %}
   </select>
-  <label class="small"><input type="checkbox" id="hd"> скрыть draft</label>
   <label class="small"><input type="checkbox" id="cf"> требуют правок</label>
   <button id="fc-btn" onclick="forceCheck()">Проверить сейчас</button>
   <span id="fc-status" class="muted small" role="status"></span>
@@ -49,7 +48,7 @@
   </thead>
   <tbody id="mr-body">
   {% for m in mrs %}
-  <tr data-status="{{ m["latest_review_status"] or "" }}" data-roles="{{ m["my_roles"] or "" }}" data-draft="{{ 1 if m["is_draft"] else 0 }}" data-verdict="{{ m["verdict"] or "" }}">
+  <tr data-status="{{ m["latest_review_status"] or "" }}" data-roles="{{ m["my_roles"] or "" }}" data-verdict="{{ m["verdict"] or "" }}" data-review="{{ m["latest_review_id"] or "" }}" data-done="{{ m["latest_done_review_id"] or "" }}">
     <td class="muted">{{ m["path_with_namespace"].split("/")[-1] }}</td>
     {% set href = m["web_url"] | safe_url %}
     <td>{% if href %}<a class="mr-title" href="{{ href }}">{{ m["title"] or ("!" ~ m["iid"]) }}</a>{% else %}<span class="mr-title">{{ m["title"] or ("!" ~ m["iid"]) }}</span>{% endif %}
@@ -89,7 +88,6 @@ const ACTIVE = ["queued", "cloning", "reviewing"];
 const q = document.getElementById("q");
 const sf = document.getElementById("sf");
 const rf = document.getElementById("rf");
-const hd = document.getElementById("hd");
 const cf = document.getElementById("cf");
 const ROLE_LABELS = {{ role_labels | tojson }};
 const hasMrs = {{ (mrs | length > 0) | tojson }};
@@ -102,7 +100,6 @@ function applyFilter() {
   let shown = 0;
   document.querySelectorAll("#mr-body tr").forEach(function (tr) {
     const ok = (!status || tr.dataset.status === status) &&
-      (!hd.checked || tr.dataset.draft !== "1") &&
       (!cf.checked || tr.dataset.verdict === "REQUEST_CHANGES") &&
       (!role || (tr.dataset.roles || "").split(",").includes(role)) &&
       (!needle || tr.textContent.toLowerCase().includes(needle));
@@ -138,8 +135,9 @@ function renderRow(m) {
   tr.dataset.status = m.latest_review_status || "";
   const roles = m.my_roles || [];
   tr.dataset.roles = roles.join(",");
-  tr.dataset.draft = m.is_draft ? "1" : "0";
   tr.dataset.verdict = m.verdict || "";
+  tr.dataset.review = m.latest_review_id || "";
+  tr.dataset.done = m.latest_done_review_id || "";
   tr.appendChild(el("td", "muted", (m.path_with_namespace || "").split("/").pop()));
   const title = el("td");
   const link = el("a", "mr-title", m.title || ("!" + m.iid));
@@ -198,15 +196,111 @@ function renderRow(m) {
   return tr;
 }
 
+const FINISHED = ["done", "error"];
+
+function reviewStates(rows) {
+  const states = new Map();
+  rows.forEach(function (row) {
+    if (row.doneId) states.set(String(row.doneId), "done");
+    if (row.reviewId) states.set(String(row.reviewId), row.status || "");
+  });
+  return states;
+}
+
+function newlyFinished(baseline, current, counted) {
+  const found = [];
+  current.forEach(function (status, id) {
+    if (!FINISHED.includes(status) || counted.has(id) || baseline.get(id) === status) return;
+    found.push(id);
+  });
+  return found;
+}
+
+function domReviewRows() {
+  return Array.from(document.querySelectorAll("#mr-body tr")).map(function (tr) {
+    return {reviewId: tr.dataset.review, status: tr.dataset.status, doneId: tr.dataset.done};
+  });
+}
+
+function apiReviewRows(rows) {
+  return rows.map(function (m) {
+    return {reviewId: m.latest_review_id, status: m.latest_review_status, doneId: m.latest_done_review_id};
+  });
+}
+
+const ORIGINAL_TITLE = document.title;
+const iconLink = document.querySelector('link[rel="icon"]');
+const ORIGINAL_ICON = iconLink ? iconLink.getAttribute("href") : null;
+let badgeIcon = null;
+let baseline = null;
+let counted = new Set();
+let unseen = 0;
+
+function loadBadgeIcon() {
+  if (badgeIcon) return badgeIcon;
+  badgeIcon = new Promise(function (resolve) {
+    const img = new Image();
+    img.onload = function () {
+      try {
+        const canvas = document.createElement("canvas");
+        canvas.width = 32;
+        canvas.height = 32;
+        const ctx = canvas.getContext("2d");
+        if (!ctx) return resolve(null);
+        ctx.drawImage(img, 0, 0, 32, 32);
+        ctx.beginPath();
+        ctx.arc(24, 8, 7, 0, 2 * Math.PI);
+        ctx.fillStyle = "#e5484d";
+        ctx.fill();
+        ctx.lineWidth = 2;
+        ctx.strokeStyle = "#ffffff";
+        ctx.stroke();
+        resolve(canvas.toDataURL("image/png"));
+      } catch (e) {
+        resolve(null);
+      }
+    };
+    img.onerror = function () { resolve(null); };
+    img.src = ORIGINAL_ICON || "/favicon.svg";
+  });
+  return badgeIcon;
+}
+
+function showBadge() {
+  document.title = "(" + unseen + ") " + ORIGINAL_TITLE;
+  if (!iconLink) return;
+  loadBadgeIcon().then(function (href) {
+    if (href && unseen > 0) iconLink.setAttribute("href", href);
+  });
+}
+
+function resetBadge() {
+  baseline = null;
+  counted = new Set();
+  unseen = 0;
+  document.title = ORIGINAL_TITLE;
+  if (iconLink && ORIGINAL_ICON !== null) iconLink.setAttribute("href", ORIGINAL_ICON);
+}
+
+function trackFinished(rows) {
+  if (!document.hidden || !baseline) return;
+  const found = newlyFinished(baseline, reviewStates(apiReviewRows(rows)), counted);
+  if (!found.length) return;
+  found.forEach(function (id) { counted.add(id); });
+  unseen += found.length;
+  showBadge();
+}
+
 let inFlight = false;
 
 async function refresh() {
-  if (document.hidden || inFlight) return;
+  if (inFlight) return;
   inFlight = true;
   try {
     const r = await fetch("/api/mrs", {cache: "no-store"});
     if (!r.ok) return;
     const rows = await r.json();
+    trackFinished(rows);
     document.getElementById("mr-body").replaceChildren(...rows.map(renderRow));
     MRW.renderTimes();
     applyFilter();
@@ -218,6 +312,7 @@ async function refresh() {
 
 const ACTIVE_INTERVAL_MS = 5000;
 const IDLE_INTERVAL_MS = 30000;
+const HIDDEN_INTERVAL_MS = 60000;
 
 const FORCE_CHECK_FOLLOWUP_MS = [2000, 4000];
 let cycle = 0;
@@ -232,6 +327,10 @@ function planNext(delay, after) {
 }
 
 function schedule() {
+  if (document.hidden) {
+    planNext(HIDDEN_INTERVAL_MS, schedule);
+    return;
+  }
   planNext(hasActive() ? ACTIVE_INTERVAL_MS : IDLE_INTERVAL_MS, schedule);
 }
 
@@ -246,7 +345,12 @@ function scheduleFollowups(delays) {
 }
 
 document.addEventListener("visibilitychange", async function () {
-  if (document.hidden) return;
+  if (document.hidden) {
+    baseline = reviewStates(domReviewRows());
+    schedule();
+    return;
+  }
+  resetBadge();
   await refresh();
   schedule();
 });
@@ -278,8 +382,8 @@ async function forceCheck() {
 q.addEventListener("input", applyFilter);
 sf.addEventListener("change", applyFilter);
 rf.addEventListener("change", applyFilter);
-hd.addEventListener("change", applyFilter);
 cf.addEventListener("change", applyFilter);
+if (document.hidden) baseline = reviewStates(domReviewRows());
 schedule();
 </script>
 {% endblock %}
