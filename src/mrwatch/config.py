@@ -85,6 +85,7 @@ class ReviewConfig(BaseModel):
     clone_depth: int = Field(default=50, ge=1)
     workspace_ttl_days: int = Field(default=3, ge=1)
     log_ttl_days: int = Field(default=14, ge=1)
+    push_debounce_sec: int = Field(default=120, ge=0)
 
 
 class OpenCodeConfig(BaseModel):

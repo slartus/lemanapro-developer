@@ -4,6 +4,7 @@ import asyncio
 import stat
 import time
 import subprocess
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -12,11 +13,13 @@ import mrwatch.worker as worker_module
 from mrwatch.config import Config, GitlabConfig, PathsConfig, ProjectConfig, ReviewConfig
 from mrwatch.config import resolve_paths
 from mrwatch.db import (
+    claim_next_review,
     create_question,
     create_review,
     finish_review,
     get_review,
     list_questions,
+    requeue_incomplete,
     supersede_reviews,
     sync_projects,
     upsert_mr,
@@ -322,6 +325,7 @@ async def test_cancel_during_clone_removes_workspace_and_worker_continues(
     registry = ReviewRegistry()
     opencode_bin = _fake_opencode(tmp_path, f"#!/bin/sh\nprintf '%s' '{NDJSON_OUTPUT}'\n")
     worker = _worker(tmp_path, db, origin, opencode_bin, registry)
+    worker._api.detail["sha"] = "f" * 40
     finished = _spy_finish(monkeypatch)
     real_clone = worker_module.clone_for_review
     clone_started = asyncio.Event()
@@ -339,6 +343,7 @@ async def test_cancel_during_clone_removes_workspace_and_worker_continues(
         await asyncio.wait_for(clone_started.wait(), timeout=10)
         assert _workspace(tmp_path, stale_id).exists()
 
+        worker._api.detail["sha"] = head_sha
         supersede_reviews(db, mr_id, head_sha)
         assert registry.cancel(stale_id) is True
         fresh_id = create_review(db, mr_id, "push", head_sha, "agent-a")
@@ -621,3 +626,154 @@ async def test_review_prompt_gets_extra_instructions(tmp_path, db, origin, monke
     monkeypatch.setattr(worker_module, "run_review", fake_review)
     assert await worker.process_one() is True
     assert "=== ДОП. ИНСТРУКЦИИ ПОЛЬЗОВАТЕЛЯ ===\nсмотри SQL" in prompts[0]
+
+
+NEW_SHA = "b" * 40
+
+
+def _spy_clone(monkeypatch) -> list[str]:
+    calls: list[str] = []
+    real = worker_module.clone_for_review
+
+    async def spy(**kwargs):
+        calls.append(kwargs["expected_sha"])
+        return await real(**kwargs)
+
+    monkeypatch.setattr(worker_module, "clone_for_review", spy)
+    return calls
+
+
+def _fake_review_ok(monkeypatch) -> None:
+    async def fake_review(**kwargs):
+        return ReviewResult(review_md="ok", session_id="ses_r", exit_code=0)
+
+    monkeypatch.setattr(worker_module, "run_review", fake_review)
+
+
+def _delay_sec(row) -> float:
+    not_before = datetime.fromisoformat(row["not_before"].replace("Z", "+00:00"))
+    return (not_before - datetime.now(UTC)).total_seconds()
+
+
+async def test_head_moved_before_clone_requeues_with_debounce(tmp_path, db, origin, monkeypatch):
+    review_id = _queued_review(db, origin)
+    db.execute("UPDATE review SET extra_instructions = 'x' WHERE id = ?", (review_id,))
+    db.commit()
+    worker = _worker(tmp_path, db, origin, "/bin/true")
+    worker._api.detail["sha"] = NEW_SHA
+    clones = _spy_clone(monkeypatch)
+    finished = _spy_finish(monkeypatch)
+
+    assert await worker.process_one() is True
+
+    row = get_review(db, review_id)
+    assert row["status"] == "queued"
+    assert row["head_sha"] == NEW_SHA
+    assert row["attempt"] == 0
+    assert row["extra_instructions"] == "x"
+    assert 110 < _delay_sec(row) <= 120
+    assert clones == []
+    assert finished == []
+    assert claim_next_review(db) is None
+
+
+async def test_head_moved_before_clone_without_debounce_is_not_deferred(tmp_path, db, origin):
+    review_id = _queued_review(db, origin)
+    worker = _worker(tmp_path, db, origin, "/bin/true")
+    worker._static_config.review.push_debounce_sec = 0
+    worker._api.detail["sha"] = NEW_SHA
+
+    assert await worker.process_one() is True
+
+    row = get_review(db, review_id)
+    assert row["status"] == "queued"
+    assert row["not_before"] is None
+
+
+async def test_head_moved_before_clone_conflict_cancels(tmp_path, db, origin, monkeypatch):
+    review_id = _queued_review(db, origin)
+    other = create_review(db, 1, "new", NEW_SHA, "agent-a")
+    worker = _worker(tmp_path, db, origin, "/bin/true")
+    worker._api.detail["sha"] = NEW_SHA
+    clones = _spy_clone(monkeypatch)
+
+    assert await worker.process_one() is True
+
+    row = get_review(db, review_id)
+    assert row["status"] == "cancelled"
+    assert row["error"] == f"отменено: в MR новый коммит {NEW_SHA[:12]}"
+    assert row["finished_at"] is not None
+    assert get_review(db, other)["status"] == "queued"
+    assert clones == []
+
+
+@pytest.mark.parametrize(
+    ("change", "error"),
+    [
+        ({"state": "merged"}, "отменено: MR закрыт"),
+        ({"state": "closed"}, "отменено: MR закрыт"),
+        ({"draft": True}, "отменено: MR переведён в draft"),
+    ],
+)
+async def test_head_moved_before_clone_closed_or_draft_cancels(
+    tmp_path, db, origin, monkeypatch, change, error
+):
+    review_id = _queued_review(db, origin)
+    worker = _worker(tmp_path, db, origin, "/bin/true")
+    worker._api.detail.update({"sha": NEW_SHA, **change})
+    clones = _spy_clone(monkeypatch)
+
+    assert await worker.process_one() is True
+
+    row = get_review(db, review_id)
+    assert row["status"] == "cancelled"
+    assert row["error"] == error
+    assert row["head_sha"] != NEW_SHA
+    assert clones == []
+
+
+async def test_draft_with_same_head_reviews_as_usual(tmp_path, db, origin, monkeypatch):
+    review_id = _queued_review(db, origin)
+    worker = _worker(tmp_path, db, origin, "/bin/true")
+    worker._api.detail["draft"] = True
+    _fake_review_ok(monkeypatch)
+
+    assert await worker.process_one() is True
+
+    assert get_review(db, review_id)["status"] == "done"
+
+
+async def test_clone_head_mismatch_conflict_cancels(tmp_path, db, origin):
+    review_id = _queued_review(db, origin)
+    actual = _git("rev-parse", "merge-requests/1/head", cwd=origin).strip()
+    db.execute("UPDATE review SET head_sha = ? WHERE id = ?", ("f" * 40, review_id))
+    db.commit()
+    create_review(db, 1, "new", actual, "agent-a")
+    worker = _worker(tmp_path, db, origin, "/bin/true")
+    worker._api.detail["sha"] = "f" * 40
+
+    assert await worker.process_one() is True
+
+    row = get_review(db, review_id)
+    assert row["status"] == "cancelled"
+    assert row["error"] == f"отменено: в MR новый коммит {actual[:12]}"
+
+
+async def test_review_requeued_after_restart_on_stale_head_is_rebased(
+    tmp_path, db, origin, monkeypatch
+):
+    review_id = _queued_review(db, origin)
+    db.execute("UPDATE review SET status = 'reviewing', attempt = 1 WHERE id = ?", (review_id,))
+    db.commit()
+    requeue_incomplete(db)
+    worker = _worker(tmp_path, db, origin, "/bin/true")
+    worker._api.detail["sha"] = NEW_SHA
+    clones = _spy_clone(monkeypatch)
+
+    assert await worker.process_one() is True
+
+    row = get_review(db, review_id)
+    assert row["status"] == "queued"
+    assert row["head_sha"] == NEW_SHA
+    assert row["not_before"] is not None
+    assert clones == []

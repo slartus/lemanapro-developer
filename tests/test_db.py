@@ -1,4 +1,5 @@
 import sqlite3
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -26,6 +27,7 @@ from mrwatch.db import (
     mr_wants_review,
     poll_state_get,
     poll_state_set,
+    rebase_and_defer_review,
     rebase_review_head,
     requeue_incomplete,
     requeue_review,
@@ -1082,3 +1084,86 @@ def test_requeue_incomplete_requeues_running_questions(conn):
     assert row["status"] == "queued"
     assert row["started_at"] is None
     assert claim_next_question(conn)["id"] == question_id
+
+
+def _delay_sec(row) -> float:
+    not_before = datetime.fromisoformat(row["not_before"].replace("Z", "+00:00"))
+    return (not_before - datetime.now(UTC)).total_seconds()
+
+
+def test_create_review_with_delay(conn):
+    mr_id = _mr_with_reviews(conn)
+    deferred = create_review(conn, mr_id, "push", "a" * 40, "agent-a", delay_sec=120)
+    immediate = create_review(conn, mr_id, "new", "a" * 40, "agent-a")
+
+    assert 110 < _delay_sec(get_review(conn, deferred)) <= 120
+    assert get_review(conn, immediate)["not_before"] is None
+
+
+def test_claim_next_review_waits_for_not_before(conn):
+    mr_id = _mr_with_reviews(conn)
+    deferred = create_review(conn, mr_id, "push", "a" * 40, "agent-a", delay_sec=120)
+
+    assert claim_next_review(conn) is None
+    conn.execute(
+        "UPDATE review SET not_before = '2000-01-01T00:00:00.000Z' WHERE id = ?", (deferred,)
+    )
+    conn.commit()
+    assert claim_next_review(conn)["id"] == deferred
+
+
+def test_supersede_with_delay_defers_rebased_review(conn):
+    mr_id = _mr_with_reviews(conn)
+    queued = create_review(conn, mr_id, "push", "a" * 40, "agent-a", delay_sec=5)
+    active = create_review(conn, mr_id, "new", "a" * 40, "agent-a")
+    _set_status(conn, active, "reviewing")
+
+    result = supersede_reviews(conn, mr_id, "b" * 40, delay_sec=300)
+
+    assert result.rebased == [queued]
+    assert result.cancelled_active == [active]
+    assert 290 < _delay_sec(get_review(conn, queued)) <= 300
+    assert get_review(conn, active)["not_before"] is None
+
+
+def test_retry_review_clears_not_before(conn):
+    mr_id = _mr_with_reviews(conn)
+    review_id = create_review(conn, mr_id, "push", "a" * 40, "agent-a", delay_sec=300)
+    finish_review(conn, review_id, "cancelled", error="x")
+
+    assert retry_review(conn, review_id) is True
+    assert get_review(conn, review_id)["not_before"] is None
+
+
+def test_rebase_and_defer_review(conn):
+    mr_id = _mr_with_reviews(conn)
+    review_id = create_review(conn, mr_id, "new", "a" * 40, "agent-a")
+    conn.execute(
+        "UPDATE review SET extra_instructions = 'focus', attempt = 2, status = 'cloning', "
+        "started_at = 'x' WHERE id = ?",
+        (review_id,),
+    )
+    conn.commit()
+
+    assert rebase_and_defer_review(conn, review_id, "b" * 40, delay_sec=60) is True
+
+    row = get_review(conn, review_id)
+    assert row["status"] == "queued"
+    assert row["head_sha"] == "b" * 40
+    assert row["attempt"] == 0
+    assert row["started_at"] is None
+    assert row["extra_instructions"] == "focus"
+    assert 50 < _delay_sec(row) <= 60
+
+
+def test_rebase_and_defer_review_conflict_and_finished(conn):
+    mr_id = _mr_with_reviews(conn)
+    review_id = create_review(conn, mr_id, "new", "a" * 40, "agent-a")
+    create_review(conn, mr_id, "new", "b" * 40, "agent-a")
+
+    assert rebase_and_defer_review(conn, review_id, "b" * 40) is False
+    assert get_review(conn, review_id)["head_sha"] == "a" * 40
+
+    finish_review(conn, review_id, "done", review_md="ok")
+    assert rebase_and_defer_review(conn, review_id, "c" * 40) is False
+    assert get_review(conn, review_id)["status"] == "done"

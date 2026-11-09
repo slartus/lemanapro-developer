@@ -32,6 +32,7 @@
   <div class="field"><label for="timeout_sec">Таймаут ревью, сек</label><input type="number" id="timeout_sec" value="{{ config.review.timeout_sec }}" min="1" step="1"><div class="err"></div></div>
   <div class="field"><label for="clone_depth">Глубина клона</label><input type="number" id="clone_depth" value="{{ config.review.clone_depth }}" min="1" step="1"><div class="err"></div></div>
   <div class="field"><label for="workspace_ttl_days">TTL workspace, дней</label><input type="number" id="workspace_ttl_days" value="{{ config.review.workspace_ttl_days }}" min="1" step="1"><div class="err"></div></div>
+  <div class="field"><label for="push_debounce_sec">Отсрочка ревью после push, сек</label><input type="number" id="push_debounce_sec" value="{{ config.review.push_debounce_sec }}" min="0" step="1"><div class="err"></div></div>
 </div>
 <p class="muted small" style="margin-bottom:0">gitlab.url, pat_command и opencode.bin редактируются только в config.yaml (требуют рестарта). max_parallel тоже применится после рестарта.</p>
 </div>
@@ -128,14 +129,14 @@ function delRow(btn) {
   btn.closest("tr").remove();
 }
 
-function readInt(id) {
+function readInt(id, min = 1) {
   const input = document.getElementById(id);
   const err = input.parentElement.querySelector(".err");
   const raw = input.value.trim();
   const n = Number(raw);
-  const ok = raw !== "" && Number.isInteger(n) && n >= 1;
+  const ok = raw !== "" && Number.isInteger(n) && n >= min;
   input.classList.toggle("invalid", !ok);
-  err.textContent = ok ? "" : "целое число от 1";
+  err.textContent = ok ? "" : "целое число от " + min;
   return ok ? n : null;
 }
 
@@ -149,6 +150,8 @@ async function save() {
     values[id] = readInt(id);
     if (values[id] === null) valid = false;
   });
+  values.push_debounce_sec = readInt("push_debounce_sec", 0);
+  if (values.push_debounce_sec === null) valid = false;
   const projects = [];
   document.querySelectorAll("#projects tbody tr").forEach(function (tr) {
     const slugInput = tr.querySelector(".wslug");
@@ -167,7 +170,7 @@ async function save() {
     return;
   }
   if (!valid) {
-    setStatus("Исправьте выделенные поля: числа должны быть целыми от 1, проект не может быть пустым", "err");
+    setStatus("Исправьте выделенные поля: числа должны быть целыми от 1 (отсрочка — от 0), проект не может быть пустым", "err");
     return;
   }
   const payload = {
@@ -177,6 +180,7 @@ async function save() {
       timeout_sec: values.timeout_sec,
       clone_depth: values.clone_depth,
       workspace_ttl_days: values.workspace_ttl_days,
+      push_debounce_sec: values.push_debounce_sec,
     },
     projects: projects,
   };

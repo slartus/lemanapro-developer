@@ -472,7 +472,7 @@ async def test_clone_cancel_removes_workspace(tmp_path):
     assert not (tmp_path / "ws").exists()
 
 
-async def test_worker_uses_review_head_sha_when_head_moved(tmp_path, db, origin):
+async def test_worker_requeues_review_on_current_head_when_head_moved(tmp_path, db, origin):
     review_id = _queued_review(db, origin)
     old, new = _advance_mr_head(origin)
     out = '{"sessionID":"s","part":{"type":"text","text":"OK"}}'
@@ -483,8 +483,9 @@ async def test_worker_uses_review_head_sha_when_head_moved(tmp_path, db, origin)
     await worker.process_one()
 
     review = get_review(db, review_id)
-    assert review["status"] == "done"
-    assert review["head_sha"] == old
+    assert review["status"] == "queued"
+    assert review["head_sha"] == new
+    assert review["not_before"] is not None
 
 
 async def test_worker_rebases_review_to_current_head_when_old_sha_gone(tmp_path, db, origin, monkeypatch):
@@ -496,17 +497,19 @@ async def test_worker_rebases_review_to_current_head_when_old_sha_gone(tmp_path,
     out = '{"sessionID":"s","part":{"type":"text","text":"OK"}}'
     bin_path = _fake_opencode(tmp_path, f"#!/bin/sh\nprintf '%s' '{out}'\n")
     worker = _worker(tmp_path, db, origin, bin_path)
+    worker._api.detail["sha"] = "f" * 40
 
     await worker.process_one()
     row = get_review(db, review_id)
     assert row["status"] == "queued"
     assert row["head_sha"] == actual
 
+    worker._api.detail["sha"] = actual
     await worker.process_one()
     assert get_review(db, review_id)["status"] == "done"
 
 
-async def test_worker_head_moved_duplicate_review_errors(tmp_path, db, origin):
+async def test_worker_head_moved_duplicate_review_cancelled(tmp_path, db, origin):
     review_id = _queued_review(db, origin)
     actual = _git("rev-parse", "merge-requests/1/head", cwd=origin).strip()
     db.execute("UPDATE review SET head_sha = ? WHERE id = ?", ("f" * 40, review_id))
@@ -514,12 +517,13 @@ async def test_worker_head_moved_duplicate_review_errors(tmp_path, db, origin):
     other = create_review(db, 1, "new", actual, "agent-a")
     assert other is not None
     worker = _worker(tmp_path, db, origin, "/bin/true")
+    worker._api.detail["sha"] = "f" * 40
 
     await worker.process_one()
 
     row = get_review(db, review_id)
-    assert row["status"] == "error"
-    assert "already exists" in row["error"]
+    assert row["status"] == "cancelled"
+    assert row["error"] == f"отменено: в MR новый коммит {actual[:12]}"
 
 
 def test_rebase_review_head_unique_conflict(conn):
@@ -607,6 +611,17 @@ async def test_settings_same_max_parallel_no_restart_flag(tmp_path, monkeypatch)
     resp, _ = await _post_settings(ctx, tmp_path, monkeypatch, payload, app)
 
     assert resp.headers["location"] == "/settings?saved=1"
+
+
+async def test_settings_saves_push_debounce(tmp_path, monkeypatch):
+    ctx = _app_ctx(tmp_path)
+    payload = {"gitlab": {}, "review": {"push_debounce_sec": 0}, "projects": PROJECTS}
+
+    resp, cfg = await _post_settings(ctx, tmp_path, monkeypatch, payload)
+
+    assert resp.status_code == 303
+    assert "push_debounce_sec: 0" in cfg.read_text(encoding="utf-8")
+    assert ctx.config.review.push_debounce_sec == 0
 
 
 async def test_settings_page_shows_restart_notice(tmp_path, monkeypatch):

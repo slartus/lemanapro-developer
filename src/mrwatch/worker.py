@@ -10,14 +10,17 @@ from pathlib import Path
 from mrwatch.agents import AgentError, validate_agent
 from mrwatch.config import Config, ResolvedPaths
 from mrwatch.db import (
+    DRAFT_CANCEL_ERROR,
     claim_next_question,
     claim_next_review,
     finish_question,
     finish_review,
     get_review,
     mark_reviewing,
+    rebase_and_defer_review,
     rebase_review_head,
     requeue_review,
+    superseded_error,
 )
 from mrwatch.git_ops import (
     BASE_REF,
@@ -31,7 +34,7 @@ from mrwatch.git_ops import (
     remove_workspace,
     run_git,
 )
-from mrwatch.gitlab_client import GitLabClient
+from mrwatch.gitlab_client import GitLabClient, parse_draft
 from mrwatch.review_findings import dump_snippets, extract_snippets
 from mrwatch.opencode_runner import (
     OpencodeError,
@@ -53,6 +56,7 @@ IDLE_SLEEP_SEC = 2.0
 ERROR_PAUSE_SEC = 5.0
 QUESTION_HEAD_GONE_ERROR = "коммит ревью больше недоступен в репозитории"
 QUESTION_CANCELLED_ERROR = "отменено"
+CLOSED_CANCEL_ERROR = "отменено: MR закрыт"
 
 
 class ReviewRegistry:
@@ -191,9 +195,31 @@ class Worker:
             self._requeue_or_fail(review_id, review["attempt"], f"MR head moved: {exc}")
         else:
             finish_review(
-                self._conn, review_id, "error",
-                error=f"MR head moved to {exc.actual[:12]}; a review for it already exists",
+                self._conn, review_id, "cancelled", error=superseded_error(exc.actual)
             )
+
+    def _reconcile_head(self, review: sqlite3.Row, detail: dict) -> bool:
+        current_sha = detail.get("sha")
+        if not current_sha or current_sha == review["head_sha"]:
+            return False
+        review_id = review["id"]
+        if detail.get("state") not in (None, "opened"):
+            error = CLOSED_CANCEL_ERROR
+        elif parse_draft(detail) is True:
+            error = DRAFT_CANCEL_ERROR
+        elif rebase_and_defer_review(
+            self._conn, review_id, current_sha, self._config.review.push_debounce_sec
+        ):
+            logger.info(
+                "review %s: MR head moved to %s before start, requeued",
+                review_id, current_sha[:12],
+            )
+            return True
+        else:
+            error = superseded_error(current_sha)
+        logger.info("review %s: %s", review_id, error)
+        finish_review(self._conn, review_id, "cancelled", error=error)
+        return True
 
     async def _resolve_base_sha(
         self, workspace: Path, detail: dict, diff_refs: dict, head_sha: str
@@ -257,6 +283,8 @@ class Worker:
         except Exception as exc:
             logger.warning("review %s: MR detail fetch failed: %s", review_id, exc)
             self._requeue_or_fail(review_id, review["attempt"], f"MR detail fetch failed: {exc}")
+            return
+        if self._reconcile_head(review, detail):
             return
 
         workspace = (

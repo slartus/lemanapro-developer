@@ -22,6 +22,14 @@ class GitlabApiError(Exception):
         self.message = message
 
 
+def parse_draft(mr: dict[str, Any]) -> bool | None:
+    for key in ("draft", "work_in_progress"):
+        value = mr.get(key)
+        if isinstance(value, bool):
+            return value
+    return None
+
+
 def _origin(url: str) -> tuple[str, str, int | None]:
     parts = urlsplit(url)
     scheme = parts.scheme.lower()

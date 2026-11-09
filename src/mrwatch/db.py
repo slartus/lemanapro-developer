@@ -27,6 +27,20 @@ def utcnow_iso() -> str:
     return datetime.now(UTC).isoformat(timespec="milliseconds").replace("+00:00", "Z")
 
 
+def deferred_iso(delay_sec: float) -> str | None:
+    if delay_sec <= 0:
+        return None
+    return (
+        (datetime.now(UTC) + timedelta(seconds=delay_sec))
+        .isoformat(timespec="milliseconds")
+        .replace("+00:00", "Z")
+    )
+
+
+def superseded_error(new_sha: str) -> str:
+    return f"отменено: в MR новый коммит {new_sha[:12]}"
+
+
 @dataclass(frozen=True)
 class MrUpsertResult:
     mr_id: int
@@ -442,14 +456,15 @@ def create_review(
     trigger: str,
     head_sha: str,
     agent: str,
+    delay_sec: float = 0.0,
 ) -> int | None:
     cursor = conn.execute(
         """
-        INSERT INTO review (mr_id, "trigger", head_sha, status, agent, created_at)
-        VALUES (?, ?, ?, 'queued', ?, ?)
+        INSERT INTO review (mr_id, "trigger", head_sha, status, agent, created_at, not_before)
+        VALUES (?, ?, ?, 'queued', ?, ?, ?)
         ON CONFLICT(mr_id, head_sha, "trigger") DO NOTHING
         """,
-        (mr_id, trigger, head_sha, agent, utcnow_iso()),
+        (mr_id, trigger, head_sha, agent, utcnow_iso(), deferred_iso(delay_sec)),
     )
     conn.commit()
     if cursor.rowcount == 0:
@@ -590,11 +605,14 @@ def _migrate_to_v11(conn: sqlite3.Connection) -> None:
     )
 
 
-def supersede_reviews(conn: sqlite3.Connection, mr_id: int, new_sha: str) -> SupersedeResult:
+def supersede_reviews(
+    conn: sqlite3.Connection, mr_id: int, new_sha: str, delay_sec: float = 0.0
+) -> SupersedeResult:
     cancelled_active: list[int] = []
     rebased: list[int] = []
     cancelled_queued: list[int] = []
-    error = f"отменено: в MR новый коммит {new_sha[:12]}"
+    error = superseded_error(new_sha)
+    not_before = deferred_iso(delay_sec)
     conn.execute("BEGIN IMMEDIATE")
     try:
         rows = conn.execute(
@@ -610,9 +628,9 @@ def supersede_reviews(conn: sqlite3.Connection, mr_id: int, new_sha: str) -> Sup
             if row["status"] == "queued":
                 try:
                     conn.execute(
-                        "UPDATE review SET head_sha = ?, attempt = 0, not_before = NULL "
+                        "UPDATE review SET head_sha = ?, attempt = 0, not_before = ? "
                         "WHERE id = ?",
-                        (new_sha, row["id"]),
+                        (new_sha, not_before, row["id"]),
                     )
                     rebased.append(row["id"])
                     continue
@@ -741,6 +759,26 @@ def rebase_review_head(conn: sqlite3.Connection, review_id: int, head_sha: str) 
     return cursor.rowcount > 0
 
 
+def rebase_and_defer_review(
+    conn: sqlite3.Connection, review_id: int, head_sha: str, delay_sec: float = 0.0
+) -> bool:
+    try:
+        cursor = conn.execute(
+            """
+            UPDATE review
+            SET head_sha = ?, status = 'queued', attempt = 0, not_before = ?,
+                error = NULL, started_at = NULL, finished_at = NULL
+            WHERE id = ? AND status IN ('queued', 'cloning', 'reviewing')
+            """,
+            (head_sha, deferred_iso(delay_sec), review_id),
+        )
+        conn.commit()
+    except sqlite3.IntegrityError:
+        conn.rollback()
+        return False
+    return cursor.rowcount > 0
+
+
 def mark_reviewing(conn: sqlite3.Connection, review_id: int) -> None:
     conn.execute(
         "UPDATE review SET status = 'reviewing' "
@@ -751,13 +789,7 @@ def mark_reviewing(conn: sqlite3.Connection, review_id: int) -> None:
 
 
 def requeue_review(conn: sqlite3.Connection, review_id: int, delay_sec: float = 0.0) -> None:
-    not_before = None
-    if delay_sec > 0:
-        not_before = (
-            (datetime.now(UTC) + timedelta(seconds=delay_sec))
-            .isoformat(timespec="milliseconds")
-            .replace("+00:00", "Z")
-        )
+    not_before = deferred_iso(delay_sec)
     conn.execute(
         """
         UPDATE review
