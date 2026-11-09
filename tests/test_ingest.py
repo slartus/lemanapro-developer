@@ -336,3 +336,14 @@ async def test_start_review_uses_the_current_head_from_gitlab(ctx):
         response = await client.post("/api/mr/10/1/review", headers=H)
     assert response.status_code == 201
     assert get_review(ctx_obj.conn, response.json()["review_id"])["head_sha"] == "c" * 40
+
+
+async def test_start_review_of_an_unknown_closed_mr_says_it_is_not_open(ctx):
+    def gitlab(request):
+        return httpx.Response(200, json=_mr(10, 44, updated_at=NEW) | {"project_id": 10, "state": "merged"})
+
+    app, _ = _review_app(ctx, gitlab)
+    async with _client(app) as client:
+        response = await client.post("/api/mr/10/44/review", headers=H)
+    assert response.status_code == 409
+    assert response.text == "MR не открыт"

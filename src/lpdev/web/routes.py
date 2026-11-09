@@ -270,6 +270,7 @@ async def start_mr_review(request: Request, gitlab_project_id: int, iid: int):
         return PlainTextResponse("проект не настроен для авторевью", status_code=404)
     poller = getattr(request.app.state, "poller", None)
     queued_by_ingest = 0
+    detail = None
     if poller is not None:
         try:
             detail = await ctx.api.get_project_mr(gitlab_project_id, iid)
@@ -279,6 +280,8 @@ async def start_mr_review(request: Request, gitlab_project_id: int, iid: int):
         else:
             queued_by_ingest = poller.ingest([{**detail, "project_id": gitlab_project_id}])
     mr = _find_mr(ctx.conn, project_db_id, iid)
+    if mr is None and detail is not None and detail.get("state") not in (None, "opened"):
+        return PlainTextResponse("MR не открыт", status_code=409)
     if mr is None:
         return PlainTextResponse("MR ещё не загружен, попробуй через минуту", status_code=409)
     active = ctx.conn.execute(

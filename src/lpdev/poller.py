@@ -275,10 +275,10 @@ class Poller:
             except Exception:
                 logger.exception("failed to fetch MR %s/%s, todo kept", gitlab_pid, iid)
                 continue
-            if self._is_older_than_stored(self._project_ids[gitlab_pid], detail):
-                logger.info("todo %s kept: MR %s/%s detail is older than stored", todo_id, gitlab_pid, iid)
-                continue
             try:
+                if self._is_older_than_stored(self._project_ids[gitlab_pid], detail):
+                    logger.info("todo %s kept: MR %s/%s detail is older than stored", todo_id, gitlab_pid, iid)
+                    continue
                 created += self._handle_todo(todo, detail, gitlab_pid)
             except Exception:
                 logger.exception("todo %s (MR %s/%s) failed", todo_id, gitlab_pid, iid)
