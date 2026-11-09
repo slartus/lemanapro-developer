@@ -25,6 +25,8 @@ RUNNER_PATH = Path(__file__).resolve().parents[2] / "radar" / "src" / "runner.mj
 FAST_REFRESH_SEC = 60
 MAX_FAST_REFRESH_SEC = 60 * 60
 STARTUP_DELAY_SEC = 3.0
+MIN_EXTERNAL_WAKE_GAP_SEC = 60.0
+MR_SECTION_IDS = ("reviewing", "assigned", "mentioned", "awaitingApproval", "threads", "authored")
 MAX_RUNNER_OUTPUT_BYTES = 32 * 1024 * 1024
 STDERR_TAIL_CHARS = 500
 
@@ -116,9 +118,30 @@ class RadarScheduler:
         self._wake = asyncio.Event()
         self._fast_since: float | None = None
         self._startup_delay_sec = startup_delay_sec
+        self._known_mr_keys: set[str] | None = None
+        self._last_refresh_started: float | None = None
+        self._scheduled_wake: asyncio.TimerHandle | None = None
 
     def wake(self) -> None:
         self._wake.set()
+
+    def notify_mr_updated(self, gitlab_project_id: int, iid: int) -> None:
+        if self._known_mr_keys is None:
+            self._known_mr_keys = _mr_keys(loads_or_none(_snapshot_dashboard_json(self._conn)))
+        if f"{gitlab_project_id}!{iid}" not in self._known_mr_keys:
+            return
+        if self._scheduled_wake is not None and not self._scheduled_wake.cancelled():
+            return
+        loop = asyncio.get_running_loop()
+        since_last = None if self._last_refresh_started is None else self._clock() - self._last_refresh_started
+        if since_last is None or since_last >= MIN_EXTERNAL_WAKE_GAP_SEC:
+            self.wake()
+            return
+        self._scheduled_wake = loop.call_later(MIN_EXTERNAL_WAKE_GAP_SEC - since_last, self._fire_scheduled_wake)
+
+    def _fire_scheduled_wake(self) -> None:
+        self._scheduled_wake = None
+        self.wake()
 
     async def run(self) -> None:
         if self._startup_delay_sec:
@@ -155,6 +178,7 @@ class RadarScheduler:
         return config.gitlab.url, runner_settings(config.radar)
 
     async def refresh_once(self) -> bool:
+        self._last_refresh_started = self._clock()
         config = self._config_provider()
         source = self._source_of(config)
         snapshot = radar_snapshot_get(self._conn)
@@ -181,6 +205,7 @@ class RadarScheduler:
             logger.warning("radar refresh failed: %s", error)
             radar_snapshot_save_failure(self._conn, utcnow_iso(), error)
             return False
+        self._known_mr_keys = _mr_keys(dashboard)
         radar_snapshot_save_success(
             self._conn,
             str(dashboard.get("fetchedAt") or utcnow_iso()),
@@ -188,6 +213,23 @@ class RadarScheduler:
             json.dumps(result.get("threadCache"), ensure_ascii=False),
         )
         return bool(result.get("activePipelines"))
+
+
+def _snapshot_dashboard_json(conn: sqlite3.Connection) -> str | None:
+    snapshot = radar_snapshot_get(conn)
+    return snapshot["dashboard_json"] if snapshot else None
+
+
+def _mr_keys(dashboard: Any) -> set[str]:
+    sections = dashboard.get("sections") if isinstance(dashboard, dict) else None
+    if not isinstance(sections, dict):
+        return set()
+    return {
+        item["key"]
+        for section in MR_SECTION_IDS
+        for item in sections.get(section) or []
+        if isinstance(item, dict) and item.get("kind") == "mr" and isinstance(item.get("key"), str)
+    }
 
 
 def loads_or_none(value: str | None) -> Any:

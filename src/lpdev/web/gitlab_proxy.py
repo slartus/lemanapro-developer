@@ -36,6 +36,10 @@ ALLOWED_REST_PATHS = tuple(
 )
 FORBIDDEN_GRAPHQL_OPERATIONS = re.compile(r"\b(mutation|subscription)\b")
 ALLOWED_GRAPHQL_KEYS = frozenset({"query", "variables", "operationName"})
+MR_LIST_PATHS = (
+    re.compile(r"^/api/v4/merge_requests$"),
+    re.compile(rf"^/api/v4/projects/{_SEGMENT}/merge_requests$"),
+)
 PASSTHROUGH_HEADERS = (
     "content-type",
     "x-next-page",
@@ -115,13 +119,29 @@ def _read_only_graphql_body(body: bytes) -> bytes | None:
     return json.dumps(clean).encode()
 
 
-async def _forward(request: Request, url: str, content: bytes | None = None, graphql: bool = False) -> Response:
+def _share_merge_requests(request: Request, path: str, content: bytes) -> None:
+    poller = getattr(request.app.state, "poller", None)
+    if poller is None or not any(pattern.match(path) for pattern in MR_LIST_PATHS):
+        return
+    try:
+        items = json.loads(content)
+        if isinstance(items, list):
+            poller.ingest(items)
+    except Exception:
+        logger.exception("gitlab proxy: sharing merge requests with the poller failed")
+
+
+async def _forward(
+    request: Request, url: str, content: bytes | None = None, graphql: bool = False, path: str | None = None
+) -> Response:
     api = request.app.state.ctx.api
     try:
         upstream = await api.forward(request.method, url, content=content, graphql=graphql)
     except GitlabApiError as exc:
         logger.warning("gitlab proxy: %s", exc.message)
         return PlainTextResponse("bad gateway", status_code=502)
+    if path is not None and upstream.status_code == 200:
+        _share_merge_requests(request, path, upstream.content)
     headers = {name: upstream.headers[name] for name in PASSTHROUGH_HEADERS if name in upstream.headers}
     return Response(content=upstream.content, status_code=upstream.status_code, headers=headers)
 
@@ -134,7 +154,7 @@ async def proxy_rest(request: Request, rest: str) -> Response:
     if not _is_allowed_rest_path(path):
         return _forbidden()
     query = request.scope["query_string"].decode("latin-1")
-    return await _forward(request, f"{path}?{query}" if query else path)
+    return await _forward(request, f"{path}?{query}" if query else path, path=path)
 
 
 @router.post(PROXY_PREFIX + "/api/graphql", include_in_schema=False)

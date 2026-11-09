@@ -4,6 +4,7 @@ import asyncio
 import logging
 import re
 import sqlite3
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from urllib.parse import unquote, urlsplit
@@ -56,6 +57,7 @@ class Poller:
         project_ids: dict[int, int],
         work_event: asyncio.Event | None = None,
         registry: ReviewRegistry | None = None,
+        on_mr_updated: Callable[[int, int], None] | None = None,
     ) -> None:
         self._conn = conn
         self._api = api
@@ -65,6 +67,8 @@ class Poller:
         self._registry = registry
         self._me: dict[str, Any] | None = None
         self._wake = asyncio.Event()
+        self._on_mr_updated = on_mr_updated
+        self._seen_updated: dict[tuple[int, int], datetime] = {}
 
     async def run(self) -> None:
         while True:
@@ -134,6 +138,9 @@ class Poller:
         head_sha = mr.get("sha")
         if not head_sha:
             logger.warning("MR %s in project %s skipped: no head sha", mr.get("iid"), project_db_id)
+            return None
+        if self._is_older_than_stored(project_db_id, mr):
+            logger.info("MR %s in project %s skipped: stale data", mr.get("iid"), project_db_id)
             return None
         author = _author(mr)
         return upsert_mr(
@@ -412,8 +419,67 @@ class Poller:
                     created += self._sweep_one(project_db_id, mr)
                 except Exception:
                     logger.exception("sweep: MR %s/%s failed", gitlab_pid, mr.get("iid"))
+                self._note_updated(gitlab_pid, mr, notify=True)
             self._advance_cursor(gitlab_pid, mrs)
         return created, first_error
+
+    def _note_updated(self, gitlab_pid: int, mr: dict[str, Any], notify: bool) -> None:
+        updated = _parse_iso(mr.get("updated_at"))
+        iid = mr.get("iid")
+        if updated is None or not isinstance(iid, int):
+            return
+        key = (gitlab_pid, iid)
+        previous = self._seen_updated.get(key)
+        if previous is not None and updated <= previous:
+            return
+        self._seen_updated[key] = updated
+        if notify and previous is not None and self._on_mr_updated is not None:
+            self._on_mr_updated(gitlab_pid, iid)
+
+    def _stored_and_incoming(
+        self, project_db_id: int, mr: dict[str, Any]
+    ) -> tuple[datetime | None, datetime | None] | None:
+        row = self._conn.execute(
+            "SELECT updated_at FROM mr WHERE project_id = ? AND iid = ?", (project_db_id, mr["iid"])
+        ).fetchone()
+        if row is None:
+            return None
+        return _parse_iso(row["updated_at"]), _parse_iso(mr.get("updated_at"))
+
+    def _is_newer_than_stored(self, project_db_id: int, mr: dict[str, Any]) -> bool:
+        pair = self._stored_and_incoming(project_db_id, mr)
+        if pair is None:
+            return True
+        stored, incoming = pair
+        return incoming is not None and (stored is None or incoming > stored)
+
+    def _is_older_than_stored(self, project_db_id: int, mr: dict[str, Any]) -> bool:
+        pair = self._stored_and_incoming(project_db_id, mr)
+        if pair is None:
+            return False
+        stored, incoming = pair
+        return stored is not None and incoming is not None and incoming < stored
+
+    def ingest(self, mrs: list[Any]) -> int:
+        if self._me is None:
+            return 0
+        created = 0
+        for mr in mrs:
+            if not isinstance(mr, dict) or not isinstance(mr.get("iid"), int) or not isinstance(mr.get("sha"), str):
+                continue
+            gitlab_pid = mr.get("project_id")
+            project_db_id = self._project_ids.get(gitlab_pid)
+            if project_db_id is None or poll_state_get(self._conn, SCAN_DONE_KEY.format(gitlab_pid)) is None:
+                continue
+            try:
+                if self._is_newer_than_stored(project_db_id, mr):
+                    created += self._sweep_one(project_db_id, mr)
+            except Exception:
+                logger.exception("ingest: MR %s/%s failed", gitlab_pid, mr.get("iid"))
+            self._note_updated(gitlab_pid, mr, notify=False)
+        if created and self._work_event is not None:
+            self._work_event.set()
+        return created
 
     def _sweep_one(self, project_db_id: int, mr: dict[str, Any]) -> int:
         result = self._upsert(project_db_id, mr)

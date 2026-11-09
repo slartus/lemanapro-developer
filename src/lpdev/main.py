@@ -180,8 +180,16 @@ def create_app(ctx: AppContext, port: int = DEFAULT_PORT) -> FastAPI:
         cleanup_stale_askpass(tmp_dir)
         work_event = asyncio.Event()
         registry = ReviewRegistry()
+        radar = RadarScheduler(
+            ctx.conn,
+            lambda: ctx.config,
+            api_base=f"http://127.0.0.1:{port}{PROXY_PREFIX}",
+            proxy_secret=app.state.proxy_secret,
+        )
+        app.state.radar = radar
         poller = Poller(
-            ctx.conn, ctx.api, ctx.config, ctx.project_ids, work_event, registry=registry
+            ctx.conn, ctx.api, ctx.config, ctx.project_ids, work_event, registry=registry,
+            on_mr_updated=radar.notify_mr_updated,
         )
         app.state.poller = poller
         app.state.work_event = work_event
@@ -202,13 +210,6 @@ def create_app(ctx: AppContext, port: int = DEFAULT_PORT) -> FastAPI:
         tasks.append(
             asyncio.create_task(question_worker.run(), name="lpdev-question-worker")
         )
-        radar = RadarScheduler(
-            ctx.conn,
-            lambda: ctx.config,
-            api_base=f"http://127.0.0.1:{port}{PROXY_PREFIX}",
-            proxy_secret=app.state.proxy_secret,
-        )
-        app.state.radar = radar
         tasks.append(asyncio.create_task(radar.run(), name="lpdev-radar"))
         tasks.append(asyncio.create_task(_backup_loop(ctx), name="lpdev-backup"))
         for task in tasks:

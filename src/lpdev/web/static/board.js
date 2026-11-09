@@ -123,6 +123,7 @@ const state = {
   finishedBaseline: null,
   userStateVersion: 0,
   forceCheckTimer: null,
+  reviewProjects: new Set(),
 };
 
 const $ = (id) => document.getElementById(id);
@@ -284,11 +285,52 @@ function renderGitlabCell(row) {
   return cell;
 }
 
+async function startReview(row, button) {
+  button.disabled = true;
+  const reviewId = row.watch?.latest_review_id;
+  const [projectId, iid] = row.key.split('!');
+  const url = reviewId ? `/reviews/${Number(reviewId)}/retry` : `/api/mr/${Number(projectId)}/${Number(iid)}/review`;
+  try {
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'lpdev' },
+      body: '{}',
+    });
+    showStatus(response.ok ? { text: 'ревью поставлено в очередь' } : { text: (await response.text()) || `ошибка ${response.status}`, error: true });
+    refresh();
+  } catch {
+    showStatus({ text: 'сервис не отвечает', error: true });
+  } finally {
+    button.disabled = false;
+  }
+}
+
+function reviewButton(row) {
+  const watch = row.watch;
+  const projectId = Number(row.key.split('!')[0]);
+  if (ACTIVE_REVIEW_STATUSES.has(watch?.latest_review_status)) return null;
+  if (!watch?.latest_review_id && !state.reviewProjects.has(projectId)) return null;
+  const rerun = Boolean(watch?.latest_review_id);
+  const title = row.radar?.title ?? watch?.title ?? row.key;
+  const button = el('button', {
+    className: 'icon-btn review-btn',
+    text: rerun ? '↻' : '▶ Ревью',
+    attrs: {
+      type: 'button',
+      title: rerun ? 'Запустить ревью заново' : 'Запустить авторевью',
+      'aria-label': `${rerun ? 'Ревью заново' : 'Запустить ревью'}: ${title}`,
+      'data-focus-id': `review:${row.key}`,
+    },
+  });
+  button.addEventListener('click', () => startReview(row, button));
+  return button;
+}
+
 function renderReviewCell(row) {
   const watch = row.watch;
   const cell = el('td', { className: 'tags review-cell' });
   if (!watch?.latest_review_id) {
-    cell.append(el('span', { className: 'muted', text: '—' }));
+    cell.append(el('span', { className: 'muted', text: '—' }), reviewButton(row) ?? '');
     return cell;
   }
   cell.append(
@@ -304,6 +346,8 @@ function renderReviewCell(row) {
     if (VERDICT_LABELS[watch.verdict]) done.append(el('span', { className: `verdict ${watch.verdict}`, text: VERDICT_LABELS[watch.verdict] }));
     cell.append(done);
   }
+  const button = reviewButton(row);
+  if (button) cell.append(button);
   return cell;
 }
 
@@ -692,6 +736,7 @@ function init() {
   state.mrs = initial.mrs;
   state.radar = initial.radar;
   state.userState = normalizeUserState(initial.userState);
+  state.reviewProjects = new Set(initial.reviewProjects ?? []);
   state.finishedBaseline = finishedReviewMarks(state.mrs);
   $('search').addEventListener('input', (event) => {
     state.search = event.target.value;
