@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% from "_macros.html" import render_rows, snippet_block %}
 {% set active = "" %}
 {% block title %}mr-watch — ревью #{{ review["id"] }}{% endblock %}
 {% block style %}
@@ -33,6 +34,20 @@
   .review-text .snippets.inline { padding: 0 1rem; margin: 0.2rem 0; }
   .siblings a, .siblings strong { margin-right: 0.6rem; white-space: nowrap; }
   #retry-msg { min-height: 1.2em; }
+  .meta dd.pre { white-space: pre-wrap; }
+  .actions details.extra { flex-basis: 100%; }
+  .actions details.extra summary { cursor: pointer; color: var(--muted); font-size: 0.85rem; }
+  .actions details.extra textarea { display: block; width: 100%; margin-top: 0.4rem; }
+  article.qa { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 0.8rem 1rem; margin-bottom: 0.7rem; }
+  article.qa .qa-head { display: flex; gap: 0.6rem; align-items: center; color: var(--muted); margin-bottom: 0.4rem; }
+  article.qa .qa-question { white-space: pre-wrap; overflow-wrap: anywhere; font-weight: 600; margin-bottom: 0.5rem; }
+  article.qa .qa-answer { margin: 0; }
+  article.qa .error-block { margin: 0.4rem 0 0; }
+  details.qa-old { margin-bottom: 0.7rem; }
+  details.qa-old summary { cursor: pointer; margin-bottom: 0.5rem; }
+  .ask textarea { display: block; width: 100%; }
+  .ask-row { display: flex; flex-wrap: wrap; gap: 0.7rem; align-items: center; margin-top: 0.5rem; }
+  #ask-msg { min-height: 1.2em; }
 {% endblock %}
 {% block content %}
 {% set verdict_labels = {"APPROVE": "approve", "APPROVE_WITH_NITS": "approve · nits", "REQUEST_CHANGES": "changes"} %}
@@ -60,6 +75,7 @@
   <dt>Создано</dt><dd><time data-ts="{{ review["created_at"] }}">{{ review["created_at"] }}</time></dd>
   <dt>Завершено</dt><dd>{% if review["finished_at"] %}<time data-ts="{{ review["finished_at"] }}">{{ review["finished_at"] }}</time>{% else %}—{% endif %}</dd>
   <dt>MR</dt><dd>{% set href = mr["web_url"] | safe_url %}{% if href %}<a href="{{ href }}">{{ href }}</a>{% else %}—{% endif %}</dd>
+  {% if review["extra_instructions"] %}<dt>Доп. инструкции</dt><dd class="pre">{{ review["extra_instructions"] }}</dd>{% endif %}
   {% if review["session_id"] %}<dt>Сессия opencode</dt><dd class="muted small">{{ review["session_id"] }}</dd>{% endif %}
 </dl>
 </div>
@@ -75,6 +91,11 @@
 <button id="retry-btn" class="primary" onclick="retry()">Re-review</button>
 {% endif %}
 <span id="retry-msg" class="small" role="status"></span>
+{% if review["status"] in ("error", "done", "cancelled") %}
+<details class="extra"><summary>Доп. инструкции</summary>
+<textarea id="retry-instructions" maxlength="{{ max_instructions_chars }}" rows="3" aria-label="Доп. инструкции к Re-review" placeholder="Например: сфокусируйся на обработке ошибок">{{ review["extra_instructions"] or "" }}</textarea>
+</details>
+{% endif %}
 </div>
 
 {% if siblings | length > 1 %}
@@ -89,15 +110,11 @@
 </p>
 {% endif %}
 
-{% macro snippet_block(sn) %}<details class="snip">
-<summary><span class="sev {{ {"BLOCKER": "crit", "MAJOR": "major", "MINOR": "minor", "NIT": "nit"}.get(sn["severity"], "nit") }}">{{ sn["severity"] }}</span>{{ sn["path"] }}:{{ sn["start"] }}{% if sn["end"] != sn["start"] %}-{{ sn["end"] }}{% endif %}</summary>
-<pre class="code">{% for l in sn["code"].split("\n") %}<span class="cl{% if sn["source"] == "diff" and l.startswith("+") %} add{% elif sn["source"] == "diff" and l.startswith("-") %} del{% endif %}">{{ l }}</span>{% endfor %}</pre>
-</details>{% endmacro %}
 <h2>Результат ревью</h2>
 {% if review["review_md"] %}
 {% if rows | selectattr("snippets") | list %}<p class="small"><button type="button" onclick="toggleSnippets(this)">Развернуть весь код</button></p>
 {% endif %}
-<div class="review-text" id="rt">{% for row in rows %}{% if row["kind"] == "code" %}<div class="code-wrap" style="margin-left: calc(1rem + {{ row["indent"] }}ch)">{% if row["lang"] %}<span class="code-lang">{{ row["lang"] }}</span>{% endif %}<pre class="code-block"><code>{{ row["lines"] | join("\n") }}</code></pre></div>{% else %}<span class="ln{% if row["css"] %} {{ row["css"] }}{% endif %}{% if row["segments"] and not row["segments"][0][1] and row["segments"][0][0].startswith("#") and row["segments"][0][0].lstrip("#").startswith(" ") and (row["segments"][0][0]|length - row["segments"][0][0].lstrip("#")|length) <= 6 %} h{% endif %}">{% for text, is_code in row["segments"] %}{% if is_code %}<code>{{ text }}</code>{% else %}{{ text }}{% endif %}{% endfor %}</span>{% endif %}{% for sn in row["snippets"] %}<div class="snippets inline">{{ snippet_block(sn) }}</div>{% endfor %}{% endfor %}</div>
+<div class="review-text" id="rt">{{ render_rows(rows) }}</div>
 {% elif review["status"] in ("queued", "cloning", "reviewing") %}
 <p class="muted">ревью выполняется… страница обновится автоматически</p>
 {% else %}
@@ -110,6 +127,16 @@
 {{ snippet_block(sn) }}
 {% endfor %}
 </div>
+{% endif %}
+<h2>Вопросы ревьюеру</h2>
+<div id="qa-feed">{% include "_qa.html" %}</div>
+{% if review["status"] == "done" and review["session_id"] %}
+<form id="ask-form" class="ask" onsubmit="ask(event)">
+<textarea id="ask-text" maxlength="{{ max_question_chars }}" rows="4" aria-label="Вопрос ревьюеру" placeholder="Спросить ревьюера (Ctrl/Cmd+Enter — отправить)"></textarea>
+<div class="ask-row"><button id="ask-btn" class="primary" type="submit">Спросить</button><span id="ask-count" class="small muted">0 / {{ max_question_chars }}</span><span id="ask-msg" class="small" role="status"></span></div>
+</form>
+{% else %}
+<p class="muted small">вопросы доступны для завершённого ревью</p>
 {% endif %}
 {% endblock %}
 {% block scripts %}
@@ -132,9 +159,11 @@ async function retry() {
   msg.className = "small muted";
   msg.textContent = "отправляю…";
   try {
+    const instructions = document.getElementById("retry-instructions");
     const r = await fetch("/reviews/{{ review["id"] }}/retry", {
       method: "POST",
-      headers: {"X-Requested-With": "mrwatch"},
+      headers: {"X-Requested-With": "mrwatch", "Content-Type": "application/json"},
+      body: JSON.stringify({instructions: instructions ? instructions.value : ""}),
     });
     if (!r.ok) {
       msg.className = "small";
@@ -151,6 +180,102 @@ async function retry() {
     btn.disabled = false;
   }
 }
+
+let qaTimer = null;
+
+function qaHasActive() {
+  return document.querySelector('#qa-feed article[data-status="queued"], #qa-feed article[data-status="running"]') !== null;
+}
+
+function stopQaPolling() {
+  if (qaTimer !== null) {
+    clearInterval(qaTimer);
+    qaTimer = null;
+  }
+}
+
+async function refreshQa() {
+  try {
+    const r = await fetch("/reviews/{{ review["id"] }}/questions", {cache: "no-store"});
+    if (r.ok) {
+      const feed = document.getElementById("qa-feed");
+      feed.innerHTML = await r.text();
+      MRW.renderTimes(feed);
+    }
+  } catch (e) {}
+  if (!qaHasActive()) stopQaPolling();
+}
+
+function startQaPolling() {
+  if (qaTimer !== null) return;
+  qaTimer = setInterval(function () {
+    if (document.hidden) return;
+    refreshQa();
+  }, 4000);
+}
+
+function askFail(text) {
+  const msg = document.getElementById("ask-msg");
+  msg.className = "small";
+  msg.style.color = "var(--err-fg)";
+  msg.textContent = text;
+}
+
+async function ask(event) {
+  event.preventDefault();
+  const btn = document.getElementById("ask-btn");
+  const text = document.getElementById("ask-text");
+  const msg = document.getElementById("ask-msg");
+  if (btn.disabled) return;
+  if (!text.value.trim()) {
+    askFail("введите вопрос");
+    return;
+  }
+  btn.disabled = true;
+  msg.className = "small muted";
+  msg.style.color = "";
+  msg.textContent = "отправляю…";
+  try {
+    const r = await fetch("/reviews/{{ review["id"] }}/questions", {
+      method: "POST",
+      headers: {"X-Requested-With": "mrwatch", "Content-Type": "application/json"},
+      body: JSON.stringify({question: text.value}),
+    });
+    if (!r.ok) {
+      askFail("ошибка " + r.status + ": " + (await r.text()));
+      return;
+    }
+    text.value = "";
+    updateAskCount();
+    msg.textContent = "";
+    await refreshQa();
+    startQaPolling();
+  } catch (e) {
+    askFail("ошибка сети");
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+function updateAskCount() {
+  const text = document.getElementById("ask-text");
+  const count = document.getElementById("ask-count");
+  if (text && count) count.textContent = text.value.length + " / " + text.maxLength;
+}
+
+(function () {
+  const text = document.getElementById("ask-text");
+  if (text) {
+    text.addEventListener("input", updateAskCount);
+    text.addEventListener("keydown", function (e) {
+      if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
+        e.preventDefault();
+        document.getElementById("ask-form").requestSubmit();
+      }
+    });
+  }
+  if (qaHasActive()) startQaPolling();
+})();
 
 if (ACTIVE_STATUS.includes(CURRENT)) {
   setInterval(async function () {

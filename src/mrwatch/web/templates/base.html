@@ -69,8 +69,9 @@
   button:disabled { opacity: 0.55; cursor: progress; }
   button.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-text); font-weight: 600; }
   button.danger { color: var(--err-fg); }
-  input, select { font: inherit; color: var(--text); background: var(--surface); border: 1px solid var(--border); border-radius: 6px; padding: 0.4rem 0.6rem; }
-  input:focus, select:focus, button:focus-visible { outline: 2px solid var(--link); outline-offset: 1px; }
+  input, select, textarea { font: inherit; color: var(--text); background: var(--surface); border: 1px solid var(--border); border-radius: 6px; padding: 0.4rem 0.6rem; }
+  textarea { resize: vertical; }
+  input:focus, select:focus, textarea:focus, button:focus-visible { outline: 2px solid var(--link); outline-offset: 1px; }
   input.invalid { border-color: #d1242f; }
   .badge { display: inline-block; padding: 0.1rem 0.6rem; border-radius: 999px; font-size: 0.8rem; font-weight: 600; white-space: nowrap; }
   .status.done { background: var(--ok-bg); color: var(--ok-fg); }

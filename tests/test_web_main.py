@@ -613,3 +613,168 @@ async def test_force_check_reschedules_followup_refreshes(ctx):
     body = body[: body.index("\n}\n")]
     assert "scheduleFollowups(FORCE_CHECK_FOLLOWUP_MS)" in body
     assert "if (id === cycle) after();" in text
+
+
+H = {"X-Requested-With": "mrwatch"}
+
+
+def _done(ctx_obj, review_id, session_id="ses_root1"):
+    finish_review(ctx_obj.conn, review_id, "done", review_md="ok", session_id=session_id)
+
+
+async def test_ask_requires_header(ctx):
+    ctx_obj, review_id = ctx
+    _done(ctx_obj, review_id)
+    async with _client(ctx_obj) as client:
+        response = await client.post(f"/reviews/{review_id}/questions", json={"question": "q"})
+    assert response.status_code == 403
+    assert response.text == "forbidden"
+
+
+async def test_ask_validation_errors(ctx):
+    ctx_obj, review_id = ctx
+    _done(ctx_obj, review_id)
+    url = f"/reviews/{review_id}/questions"
+    async with _client(ctx_obj) as client:
+        empty = await client.post(url, headers=H, json={"question": " \x00\x07 \n"})
+        wrong_type = await client.post(url, headers=H, json={"question": 1})
+        not_json = await client.post(url, headers=H, content=b"{oops")
+        too_long = await client.post(url, headers=H, json={"question": "я" * 4001})
+        missing = await client.post("/reviews/999/questions", headers=H, json={"question": "q"})
+    assert empty.status_code == 400
+    assert wrong_type.status_code == 400
+    assert not_json.status_code == 400
+    assert too_long.status_code == 413
+    assert missing.status_code == 404
+    from mrwatch.db import list_questions
+
+    assert list_questions(ctx_obj.conn, review_id) == []
+
+
+async def test_ask_conflicts(ctx):
+    ctx_obj, review_id = ctx
+    url = f"/reviews/{review_id}/questions"
+    async with _client(ctx_obj) as client:
+        not_done = await client.post(url, headers=H, json={"question": "q"})
+        _done(ctx_obj, review_id)
+        first = await client.post(url, headers=H, json={"question": "q"})
+        second = await client.post(url, headers=H, json={"question": "q2"})
+    assert not_done.status_code == 409
+    assert "завершённого" in not_done.text
+    assert first.status_code == 201
+    assert second.status_code == 409
+    assert "обрабатывается" in second.text
+
+
+async def test_ask_creates_normalized_question_and_wakes_worker(ctx):
+    import asyncio
+    import unicodedata
+
+    from mrwatch.db import list_questions
+
+    ctx_obj, review_id = ctx
+    _done(ctx_obj, review_id)
+    app = create_app(ctx_obj)
+    app.state.question_event = asyncio.Event()
+    raw = "  " + unicodedata.normalize("NFD", "й") + "\x00 a\tb\r\nc\x1b  "
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://127.0.0.1:8123"
+    ) as client:
+        response = await client.post(
+            f"/reviews/{review_id}/questions", headers=H, json={"question": raw}
+        )
+    assert response.status_code == 201
+    questions = list_questions(ctx_obj.conn, review_id)
+    assert response.json() == {"id": questions[0]["id"]}
+    assert questions[0]["question"] == "й a\tb\nc"
+    assert app.state.question_event.is_set()
+
+
+async def test_questions_fragment_escapes_and_marks_previous(ctx):
+    from mrwatch.db import claim_next_question, create_question, finish_question, retry_review
+
+    ctx_obj, review_id = ctx
+    conn = ctx_obj.conn
+    _done(ctx_obj, review_id)
+    old = create_question(conn, review_id, "<script>alert(1)</script>")
+    claim_next_question(conn)
+    finish_question(conn, old, "done", answer_md="ответ <img src=x onerror=alert(2)>\n`<b>`")
+    retry_review(conn, review_id)
+    _done(ctx_obj, review_id, session_id="ses_root2")
+    create_question(conn, review_id, "новый")
+    async with _client(ctx_obj) as client:
+        fragment = await client.get(f"/reviews/{review_id}/questions")
+        page = await client.get(f"/reviews/{review_id}")
+        missing = await client.get("/reviews/999/questions")
+    assert fragment.status_code == 200
+    assert fragment.headers["cache-control"] == "no-store"
+    body = fragment.text
+    assert "<script>alert(1)" not in body
+    assert "&lt;script&gt;alert(1)&lt;/script&gt;" in body
+    assert "<img" not in body
+    assert "&lt;img src=x onerror=alert(2)&gt;" in body
+    assert "<code>&lt;b&gt;</code>" in body
+    assert "к предыдущей версии ревью" in body
+    assert body.index("<details") < body.index(f'data-id="{old}"') < body.index("</details>")
+    assert 'data-status="queued"' in body
+    assert "ответ готовится" in body
+    assert 'id="qa-feed"' in page.text
+    assert "&lt;script&gt;alert(1)" in page.text
+    assert missing.status_code == 404
+
+
+async def test_review_page_ask_form_only_for_done_with_session(ctx):
+    ctx_obj, review_id = ctx
+    async with _client(ctx_obj) as client:
+        queued = await client.get(f"/reviews/{review_id}")
+        _done(ctx_obj, review_id)
+        done = await client.get(f"/reviews/{review_id}")
+    assert 'id="ask-form"' not in queued.text
+    assert "вопросы доступны для завершённого ревью" in queued.text
+    assert 'id="ask-form"' in done.text
+    assert 'maxlength="4000"' in done.text
+
+
+async def test_api_review_exposes_questions_without_text(ctx):
+    from mrwatch.db import create_question
+
+    ctx_obj, review_id = ctx
+    _done(ctx_obj, review_id)
+    question_id = create_question(ctx_obj.conn, review_id, "секретный текст")
+    async with _client(ctx_obj) as client:
+        response = await client.get(f"/api/reviews/{review_id}")
+    assert response.json()["questions"] == [{"id": question_id, "status": "queued"}]
+    assert "секретный" not in response.text
+
+
+async def test_retry_with_instructions(ctx):
+    from mrwatch.db import get_review
+
+    ctx_obj, review_id = ctx
+    _done(ctx_obj, review_id)
+    url = f"/reviews/{review_id}/retry"
+    async with _client(ctx_obj) as client:
+        too_long = await client.post(url, headers=H, json={"instructions": "x" * 2001})
+        bad = await client.post(url, headers=H, json={"instructions": 5})
+        ok = await client.post(url, headers=H, json={"instructions": "  смотри <b>SQL</b>\x00 "})
+        _done(ctx_obj, review_id)
+        page = await client.get(f"/reviews/{review_id}")
+    assert too_long.status_code == 413
+    assert bad.status_code == 400
+    assert ok.status_code == 303
+    assert get_review(ctx_obj.conn, review_id)["extra_instructions"] == "смотри <b>SQL</b>"
+    assert "Доп. инструкции" in page.text
+    assert "смотри &lt;b&gt;SQL&lt;/b&gt;" in page.text
+    assert "<b>SQL</b>" not in page.text
+
+
+async def test_retry_blocked_by_active_question(ctx):
+    from mrwatch.db import create_question, get_review
+
+    ctx_obj, review_id = ctx
+    _done(ctx_obj, review_id)
+    create_question(ctx_obj.conn, review_id, "q")
+    async with _client(ctx_obj) as client:
+        response = await client.post(f"/reviews/{review_id}/retry", headers=H)
+    assert response.status_code == 409
+    assert get_review(ctx_obj.conn, review_id)["status"] == "done"

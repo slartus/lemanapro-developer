@@ -8,13 +8,20 @@ from mrwatch.db import (
     MAX_REVIEW_MD_LENGTH,
     backup,
     cancel_draft_reviews,
+    MAX_QUESTIONS_PER_REVIEW,
+    claim_next_question,
     claim_next_review,
     connect,
+    create_question,
     create_review,
+    finish_question,
     finish_review,
     get_review,
+    has_active_question,
     init_schema,
     list_mrs,
+    list_questions,
+    question_rejection_reason,
     mark_reviewing,
     mr_wants_review,
     poll_state_get,
@@ -359,7 +366,7 @@ def test_migration_v1_to_v2_adds_severity_columns(tmp_path):
     assert {"crit_count", "major_count", "minor_count", "nit_count"} <= columns
     mr_columns = {r[1] for r in conn.execute("PRAGMA table_info(mr)")}
     assert "author_name" in mr_columns
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == 10
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 11
     assert "my_roles" in mr_columns
     conn.close()
 
@@ -398,7 +405,7 @@ def test_migration_v5_idempotent_and_keeps_data(tmp_path):
     init_schema(conn)
     _run_migration(conn, 5, _migrate_to_v5)
     init_schema(conn)
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == 10
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 11
     assert conn.execute("SELECT my_roles FROM mr").fetchone()["my_roles"] == "mentioned"
     conn.close()
 
@@ -434,11 +441,11 @@ def test_migration_v6_adds_is_draft_and_is_idempotent(tmp_path):
     columns = {r[1]: r for r in conn.execute("PRAGMA table_info(mr)")}
     assert columns["is_draft"][3] == 1
     assert columns["is_draft"][4] == "0"
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == 10
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 11
     conn.execute("PRAGMA user_version = 5")
     conn.commit()
     init_schema(conn)
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == 10
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 11
     conn.close()
 
 
@@ -467,7 +474,7 @@ def test_migration_v7_adds_verdict_backfills_and_is_idempotent(tmp_path):
     init_schema(conn)
     verdicts = [r[0] for r in conn.execute("SELECT verdict FROM review ORDER BY id")]
     assert verdicts == ["REQUEST_CHANGES", "APPROVE_WITH_NITS", None, None, None]
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == 10
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 11
     conn.execute("PRAGMA user_version = 6")
     conn.commit()
     init_schema(conn)
@@ -522,11 +529,11 @@ def test_migration_v8_adds_mention_url_idempotently(tmp_path):
     init_schema(conn)
     columns = {r[1]: r for r in conn.execute("PRAGMA table_info(mr)")}
     assert columns["mention_url"][3] == 0
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == 10
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 11
     conn.execute("PRAGMA user_version = 7")
     conn.commit()
     init_schema(conn)
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == 10
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 11
     conn.close()
 
 
@@ -631,7 +638,7 @@ def _review_indexes(conn):
 
 
 def test_fresh_schema_accepts_cancelled(conn):
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == 10
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 11
     project_id = _sync_projects(conn)[10]
     mr_id = _upsert_mr(conn, project_id).mr_id
     review_id = create_review(conn, mr_id, "new", "a" * 40, "agent-a")
@@ -663,8 +670,10 @@ def test_migration_v9_to_v10_keeps_data_indexes_and_unique(tmp_path):
 
     init_schema(conn)
 
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == 10
-    assert [tuple(r) for r in conn.execute("SELECT * FROM review ORDER BY id")] == before
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 11
+    assert [tuple(r) for r in conn.execute("SELECT * FROM review ORDER BY id")] == [
+        row + (None,) for row in before
+    ]
     assert _review_indexes(conn) == {"idx_review_status", "idx_review_mr"}
     assert create_review(conn, mr_id, "new", "a" * 40, "agent-a") is None
     conn.execute("UPDATE review SET status = 'cancelled' WHERE id = ?", (second,))
@@ -875,3 +884,201 @@ def test_mr_wants_review_by_roles_or_history(conn):
     conn.execute("UPDATE mr SET my_roles = '' WHERE id = ?", (mr_id,))
     create_review(conn, mr_id, "manual", "a" * 40, "agent-a")
     assert mr_wants_review(conn, mr_id)
+
+
+def _done_review(conn, session_id="ses_root1", head_sha="a" * 40, trigger="new"):
+    project_id = _sync_projects(conn)[10]
+    mr_id = _upsert_mr(conn, project_id, head_sha=head_sha).mr_id
+    review_id = create_review(conn, mr_id, trigger, head_sha, "agent-a")
+    finish_review(conn, review_id, "done", review_md="ok", session_id=session_id)
+    return review_id
+
+
+def _question_status(conn, question_id):
+    return conn.execute(
+        "SELECT status FROM review_question WHERE id = ?", (question_id,)
+    ).fetchone()[0]
+
+
+def test_migration_v10_to_v11_keeps_data_and_adds_question_table(tmp_path):
+    conn = connect(tmp_path / "v10.db")
+    init_schema(conn)
+    conn.execute("DROP TABLE review_question")
+    conn.execute("ALTER TABLE review DROP COLUMN extra_instructions")
+    conn.execute("PRAGMA user_version = 10")
+    review_id = _done_review(conn)
+    before = tuple(conn.execute("SELECT * FROM review WHERE id = ?", (review_id,)).fetchone())
+
+    init_schema(conn)
+    init_schema(conn)
+
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 11
+    after = tuple(conn.execute("SELECT * FROM review WHERE id = ?", (review_id,)).fetchone())
+    assert after == before + (None,)
+    assert create_question(conn, review_id, "почему?") is not None
+    indexes = {
+        r[0] for r in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'review_question'"
+            " AND name LIKE 'idx_%'"
+        )
+    }
+    assert indexes == {"idx_review_question_review", "idx_review_question_status"}
+    conn.close()
+
+
+def test_fresh_schema_has_questions_and_instructions(conn):
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 11
+    columns = {r[1] for r in conn.execute("PRAGMA table_info(review)")}
+    assert "extra_instructions" in columns
+    review_id = _done_review(conn)
+    question_id = create_question(conn, review_id, "q")
+    with pytest.raises(sqlite3.IntegrityError):
+        conn.execute("UPDATE review_question SET status = 'bogus' WHERE id = ?", (question_id,))
+
+
+def test_create_question_requires_done_review_with_session(conn):
+    project_id = _sync_projects(conn)[10]
+    mr_id = _upsert_mr(conn, project_id).mr_id
+    review_id = create_review(conn, mr_id, "new", "a" * 40, "agent-a")
+    assert create_question(conn, review_id, "q") is None
+    finish_review(conn, review_id, "error", error="x", session_id="ses_x")
+    assert create_question(conn, review_id, "q") is None
+    _set_status(conn, review_id, "done")
+    conn.execute("UPDATE review SET session_id = NULL WHERE id = ?", (review_id,))
+    assert create_question(conn, review_id, "q") is None
+    assert "сессии" in question_rejection_reason(conn, review_id)
+    assert create_question(conn, 999, "q") is None
+
+
+def test_create_question_snapshots_root_and_blocks_second_active(conn):
+    review_id = _done_review(conn)
+    first = create_question(conn, review_id, "первый")
+    row = list_questions(conn, review_id)[0]
+    assert row["id"] == first
+    assert row["status"] == "queued"
+    assert row["root_session_id"] == "ses_root1"
+    assert create_question(conn, review_id, "второй") is None
+    assert has_active_question(conn, review_id)
+    assert "обрабатывается" in question_rejection_reason(conn, review_id)
+    claim_next_question(conn)
+    assert create_question(conn, review_id, "второй") is None
+    finish_question(conn, first, "done", answer_md="ответ", session_id="ses_f1")
+    assert create_question(conn, review_id, "второй") is not None
+
+
+def test_create_question_limit(conn):
+    review_id = _done_review(conn)
+    for i in range(MAX_QUESTIONS_PER_REVIEW):
+        conn.execute(
+            "INSERT INTO review_question (review_id, question, status, created_at) "
+            "VALUES (?, ?, 'done', 'now')",
+            (review_id, f"q{i}"),
+        )
+    assert create_question(conn, review_id, "лишний") is None
+    assert "лимит" in question_rejection_reason(conn, review_id)
+
+
+def test_claim_next_question_parent_chain(conn):
+    review_id = _done_review(conn)
+    first = create_question(conn, review_id, "1")
+    claimed = claim_next_question(conn)
+    assert claimed["id"] == first
+    assert claimed["status"] == "running"
+    assert claimed["started_at"] is not None
+    assert claimed["parent_session_id"] is None
+    finish_question(conn, first, "done", answer_md="a1", session_id="ses_f1")
+
+    second = create_question(conn, review_id, "2")
+    claimed = claim_next_question(conn)
+    assert claimed["id"] == second
+    assert claimed["parent_session_id"] == "ses_f1"
+    finish_question(conn, second, "error", error="boom")
+
+    third = create_question(conn, review_id, "3")
+    claimed = claim_next_question(conn)
+    assert claimed["id"] == third
+    assert claimed["parent_session_id"] == "ses_f1"
+    assert claim_next_question(conn) is None
+
+
+def test_claim_next_question_ignores_previous_review_version(conn):
+    review_id = _done_review(conn)
+    first = create_question(conn, review_id, "1")
+    claim_next_question(conn)
+    finish_question(conn, first, "done", answer_md="a1", session_id="ses_f1")
+    assert retry_review(conn, review_id)
+    finish_review(conn, review_id, "done", review_md="ok2", session_id="ses_root2")
+
+    second = create_question(conn, review_id, "2")
+    claimed = claim_next_question(conn)
+    assert claimed["id"] == second
+    assert claimed["root_session_id"] == "ses_root2"
+    assert claimed["parent_session_id"] is None
+
+
+def test_finish_question_truncates_and_keeps_cancelled(conn):
+    review_id = _done_review(conn)
+    first = create_question(conn, review_id, "1")
+    claim_next_question(conn)
+    finish_question(conn, first, "done", answer_md="x" * (MAX_REVIEW_MD_LENGTH + 10))
+    answer = list_questions(conn, review_id)[0]["answer_md"]
+    assert len(answer) == MAX_REVIEW_MD_LENGTH + len("...[truncated]")
+
+    second = create_question(conn, review_id, "2")
+    conn.execute("UPDATE review_question SET status = 'cancelled' WHERE id = ?", (second,))
+    finish_question(conn, second, "done", answer_md="late")
+    row = list_questions(conn, review_id)[1]
+    assert row["status"] == "cancelled"
+    assert row["answer_md"] is None
+
+
+def test_retry_review_blocked_by_active_question(conn):
+    review_id = _done_review(conn)
+    question_id = create_question(conn, review_id, "q")
+    assert retry_review(conn, review_id) is False
+    claim_next_question(conn)
+    assert retry_review(conn, review_id) is False
+    assert get_review(conn, review_id)["status"] == "done"
+    finish_question(conn, question_id, "done", answer_md="a")
+    assert retry_review(conn, review_id) is True
+
+
+def test_retry_review_writes_and_clears_instructions(conn):
+    review_id = _done_review(conn)
+    assert retry_review(conn, review_id, "проверь тесты")
+    assert get_review(conn, review_id)["extra_instructions"] == "проверь тесты"
+    finish_review(conn, review_id, "done", review_md="ok", session_id="ses_r")
+    assert retry_review(conn, review_id, "")
+    assert get_review(conn, review_id)["extra_instructions"] is None
+    finish_review(conn, review_id, "done", review_md="ok", session_id="ses_r")
+    retry_review(conn, review_id, "x")
+    finish_review(conn, review_id, "done", review_md="ok", session_id="ses_r")
+    assert retry_review(conn, review_id)
+    assert get_review(conn, review_id)["extra_instructions"] is None
+
+
+def test_instructions_survive_requeue_rebase_and_supersede(conn):
+    review_id = _done_review(conn)
+    retry_review(conn, review_id, "фокус на безопасности")
+    claim_next_review(conn)
+    requeue_review(conn, review_id)
+    claim_next_review(conn)
+    assert rebase_review_head(conn, review_id, "b" * 40)
+    requeue_review(conn, review_id)
+    mr_id = get_review(conn, review_id)["mr_id"]
+    supersede_reviews(conn, mr_id, "c" * 40)
+    review = get_review(conn, review_id)
+    assert review["head_sha"] == "c" * 40
+    assert review["extra_instructions"] == "фокус на безопасности"
+
+
+def test_requeue_incomplete_requeues_running_questions(conn):
+    review_id = _done_review(conn)
+    question_id = create_question(conn, review_id, "1")
+    claim_next_question(conn)
+    assert _question_status(conn, question_id) == "running"
+    requeue_incomplete(conn)
+    row = list_questions(conn, review_id)[0]
+    assert row["status"] == "queued"
+    assert row["started_at"] is None
+    assert claim_next_question(conn)["id"] == question_id
