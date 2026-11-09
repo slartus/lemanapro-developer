@@ -25,8 +25,6 @@ export const STORAGE_KEYS = {
 };
 
 export const UPDATE_REPOSITORY = 'slartus/gitlab-mr-radar';
-export const UPDATE_CHECK_ORIGIN = 'https://api.github.com/*';
-export const UPDATE_CHECK_INTERVAL_MINUTES = 24 * 60;
 
 export function refreshPeriodMinutes(intervalMinutes) {
   return Math.max(MIN_INTERVAL_MINUTES, Number(intervalMinutes) || DEFAULT_INTERVAL_MINUTES);
@@ -64,11 +62,3 @@ export function normalizeBaseUrl(input) {
   }
   return `${url.origin}${url.pathname.replace(/\/+$/, '')}`;
 }
-
-export const hostPermissionPattern = (baseUrl) => `${new URL(baseUrl).origin}/*`;
-
-export const hasHostPermission = (baseUrl) =>
-  chrome.permissions.contains({ origins: [hostPermissionPattern(baseUrl)] });
-
-export const requestHostPermission = (baseUrl) =>
-  chrome.permissions.request({ origins: [hostPermissionPattern(baseUrl)] });

@@ -8,6 +8,7 @@ import {
   hasActivePipelines,
   sectionsToSkip,
   tokenProblems,
+  withStableStatuses,
 } from '../src/view.js';
 
 const BASE_URL = 'https://gitlab.example.com';
@@ -148,5 +149,57 @@ describe('tokenProblems', () => {
       'Токен бессрочный — лучше пересоздать его со сроком действия',
       'У токена лишние права: api — достаточно read_api',
     ]);
+  });
+});
+
+describe('withStableStatuses', () => {
+  const mrItem = (key, extra = {}) => ({ key, approvedByMe: false, draft: false, ...extra });
+  const dashboard = (sections, extra = {}) => ({
+    baseUrl: BASE_URL,
+    username: 'me',
+    filters: null,
+    sections: { ...Object.fromEntries(SECTION_IDS.map((id) => [id, []])), ...sections },
+    ...extra,
+  });
+
+  it('keeps my last known review state while GitLab does not report it', () => {
+    const previous = dashboard({
+      reviewing: [mrItem('1', { kind: 'mr', myReviewState: 'reviewed' }), mrItem('2', { kind: 'mr', myReviewState: null })],
+    });
+    const stored = JSON.parse(JSON.stringify(previous));
+    assert.equal(withStableStatuses(stored, dashboard({ reviewing: [mrItem('1', { kind: 'mr' })] })).sections.reviewing[0].myReviewState, 'reviewed');
+    const unknown = withStableStatuses(previous, dashboard({ reviewing: [mrItem('1', { kind: 'mr' }), mrItem('2', { kind: 'mr' })] }));
+    assert.deepEqual(unknown.sections.reviewing.map((item) => item.myReviewState), ['reviewed', null]);
+    const reset = withStableStatuses(
+      unknown,
+      dashboard({ reviewing: [mrItem('1', { kind: 'mr', myReviewState: null }), mrItem('2', { kind: 'mr', myReviewState: null })] }),
+    );
+    assert.deepEqual(reset.sections.reviewing.map((item) => item.myReviewState), [null, null]);
+  });
+
+  it('keeps the stable merge status while GitLab rechecks it', () => {
+    const first = dashboard({ authored: [mrItem('1', { status: 'mergeable' })] });
+    const checking = withStableStatuses(first, dashboard({ authored: [mrItem('1', { status: 'checking' })] }));
+    assert.equal(checking.sections.authored[0].status, 'mergeable');
+    const legacy = dashboard({ authored: [mrItem('1', { status: 'can_be_merged' })] });
+    const second = withStableStatuses(legacy, dashboard({ authored: [mrItem('1', { status: 'cannot_be_merged_recheck' })] }));
+    const third = withStableStatuses(second, dashboard({ authored: [mrItem('1', { status: 'unchecked' })] }));
+    assert.equal(third.sections.authored[0].status, 'can_be_merged');
+  });
+
+  it('keeps a transient status when nothing stable is known or the source changed', () => {
+    const previous = dashboard({ authored: [mrItem('1', { status: 'unchecked' })] });
+    const next = withStableStatuses(
+      previous,
+      dashboard({ authored: [mrItem('1', { status: 'checking' }), mrItem('2', { status: 'checking' })] }),
+    );
+    assert.deepEqual(next.sections.authored.map((item) => item.status), ['checking', 'checking']);
+    const stable = dashboard({ authored: [mrItem('1', { status: 'mergeable' })] });
+    const checking = dashboard({ authored: [mrItem('1', { status: 'checking' })] });
+    [{ username: 'other' }, { baseUrl: 'https://other.example.com' }, { filters: { selectedProjectIds: [1] } }].forEach(
+      (source) => {
+        assert.equal(withStableStatuses({ ...stable, ...source }, checking).sections.authored[0].status, 'checking');
+      },
+    );
   });
 });

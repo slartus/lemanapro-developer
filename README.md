@@ -5,7 +5,13 @@
 - **авторевью MR** (бывший mr-watch) — описан ниже;
 - **радар MR** (бывший gitlab-mr-radar, каталог `radar/`) — секции «на ревью», «назначены», «упомянули», «ждут апрува», «треды», «мои MR», «возможные MR», «сломан default branch». Логика на JS, запускается бэкендом; тесты — `cd radar && node --test`.
 
-План объединения в одну таблицу MR — в разработке. Перенос данных со старого mr-watch — `deploy/migrate-from-mr-watch.sh`.
+План объединения в одну таблицу MR — в разработке.
+
+### Переход с mr-watch
+
+1. Остановить mr-watch и выгрузить его LaunchAgent: `launchctl unload -w ~/Library/LaunchAgents/ru.slinkin.mr-watch.plist`, plist убрать из `~/Library/LaunchAgents`.
+2. `deploy/migrate-from-mr-watch.sh` — копирует БД (`data/lpdev.db`) и конфиг с новыми путями. Бэкапы mr-watch не переносятся.
+3. `deploy/install.sh`.
 
 ## Авторевью
 
