@@ -6,8 +6,8 @@ import sqlite3
 
 import pytest
 
-from mrwatch import review_findings as rf
-from mrwatch.db import (
+from lpdev import review_findings as rf
+from lpdev.db import (
     SCHEMA_VERSION,
     connect,
     finish_review,
@@ -15,7 +15,7 @@ from mrwatch.db import (
     init_schema,
     retry_review,
 )
-from mrwatch.review_findings import (
+from lpdev.review_findings import (
     extract_snippets,
     load_snippets,
     normalize_path,
@@ -209,7 +209,7 @@ def test_migration_v9_failure_rolls_back(tmp_path, monkeypatch):
     def boom(*a, **k):
         raise sqlite3.OperationalError("boom")
 
-    monkeypatch.setattr("mrwatch.db._migrate_to_v9", boom)
+    monkeypatch.setattr("lpdev.db._migrate_to_v9", boom)
     with pytest.raises(sqlite3.OperationalError):
         init_schema(conn)
     assert conn.execute("PRAGMA user_version").fetchone()[0] == 8
@@ -277,7 +277,7 @@ async def test_worker_extracts_snippets_before_workspace_removal(tmp_path, db, o
         seen.append(os.path.isdir(workspace))
         return original(review_md, diff, workspace)
 
-    import mrwatch.worker as worker_mod
+    import lpdev.worker as worker_mod
 
     worker_mod.extract_snippets = spy
     try:
@@ -322,7 +322,7 @@ def test_read_regular_file_default_guard_blocks_git_dir(tmp_path):
 
 
 def test_severity_counts_ignore_fenced_blocks():
-    from mrwatch.opencode_runner import parse_severity_counts
+    from lpdev.opencode_runner import parse_severity_counts
 
     md = "- [MAJOR] a.py:1 — x\n\n```diff\n- [MAJOR] fix\n```\n"
     assert parse_severity_counts(md) == (0, 1, 0, 0)
@@ -362,7 +362,7 @@ def test_parse_diff_hunks_foreign_file_body_not_parsed_as_header():
 
 
 def test_severity_counts_truncate_oversized_review():
-    from mrwatch.opencode_runner import parse_severity_counts
+    from lpdev.opencode_runner import parse_severity_counts
 
     head = "- [MAJOR] a.py:1 — x\n- [NIT] b.py:2 — y\n"
     md = head + "z" * rf.MAX_PARSE_INPUT_CHARS + "\n- [BLOCKER] c.py:3 — tail\n"

@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from mrwatch.opencode_runner import (
+from lpdev.opencode_runner import (
     OpencodeError,
     RunnerEnv,
     build_opencode_argv,
@@ -112,7 +112,7 @@ async def test_run_review_env_isolation(tmp_path, monkeypatch):
     bin_path = _make_fake_opencode(
         tmp_path, f"#!/bin/sh\nenv > {probe}\nprintf '{{\"sessionID\":\"s\"}}'\n"
     )
-    monkeypatch.setenv("MRWATCH_SECRET_TEST", "leak-me")
+    monkeypatch.setenv("LPDEV_SECRET_TEST", "leak-me")
 
     await run_review(
         RunnerEnv(opencode_bin=bin_path), workspace, "reviewer", "p", 30,
@@ -120,7 +120,7 @@ async def test_run_review_env_isolation(tmp_path, monkeypatch):
     )
 
     env_text = probe.read_text()
-    assert "MRWATCH_SECRET_TEST" not in env_text
+    assert "LPDEV_SECRET_TEST" not in env_text
     assert "GIT_ASKPASS" not in env_text
 
 

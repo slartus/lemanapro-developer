@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
-from mrwatch.opencode_runner import MAX_VERDICT_INPUT_CHARS, parse_verdict
+from lpdev.opencode_runner import MAX_VERDICT_INPUT_CHARS, parse_verdict
 
 MAX_REVIEW_MD_LENGTH = MAX_VERDICT_INPUT_CHARS
 TRUNCATION_MARKER = "...[truncated]"
@@ -994,7 +994,7 @@ def todo_mark_seen(conn: sqlite3.Connection, todo_id: int) -> None:
 
 def backup(db_path: Path, backup_dir: Path) -> Path:
     backup_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
-    dest = backup_dir / f"mrwatch-{datetime.now(UTC).strftime('%Y%m%d-%H%M%S')}.db"
+    dest = backup_dir / f"lpdev-{datetime.now(UTC).strftime('%Y%m%d-%H%M%S')}.db"
     source = sqlite3.connect(db_path)
     try:
         dest_conn = sqlite3.connect(dest)

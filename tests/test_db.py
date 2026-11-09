@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 
 from helpers import list_reviews
-from mrwatch.db import (
+from lpdev.db import (
     MAX_REVIEW_MD_LENGTH,
     backup,
     cancel_draft_reviews,
@@ -305,7 +305,7 @@ def test_backup_creates_file(conn, tmp_path):
     dest = backup(tmp_path / "test.db", tmp_path / "backups")
     assert isinstance(dest, Path)
     assert dest.is_file()
-    assert dest.name.startswith("mrwatch-")
+    assert dest.name.startswith("lpdev-")
     assert dest.name.endswith(".db")
 
     check = connect(dest)
@@ -374,7 +374,7 @@ def test_migration_v1_to_v2_adds_severity_columns(tmp_path):
 
 
 def test_upsert_mr_stores_author_name(tmp_path):
-    from mrwatch.db import connect, init_schema, sync_projects, upsert_mr
+    from lpdev.db import connect, init_schema, sync_projects, upsert_mr
 
     conn = connect(tmp_path / "t.db")
     init_schema(conn)
@@ -393,7 +393,7 @@ def test_upsert_mr_stores_author_name(tmp_path):
 
 
 def test_migration_v5_idempotent_and_keeps_data(tmp_path):
-    from mrwatch.db import _migrate_to_v5, _run_migration
+    from lpdev.db import _migrate_to_v5, _run_migration
 
     conn = connect(tmp_path / "t.db")
     init_schema(conn)

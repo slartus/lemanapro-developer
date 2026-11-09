@@ -12,15 +12,15 @@ from pathlib import Path
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse, PlainTextResponse
 
-from mrwatch.config import Config, ResolvedPaths, default_config_path, get_pat, load_config, resolve_paths
-from mrwatch.db import backup, connect, init_schema, poll_state_get, requeue_incomplete, sync_projects
-from mrwatch.git_ops import cleanup_old_review_logs, cleanup_old_workspaces, cleanup_stale_askpass
-from mrwatch.gitlab_client import GitLabClient
-from mrwatch.poller import Poller
-from mrwatch.web.routes import router as web_router
-from mrwatch.worker import QuestionWorker, ReviewRegistry, start_workers
+from lpdev.config import Config, ResolvedPaths, default_config_path, get_pat, load_config, resolve_paths
+from lpdev.db import backup, connect, init_schema, poll_state_get, requeue_incomplete, sync_projects
+from lpdev.git_ops import cleanup_old_review_logs, cleanup_old_workspaces, cleanup_stale_askpass
+from lpdev.gitlab_client import GitLabClient
+from lpdev.poller import Poller
+from lpdev.web.routes import router as web_router
+from lpdev.worker import QuestionWorker, ReviewRegistry, start_workers
 
-logger = logging.getLogger("mrwatch")
+logger = logging.getLogger("lpdev")
 
 DEFAULT_PORT = 8123
 BACKUP_INTERVAL_SEC = 86400
@@ -92,7 +92,7 @@ def setup_logging(logs_dir: Path) -> None:
 
 
 def _backup_due(backup_dir: Path, interval_sec: float, now: float | None = None) -> bool:
-    mtimes = [p.stat().st_mtime for p in backup_dir.glob("mrwatch-*.db") if p.is_file()]
+    mtimes = [p.stat().st_mtime for p in backup_dir.glob("lpdev-*.db") if p.is_file()]
     if not mtimes:
         return True
     return (time.time() if now is None else now) - max(mtimes) >= interval_sec
@@ -114,7 +114,7 @@ async def _backup_loop(ctx: AppContext) -> None:
 
 
 def _prune_backups(backup_dir: Path, keep: int) -> None:
-    backups = sorted(backup_dir.glob("mrwatch-*.db"))
+    backups = sorted(backup_dir.glob("lpdev-*.db"))
     for old in backups[:-keep]:
         old.unlink(missing_ok=True)
 
@@ -152,7 +152,7 @@ def create_app(ctx: AppContext, port: int = DEFAULT_PORT) -> FastAPI:
         app.state.work_event = work_event
         worker_count = ctx.config.review.max_parallel
         app.state.worker_count = worker_count
-        tasks = [asyncio.create_task(poller.run(), name="mrwatch-poller")]
+        tasks = [asyncio.create_task(poller.run(), name="lpdev-poller")]
         tasks.extend(start_workers(
             worker_count, ctx.conn, ctx.api, ctx.config,
             ctx.paths, work_event, config_provider=lambda: ctx.config,
@@ -165,9 +165,9 @@ def create_app(ctx: AppContext, port: int = DEFAULT_PORT) -> FastAPI:
             config_provider=lambda: ctx.config, registry=ReviewRegistry(),
         )
         tasks.append(
-            asyncio.create_task(question_worker.run(), name="mrwatch-question-worker")
+            asyncio.create_task(question_worker.run(), name="lpdev-question-worker")
         )
-        tasks.append(asyncio.create_task(_backup_loop(ctx), name="mrwatch-backup"))
+        tasks.append(asyncio.create_task(_backup_loop(ctx), name="lpdev-backup"))
         for task in tasks:
             _supervise(task)
         app.state.tasks = tasks
@@ -181,7 +181,7 @@ def create_app(ctx: AppContext, port: int = DEFAULT_PORT) -> FastAPI:
         ctx.conn.close()
         logger.info("stopped")
 
-    app = FastAPI(title="mr-watch", lifespan=lifespan)
+    app = FastAPI(title="lemanapro-developer", lifespan=lifespan)
     app.state.ctx = ctx
     app.include_router(web_router)
 

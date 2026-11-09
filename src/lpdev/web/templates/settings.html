@@ -1,6 +1,6 @@
 {% extends "base.html" %}
 {% set active = "settings" %}
-{% block title %}mr-watch — настройки{% endblock %}
+{% block title %}lemanapro-developer — настройки{% endblock %}
 {% block style %}
   .form-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 1rem; }
   .field label { display: block; font-size: 0.85rem; color: var(--muted); margin-bottom: 0.25rem; }
@@ -189,7 +189,7 @@ async function save() {
   try {
     const resp = await fetch("/settings", {
       method: "POST",
-      headers: {"Content-Type": "application/json", "X-Requested-With": "mrwatch"},
+      headers: {"Content-Type": "application/json", "X-Requested-With": "lpdev"},
       body: JSON.stringify(payload),
     });
     if (resp.ok) {

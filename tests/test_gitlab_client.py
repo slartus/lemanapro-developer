@@ -4,7 +4,7 @@ from __future__ import annotations
 import httpx
 import pytest
 
-from mrwatch.gitlab_client import _MAX_PAGES, GitLabClient, GitlabApiError
+from lpdev.gitlab_client import _MAX_PAGES, GitLabClient, GitlabApiError
 
 BASE_URL = "https://gitlab.example.com"
 

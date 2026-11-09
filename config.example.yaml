@@ -1,5 +1,5 @@
-# Пример конфига mr-watch.
-# Путь задаёт MRWATCH_CONFIG (launchd: <проект>/config.yaml), без него — ~/.config/mr-watch/config.yaml.
+# Пример конфига lemanapro-developer.
+# Путь задаёт LPDEV_CONFIG (launchd: <проект>/config.yaml), без него — ~/.config/lemanapro-developer/config.yaml.
 # chmod 600: при group/other-writable сервис не стартует, при world-readable — warning.
 # Секретов здесь нет: GitLab PAT читается через pat_command (macOS Keychain).
 # Неизвестные ключи — ошибка валидации.
@@ -59,8 +59,8 @@ opencode:
 
 paths:
   # Файл базы SQLite (каталог создаётся автоматически).
-  db: ~/projects/mr-watch/data/mrwatch.db
+  db: ~/projects/lemanapro-developer/data/lpdev.db
   # Рабочие каталоги клонов.
-  workspaces: ~/projects/mr-watch/workspaces
+  workspaces: ~/projects/lemanapro-developer/workspaces
   # app.log и review-<id>.log.
-  logs: ~/projects/mr-watch/logs
+  logs: ~/projects/lemanapro-developer/logs

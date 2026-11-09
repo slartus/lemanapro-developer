@@ -4,7 +4,7 @@ from pathlib import Path
 
 import yaml
 
-from mrwatch.config import AGENT_NAME_RE
+from lpdev.config import AGENT_NAME_RE
 
 GLOBAL_AGENT_DIRS = (
     Path("~/.config/opencode/agent"),

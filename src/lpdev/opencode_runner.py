@@ -7,7 +7,7 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from mrwatch.review_findings import (
+from lpdev.review_findings import (
     FENCE_OPEN,
     MAX_PARSE_INPUT_CHARS,
     QUOTE_LINE,
@@ -15,7 +15,7 @@ from mrwatch.review_findings import (
     iter_findings,
     split_review_lines,
 )
-from mrwatch.procutil import (
+from lpdev.procutil import (
     OutputLimitExceeded,
     communicate_capped,
     kill_group as _kill_group,

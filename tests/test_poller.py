@@ -7,8 +7,8 @@ from datetime import datetime, timedelta
 import pytest
 
 from helpers import list_reviews
-from mrwatch.config import Config, GitlabConfig, ProjectConfig, ReviewConfig
-from mrwatch.db import (
+from lpdev.config import Config, GitlabConfig, ProjectConfig, ReviewConfig
+from lpdev.db import (
     claim_next_review,
     create_review,
     finish_review,
@@ -18,10 +18,10 @@ from mrwatch.db import (
     poll_state_set,
     sync_projects,
 )
-from mrwatch.gitlab_client import GitlabApiError
-from mrwatch.db import SCAN_DONE_KEY, list_mrs
-from mrwatch.db import MR_CURSOR_KEY, todo_seen_ids
-from mrwatch.poller import Poller, parse_draft
+from lpdev.gitlab_client import GitlabApiError
+from lpdev.db import SCAN_DONE_KEY, list_mrs
+from lpdev.db import MR_CURSOR_KEY, todo_seen_ids
+from lpdev.poller import Poller, parse_draft
 
 CURSOR_KEY = MR_CURSOR_KEY.format(10)
 
@@ -501,7 +501,7 @@ async def test_assigned_todo_role_from_detail(conn):
     ],
 )
 def test_has_mention(text, expected):
-    from mrwatch.poller import _has_mention
+    from lpdev.poller import _has_mention
 
     assert _has_mention(text, "me") is expected
 
@@ -515,7 +515,7 @@ def test_has_mention(text, expected):
     ],
 )
 def test_has_mention_username(text, username, expected):
-    from mrwatch.poller import _has_mention
+    from lpdev.poller import _has_mention
 
     assert _has_mention(text, username) is expected
 
@@ -774,7 +774,7 @@ async def test_mention_url_save_failure_does_not_block_review(conn, monkeypatch)
     def boom(*args, **kwargs):
         raise RuntimeError("db")
 
-    monkeypatch.setattr("mrwatch.poller.set_mention_url", boom)
+    monkeypatch.setattr("lpdev.poller.set_mention_url", boom)
     await _tick_with_target_url(conn, MR_URL + "#note_9")
     assert len(list_reviews(conn)) == 1
     assert todo_seen_ids(conn) == {1}

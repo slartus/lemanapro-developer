@@ -9,10 +9,10 @@ from pathlib import Path
 
 import pytest
 
-import mrwatch.worker as worker_module
-from mrwatch.config import Config, GitlabConfig, PathsConfig, ProjectConfig, ReviewConfig
-from mrwatch.config import resolve_paths
-from mrwatch.db import (
+import lpdev.worker as worker_module
+from lpdev.config import Config, GitlabConfig, PathsConfig, ProjectConfig, ReviewConfig
+from lpdev.config import resolve_paths
+from lpdev.db import (
     claim_next_review,
     create_question,
     create_review,
@@ -24,8 +24,8 @@ from mrwatch.db import (
     sync_projects,
     upsert_mr,
 )
-from mrwatch.opencode_runner import ReviewResult
-from mrwatch.worker import QUESTION_HEAD_GONE_ERROR, QuestionWorker, ReviewRegistry, Worker
+from lpdev.opencode_runner import ReviewResult
+from lpdev.worker import QUESTION_HEAD_GONE_ERROR, QuestionWorker, ReviewRegistry, Worker
 
 NDJSON_OUTPUT = (
     '{"type":"session.started","sessionID":"sess-w1"}\n'
@@ -69,7 +69,7 @@ def _config(tmp_path: Path, opencode_bin: str) -> Config:
         projects=[ProjectConfig(gitlab_project_id=10, slug="g/p", agent="agent-a")],
         review=ReviewConfig(clone_depth=5),
         paths=PathsConfig(
-            db=str(tmp_path / "data" / "mrwatch.db"),
+            db=str(tmp_path / "data" / "lpdev.db"),
             workspaces=str(tmp_path / "workspaces"),
             logs=str(tmp_path / "logs"),
         ),
@@ -158,7 +158,7 @@ async def test_worker_full_success(tmp_path, db, origin):
 
 
 async def test_worker_clone_failure_retries_then_error(tmp_path, db, origin, monkeypatch):
-    monkeypatch.setattr("mrwatch.worker.CLONE_RETRY_BACKOFF_SEC", 0.0)
+    monkeypatch.setattr("lpdev.worker.CLONE_RETRY_BACKOFF_SEC", 0.0)
     review_id = _queued_review(db, origin)
     opencode_bin = _fake_opencode(tmp_path, "#!/bin/sh\ntrue\n")
     worker = _worker(tmp_path, db, origin, opencode_bin)

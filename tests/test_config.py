@@ -1,7 +1,7 @@
 from pydantic import ValidationError
 import pytest
 
-from mrwatch.config import (
+from lpdev.config import (
     Config,
     ConfigError,
     GitlabConfig,
@@ -38,7 +38,7 @@ def test_valid_config(tmp_path):
     assert cfg.review.clone_depth == 50
     assert cfg.review.workspace_ttl_days == 3
     assert cfg.opencode.bin == str(Path.home() / ".opencode" / "bin" / "opencode")
-    assert cfg.paths.db == "~/projects/mr-watch/data/mrwatch.db"
+    assert cfg.paths.db == "~/projects/lemanapro-developer/data/lpdev.db"
 
 
 def test_trailing_slash_stripped():
@@ -116,10 +116,10 @@ def test_get_pat_error_message_contains_no_token():
 
 
 def test_default_config_path_env_override(monkeypatch):
-    monkeypatch.setenv("MRWATCH_CONFIG", "/tmp/custom.yaml")
+    monkeypatch.setenv("LPDEV_CONFIG", "/tmp/custom.yaml")
     assert default_config_path() == Path("/tmp/custom.yaml")
-    monkeypatch.delenv("MRWATCH_CONFIG")
-    assert str(default_config_path()).endswith(".config/mr-watch/config.yaml")
+    monkeypatch.delenv("LPDEV_CONFIG")
+    assert str(default_config_path()).endswith(".config/lemanapro-developer/config.yaml")
 
 
 @pytest.mark.parametrize(

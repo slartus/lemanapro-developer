@@ -6,9 +6,9 @@ from pathlib import Path
 import httpx
 import pytest
 
-from mrwatch.db import get_review
-from mrwatch.git_ops import GitEnv, GitOpsError, clone_for_review
-from mrwatch.main import create_app
+from lpdev.db import get_review
+from lpdev.git_ops import GitEnv, GitOpsError, clone_for_review
+from lpdev.main import create_app
 from tests.test_git_ops import NO_ENV
 from tests.test_worker import (
     NDJSON_OUTPUT,
@@ -49,7 +49,7 @@ async def test_exception_in_processing_ends_in_error_and_cleans_workspace(tmp_pa
     async def boom(*args, **kwargs):
         raise RuntimeError("unexpected")
 
-    monkeypatch.setattr("mrwatch.worker.diff_for_review", boom)
+    monkeypatch.setattr("lpdev.worker.diff_for_review", boom)
 
     assert await worker.process_one() is True
 
@@ -68,7 +68,7 @@ async def test_exception_in_run_review_ends_in_error(tmp_path, db, origin, monke
     async def boom(*args, **kwargs):
         raise ValueError("bad")
 
-    monkeypatch.setattr("mrwatch.worker.run_review", boom)
+    monkeypatch.setattr("lpdev.worker.run_review", boom)
 
     await worker.process_one()
 
@@ -155,7 +155,7 @@ MUTATING_ROUTES = [
 
 
 @pytest.mark.parametrize("path", MUTATING_ROUTES)
-@pytest.mark.parametrize("headers", [{}, {"X-Requested-With": ""}, {"X-Requested-With": "XMLHttpRequest"}, {"X-Requested-With": "MRWATCH"}])
+@pytest.mark.parametrize("headers", [{}, {"X-Requested-With": ""}, {"X-Requested-With": "XMLHttpRequest"}, {"X-Requested-With": "LPDEV"}])
 async def test_mutating_routes_reject_missing_or_wrong_csrf_header(ctx, path, headers):
     ctx_obj, _ = ctx
     app = create_app(ctx_obj)
@@ -172,13 +172,13 @@ async def test_mutating_routes_accept_correct_csrf_header(ctx, path, monkeypatch
     def reject_config(*args, **kwargs):
         raise RuntimeError("config disabled in test")
 
-    monkeypatch.setattr("mrwatch.web.routes.load_config", reject_config)
+    monkeypatch.setattr("lpdev.web.routes.load_config", reject_config)
     ctx_obj, _ = ctx
     app = create_app(ctx_obj)
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=app), base_url="http://127.0.0.1:8123"
     ) as client:
-        response = await client.post(path, headers={"X-Requested-With": "mrwatch"}, json={})
+        response = await client.post(path, headers={"X-Requested-With": "lpdev"}, json={})
     assert not (response.status_code == 403 and response.text == "forbidden")
 
 
@@ -211,7 +211,7 @@ def test_all_post_routes_are_covered_by_csrf_parametrization(ctx):
 async def test_host_variants_do_not_bypass_check(ctx, path, host):
     ctx_obj, _ = ctx
     app = create_app(ctx_obj)
-    headers = {"Host": host, "X-Requested-With": "mrwatch"}
+    headers = {"Host": host, "X-Requested-With": "lpdev"}
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=app), base_url="http://127.0.0.1:8123"
     ) as client:

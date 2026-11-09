@@ -8,9 +8,9 @@ from pathlib import Path
 import httpx
 import pytest
 
-from mrwatch.agents import AgentError, validate_agent
-from mrwatch.config import ConfigError, ProjectConfig, load_config
-from mrwatch.git_ops import (
+from lpdev.agents import AgentError, validate_agent
+from lpdev.config import ConfigError, ProjectConfig, load_config
+from lpdev.git_ops import (
     HARDEN_ARGS,
     GitEnv,
     GitOpsError,
@@ -19,9 +19,9 @@ from mrwatch.git_ops import (
     run_git,
     sanitize_clone,
 )
-from mrwatch.gitlab_client import GitLabClient
-from mrwatch.opencode_runner import RunnerEnv, build_opencode_argv, run_review
-from mrwatch.web.routes import _atomic_write_yaml, _write_backup
+from lpdev.gitlab_client import GitLabClient
+from lpdev.opencode_runner import RunnerEnv, build_opencode_argv, run_review
+from lpdev.web.routes import _atomic_write_yaml, _write_backup
 
 CONFIG_YAML = (
     "gitlab:\n  url: https://gitlab.example.com\n"
@@ -66,7 +66,7 @@ def test_sanitize_fail_closed(tmp_path, monkeypatch):
     ws = tmp_path / "ws"
     ws.mkdir()
     (ws / ".opencode").mkdir()
-    monkeypatch.setattr("mrwatch.git_ops.shutil.rmtree", lambda path: None)
+    monkeypatch.setattr("lpdev.git_ops.shutil.rmtree", lambda path: None)
     with pytest.raises(GitOpsError):
         sanitize_clone(ws)
 
@@ -109,7 +109,7 @@ async def test_diff_uses_no_ext_diff(tmp_path, monkeypatch):
         captured["harden"] = kw.get("harden")
         return "d"
 
-    monkeypatch.setattr("mrwatch.git_ops.run_git", fake_run_git)
+    monkeypatch.setattr("lpdev.git_ops.run_git", fake_run_git)
     assert await diff_for_review(tmp_path, "a" * 40, "b" * 40) == "d"
     assert "--no-ext-diff" in captured["args"] and "--no-textconv" in captured["args"]
     assert captured["harden"] is True
@@ -243,7 +243,7 @@ def test_load_config_foreign_owner(tmp_path, monkeypatch):
     path.write_text(CONFIG_YAML)
     path.chmod(0o600)
     real_uid = os.getuid()
-    monkeypatch.setattr("mrwatch.config.os.getuid", lambda: real_uid + 1)
+    monkeypatch.setattr("lpdev.config.os.getuid", lambda: real_uid + 1)
     with pytest.raises(ConfigError, match="another user"):
         load_config(path)
 

@@ -5,10 +5,10 @@ from pathlib import Path
 
 import pytest
 
-from mrwatch.config import Config, GitlabConfig, PathsConfig, ProjectConfig, ReviewConfig, resolve_paths
-from mrwatch.db import connect, create_review, init_schema, sync_projects, upsert_mr
-from mrwatch.gitlab_client import GitLabClient
-from mrwatch.main import AppContext
+from lpdev.config import Config, GitlabConfig, PathsConfig, ProjectConfig, ReviewConfig, resolve_paths
+from lpdev.db import connect, create_review, init_schema, sync_projects, upsert_mr
+from lpdev.gitlab_client import GitLabClient
+from lpdev.main import AppContext
 
 GIT_TEST_ENV = {
     "PATH": "/usr/bin:/bin",
@@ -47,7 +47,7 @@ def origin(tmp_path: Path) -> Path:
 @pytest.fixture
 def db(tmp_path: Path):
     (tmp_path / "data").mkdir(parents=True, exist_ok=True)
-    conn = connect(tmp_path / "data" / "mrwatch.db")
+    conn = connect(tmp_path / "data" / "lpdev.db")
     conn.execute("PRAGMA foreign_keys=ON")
     init_schema(conn)
     yield conn
@@ -69,7 +69,7 @@ def ctx(tmp_path: Path):
         projects=[ProjectConfig(gitlab_project_id=10, slug="g/p", agent="agent-a")],
         review=ReviewConfig(max_parallel=1),
         paths=PathsConfig(
-            db=str(tmp_path / "data" / "mrwatch.db"),
+            db=str(tmp_path / "data" / "lpdev.db"),
             workspaces=str(tmp_path / "workspaces"),
             logs=str(tmp_path / "logs"),
         ),

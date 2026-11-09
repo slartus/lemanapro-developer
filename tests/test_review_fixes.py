@@ -6,18 +6,18 @@ import time
 import pytest
 
 from helpers import list_reviews
-from mrwatch import main as main_module
-from mrwatch.agents import AgentError, validate_agent
-from mrwatch.db import (
+from lpdev import main as main_module
+from lpdev.agents import AgentError, validate_agent
+from lpdev.db import (
     SCHEMA_VERSION,
     connect,
     init_schema,
     poll_state_get,
     rebase_review_head,
 )
-from mrwatch.git_ops import GitEnv, sanitize_clone
-from mrwatch.opencode_runner import _build_env
-from mrwatch.web.routes import safe_url
+from lpdev.git_ops import GitEnv, sanitize_clone
+from lpdev.opencode_runner import _build_env
+from lpdev.web.routes import safe_url
 
 from tests.test_poller import CURSOR_KEY, StubApi, _config, _make_poller, _mr
 from tests.test_web_main import _client
@@ -143,7 +143,7 @@ async def test_backup_due_logic(tmp_path):
     backups = tmp_path / "backups"
     assert main_module._backup_due(backups, 86400)
     backups.mkdir()
-    f = backups / "mrwatch-1.db"
+    f = backups / "lpdev-1.db"
     f.write_text("x")
     assert not main_module._backup_due(backups, 86400)
     assert main_module._backup_due(backups, 86400, now=time.time() + 90000)
@@ -154,7 +154,7 @@ async def test_backup_loop_waits_when_recent_backup(tmp_path, monkeypatch):
     path = tmp_path / "data" / "m.db"
     path.parent.mkdir()
     (path.parent / "backups").mkdir()
-    (path.parent / "backups" / "mrwatch-1.db").write_text("x")
+    (path.parent / "backups" / "lpdev-1.db").write_text("x")
     c = connect(path)
     init_schema(c)
     ctx_obj = main_module.AppContext(
@@ -164,7 +164,7 @@ async def test_backup_loop_waits_when_recent_backup(tmp_path, monkeypatch):
     await asyncio.sleep(0.3)
     task.cancel()
     c.close()
-    assert len(list((path.parent / "backups").glob("mrwatch-*.db"))) == 1
+    assert len(list((path.parent / "backups").glob("lpdev-*.db"))) == 1
 
 
 async def test_base_sha_uses_diff_refs_when_head_matches(tmp_path, db, origin):
@@ -174,7 +174,7 @@ async def test_base_sha_uses_diff_refs_when_head_matches(tmp_path, db, origin):
 
 
 async def test_base_sha_uses_merge_base_when_head_moved(tmp_path, db, origin):
-    from mrwatch.git_ops import clone_for_review, diff_for_review
+    from lpdev.git_ops import clone_for_review, diff_for_review
 
     bare = tmp_path / "bare.git"
     _git("clone", "-q", "--bare", str(origin), str(bare))
@@ -229,7 +229,7 @@ async def test_settings_has_no_pull_agents(ctx, tmp_path, monkeypatch):
         "gitlab:\n  url: https://gitlab.example.com\n  pat_command: printf tok\n"
         "projects:\n  - gitlab_project_id: 10\n    slug: g/p\n    agent: agent-a\n"
     )
-    monkeypatch.setattr("mrwatch.web.routes._config_path", lambda: cfg)
+    monkeypatch.setattr("lpdev.web.routes._config_path", lambda: cfg)
     async with _client(ctx_obj) as client:
         resp = await client.get("/settings")
     assert "pullAgents" not in resp.text
@@ -257,7 +257,7 @@ def test_failed_migration_rolls_back(tmp_path):
         c.execute("CREATE TABLE tmp_x (a)")
         raise RuntimeError("boom")
 
-    from mrwatch.db import _run_migration
+    from lpdev.db import _run_migration
     with pytest.raises(RuntimeError):
         _run_migration(conn, 4, broken)
     assert conn.execute("PRAGMA user_version").fetchone()[0] == 3

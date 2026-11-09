@@ -7,9 +7,9 @@ import sqlite3
 from collections.abc import Callable
 from pathlib import Path
 
-from mrwatch.agents import AgentError, validate_agent
-from mrwatch.config import Config, ResolvedPaths
-from mrwatch.db import (
+from lpdev.agents import AgentError, validate_agent
+from lpdev.config import Config, ResolvedPaths
+from lpdev.db import (
     DRAFT_CANCEL_ERROR,
     claim_next_question,
     claim_next_review,
@@ -22,7 +22,7 @@ from mrwatch.db import (
     requeue_review,
     superseded_error,
 )
-from mrwatch.git_ops import (
+from lpdev.git_ops import (
     BASE_REF,
     GitEnv,
     GitOpsError,
@@ -34,9 +34,9 @@ from mrwatch.git_ops import (
     remove_workspace,
     run_git,
 )
-from mrwatch.gitlab_client import GitLabClient, parse_draft
-from mrwatch.review_findings import dump_snippets, extract_snippets
-from mrwatch.opencode_runner import (
+from lpdev.gitlab_client import GitLabClient, parse_draft
+from lpdev.review_findings import dump_snippets, extract_snippets
+from lpdev.opencode_runner import (
     OpencodeError,
     RunnerEnv,
     build_review_prompt,
@@ -143,7 +143,7 @@ class Worker:
             return False
         review_id = review["id"]
         task = asyncio.create_task(
-            self._process_review(review), name=f"mrwatch-review-{review_id}"
+            self._process_review(review), name=f"lpdev-review-{review_id}"
         )
         self._registry.register(review_id, task)
         try:
@@ -386,7 +386,7 @@ class QuestionWorker(Worker):
             return False
         question_id = question["id"]
         task = asyncio.create_task(
-            self._process_question(question), name=f"mrwatch-question-{question_id}"
+            self._process_question(question), name=f"lpdev-question-{question_id}"
         )
         self._registry.register(question_id, task)
         try:
@@ -525,4 +525,4 @@ def start_workers(
         )
         for i in range(count)
     ]
-    return [asyncio.create_task(w.run(), name=f"mrwatch-worker-{i}") for i, w in enumerate(workers)]
+    return [asyncio.create_task(w.run(), name=f"lpdev-worker-{i}") for i, w in enumerate(workers)]

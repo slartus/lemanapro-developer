@@ -1,11 +1,11 @@
 #!/bin/zsh
-# Установка mr-watch на Mac: venv, конфиг, launchd.
+# Установка lemanapro-developer на Mac: venv, конфиг, launchd.
 set -euo pipefail
 
-PROJECT_DIR="${PROJECT_DIR:-$HOME/projects/mr-watch}"
+PROJECT_DIR="${PROJECT_DIR:-$HOME/projects/lemanapro-developer}"
 VENV_DIR="$PROJECT_DIR/.venv"
-PLIST_LABEL="ru.slinkin.mr-watch"
-PLIST_SRC="$PROJECT_DIR/deploy/ru.slinkin.mr-watch.plist"
+PLIST_LABEL="ru.slinkin.lemanapro-developer"
+PLIST_SRC="$PROJECT_DIR/deploy/ru.slinkin.lemanapro-developer.plist"
 PLIST_DST="$HOME/Library/LaunchAgents/$PLIST_LABEL.plist"
 CONFIG_DST="$PROJECT_DIR/config.yaml"
 
@@ -30,10 +30,10 @@ if ! security find-generic-password -s mr-watch -a gitlab >/dev/null 2>&1; then
   echo '  security add-generic-password -s mr-watch -a gitlab -w "<GITLAB_PAT>"'
 fi
 
-mkdir -p "$HOME/Library/Logs/mr-watch"
+mkdir -p "$HOME/Library/Logs/lemanapro-developer"
 
 sed -e "s|__PROJECT_DIR__|$PROJECT_DIR|g" -e "s|__HOME__|$HOME|g" "$PLIST_SRC" > "$PLIST_DST"
 launchctl unload "$PLIST_DST" 2>/dev/null || true
 launchctl load "$PLIST_DST"
 sleep 2
-curl -fsS http://127.0.0.1:8123/healthz && echo && echo "mr-watch запущен."
+curl -fsS http://127.0.0.1:8123/healthz && echo && echo "lemanapro-developer запущен."

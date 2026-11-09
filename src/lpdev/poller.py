@@ -8,8 +8,8 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 from urllib.parse import unquote, urlsplit
 
-from mrwatch.config import Config
-from mrwatch.db import (
+from lpdev.config import Config
+from lpdev.db import (
     MENTIONED_ROLE,
     MR_CURSOR_KEY,
     ROLES_BACKFILL_KEY,
@@ -29,8 +29,8 @@ from mrwatch.db import (
     update_mr_roles,
     upsert_mr,
 )
-from mrwatch.gitlab_client import GitLabClient, parse_draft
-from mrwatch.worker import ReviewRegistry
+from lpdev.gitlab_client import GitLabClient, parse_draft
+from lpdev.worker import ReviewRegistry
 
 logger = logging.getLogger(__name__)
 

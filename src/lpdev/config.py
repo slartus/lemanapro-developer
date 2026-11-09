@@ -105,9 +105,9 @@ class OpenCodeConfig(BaseModel):
 class PathsConfig(BaseModel):
     model_config = {"extra": "forbid"}
 
-    db: str = "~/projects/mr-watch/data/mrwatch.db"
-    workspaces: str = "~/projects/mr-watch/workspaces"
-    logs: str = "~/projects/mr-watch/logs"
+    db: str = "~/projects/lemanapro-developer/data/lpdev.db"
+    workspaces: str = "~/projects/lemanapro-developer/workspaces"
+    logs: str = "~/projects/lemanapro-developer/logs"
 
 
 class Config(BaseModel):
@@ -135,10 +135,10 @@ class ResolvedPaths:
 
 
 def default_config_path() -> Path:
-    env_value = os.environ.get("MRWATCH_CONFIG")
+    env_value = os.environ.get("LPDEV_CONFIG")
     if env_value:
         return Path(env_value).expanduser()
-    return Path("~/.config/mr-watch/config.yaml").expanduser()
+    return Path("~/.config/lemanapro-developer/config.yaml").expanduser()
 
 
 def check_config_permissions(path: Path) -> None:

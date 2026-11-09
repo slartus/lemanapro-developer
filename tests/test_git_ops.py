@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from mrwatch.git_ops import (
+from lpdev.git_ops import (
     GitEnv,
     build_clone_args,
     cleanup_old_workspaces,
@@ -87,12 +87,12 @@ async def test_clone_for_review_full_flow(origin, tmp_path):
     content = (workspace / "app.py").read_text()
     assert content == "print('hello')\n"
     assert (workspace / "new.py").exists()
-    assert not (workspace / ".mrwatch-askpass.sh").exists()
+    assert not (workspace / ".lpdev-askpass.sh").exists()
 
 
 async def test_clone_failure_raises(origin, tmp_path):
 
-    from mrwatch.git_ops import GitOpsError
+    from lpdev.git_ops import GitOpsError
 
     tmpdir = tmp_path / "tmp"
     tmpdir.mkdir()
@@ -183,7 +183,7 @@ def test_make_git_env_no_token(tmp_path):
 async def test_askpass_script_contains_command_not_token(tmp_path, monkeypatch):
     import asyncio
 
-    from mrwatch import git_ops
+    from lpdev import git_ops
 
     secret = "glpat-FAKE-SECRET-123"
     pat_command = f"echo {secret}"
@@ -228,7 +228,7 @@ async def test_clone_removes_stale_workspace_before_clone(origin, tmp_path):
 async def test_clone_cancelled_during_sanitize_removes_workspace(origin, tmp_path, monkeypatch):
     import asyncio
 
-    from mrwatch import git_ops
+    from lpdev import git_ops
 
     tmpdir = tmp_path / "tmp"
     tmpdir.mkdir()
@@ -246,7 +246,7 @@ async def test_clone_cancelled_during_sanitize_removes_workspace(origin, tmp_pat
 async def test_clone_cancelled_during_remote_remove_removes_workspace(origin, tmp_path, monkeypatch):
     import asyncio
 
-    from mrwatch import git_ops
+    from lpdev import git_ops
 
     tmpdir = tmp_path / "tmp"
     tmpdir.mkdir()
@@ -268,7 +268,7 @@ async def test_clone_cancel_during_sanitize_removes_workspace_in_thread(origin, 
     import asyncio
     import threading
 
-    from mrwatch import git_ops
+    from lpdev import git_ops
 
     tmpdir = tmp_path / "tmp"
     tmpdir.mkdir()
@@ -296,7 +296,7 @@ async def test_clone_failure_then_cancel_during_discard_propagates_cancel(tmp_pa
     import threading
     import time
 
-    from mrwatch import git_ops
+    from lpdev import git_ops
 
     removing = threading.Event()
     removed = threading.Event()

@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
-from mrwatch.procutil import (
+from lpdev.procutil import (
     OutputLimitExceeded,
     communicate_capped,
     kill_group as _kill_group,
@@ -45,7 +45,7 @@ SANITIZE_NAMES = (
 NESTED_CONTEXT_NAMES = frozenset({"AGENTS.md", "CLAUDE.md", "CONTEXT.md"})
 _ROOT_FORBIDDEN = frozenset(n.casefold() for n in SANITIZE_NAMES)
 _NESTED_FORBIDDEN = frozenset(n.casefold() for n in NESTED_CONTEXT_NAMES)
-BASE_REF = "refs/mrwatch/base"
+BASE_REF = "refs/lpdev/base"
 
 
 class GitOpsError(Exception):

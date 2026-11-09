@@ -5,8 +5,8 @@ import httpx
 import pytest
 import yaml
 
-from mrwatch.db import finish_review
-from mrwatch.main import create_app
+from lpdev.db import finish_review
+from lpdev.main import create_app
 
 
 def _client(ctx_obj) -> httpx.AsyncClient:
@@ -26,7 +26,7 @@ async def test_healthz_ok(ctx):
 
 async def test_healthz_degraded_on_error(ctx):
     ctx_obj, _ = ctx
-    from mrwatch.db import poll_state_set
+    from lpdev.db import poll_state_set
 
     poll_state_set(ctx_obj.conn, "poll_last_error", "boom: 1")
     async with _client(ctx_obj) as client:
@@ -77,18 +77,18 @@ async def test_retry_requires_header(ctx):
     async with _client(ctx_obj) as client:
         forbidden = await client.post(f"/reviews/{review_id}/retry")
         ok = await client.post(
-            f"/reviews/{review_id}/retry", headers={"X-Requested-With": "mrwatch"}
+            f"/reviews/{review_id}/retry", headers={"X-Requested-With": "lpdev"}
         )
     assert forbidden.status_code == 403
     assert ok.status_code == 303
-    from mrwatch.db import get_review
+    from lpdev.db import get_review
 
     assert get_review(ctx_obj.conn, review_id)["status"] == "queued"
 
 
 async def test_index_shows_severity_counts(ctx):
     ctx_obj, review_id = ctx
-    from mrwatch.db import finish_review
+    from lpdev.db import finish_review
 
     finish_review(ctx_obj.conn, review_id, "done", review_md="ok", counts=(1, 2, 0, 3))
     async with _client(ctx_obj) as client:
@@ -121,7 +121,7 @@ projects:
     re_review_on_push: true
 """
     )
-    monkeypatch.setenv("MRWATCH_CONFIG", str(config_path))
+    monkeypatch.setenv("LPDEV_CONFIG", str(config_path))
 
     class FakePoller:
         def __init__(self):
@@ -141,7 +141,7 @@ projects:
         transport=httpx.ASGITransport(app=app), base_url="http://127.0.0.1:8123"
     ) as client:
         response = await client.post(
-            "/force-check", headers={"X-Requested-With": "mrwatch"}
+            "/force-check", headers={"X-Requested-With": "lpdev"}
         )
     assert response.status_code == 303
     assert fake.woke is True
@@ -155,17 +155,17 @@ async def test_force_check_bad_config_400(ctx, monkeypatch, tmp_path):
     ctx_obj, _ = ctx
     bad = tmp_path / "bad.yaml"
     bad.write_text("gitlab: [unclosed\n  :::")
-    monkeypatch.setenv("MRWATCH_CONFIG", str(bad))
+    monkeypatch.setenv("LPDEV_CONFIG", str(bad))
     async with _client(ctx_obj) as client:
         response = await client.post(
-            "/force-check", headers={"X-Requested-With": "mrwatch"}
+            "/force-check", headers={"X-Requested-With": "lpdev"}
         )
     assert response.status_code == 400
 
 
 async def test_settings_page_renders(ctx, tmp_path, monkeypatch):
     ctx_obj, _ = ctx
-    monkeypatch.setenv("MRWATCH_CONFIG", str(tmp_path / "cfg.yaml"))
+    monkeypatch.setenv("LPDEV_CONFIG", str(tmp_path / "cfg.yaml"))
     (tmp_path / "cfg.yaml").write_text(
         "gitlab:\n"
         "  url: https://gitlab.example.com\n"
@@ -184,7 +184,7 @@ async def test_settings_page_renders(ctx, tmp_path, monkeypatch):
 
 async def test_settings_save_requires_header(ctx, tmp_path, monkeypatch):
     ctx_obj, _ = ctx
-    monkeypatch.setenv("MRWATCH_CONFIG", str(tmp_path / "cfg.yaml"))
+    monkeypatch.setenv("LPDEV_CONFIG", str(tmp_path / "cfg.yaml"))
     async with _client(ctx_obj) as client:
         resp = await client.post("/settings", json={})
     assert resp.status_code == 403
@@ -208,7 +208,7 @@ async def _write_config(tmp_path):
 async def test_settings_save_updates_config_and_projects(ctx, tmp_path, monkeypatch):
     ctx_obj, _ = ctx
     cfg = await _write_config(tmp_path)
-    monkeypatch.setenv("MRWATCH_CONFIG", str(cfg))
+    monkeypatch.setenv("LPDEV_CONFIG", str(cfg))
     payload = {
         "gitlab": {"poll_interval_sec": 30},
         "review": {"timeout_sec": 900, "max_parallel": 2, "clone_depth": 50,
@@ -222,7 +222,7 @@ async def test_settings_save_updates_config_and_projects(ctx, tmp_path, monkeypa
     }
     async with _client(ctx_obj) as client:
         resp = await client.post(
-            "/settings", json=payload, headers={"X-Requested-With": "mrwatch"}
+            "/settings", json=payload, headers={"X-Requested-With": "lpdev"}
         )
     assert resp.status_code == 303
     import yaml as _yaml
@@ -239,7 +239,7 @@ async def test_settings_save_updates_config_and_projects(ctx, tmp_path, monkeypa
 async def test_settings_save_invalid_rejected(ctx, tmp_path, monkeypatch):
     ctx_obj, _ = ctx
     cfg = await _write_config(tmp_path)
-    monkeypatch.setenv("MRWATCH_CONFIG", str(cfg))
+    monkeypatch.setenv("LPDEV_CONFIG", str(cfg))
     payload = {
         "gitlab": {"poll_interval_sec": 0},
         "review": {},
@@ -248,7 +248,7 @@ async def test_settings_save_invalid_rejected(ctx, tmp_path, monkeypatch):
     }
     async with _client(ctx_obj) as client:
         resp = await client.post(
-            "/settings", json=payload, headers={"X-Requested-With": "mrwatch"}
+            "/settings", json=payload, headers={"X-Requested-With": "lpdev"}
         )
     assert resp.status_code == 400
     saved = yaml.safe_load(cfg.read_text(encoding="utf-8"))
@@ -268,7 +268,7 @@ class _ProjectResolver:
 async def test_settings_save_resolves_slug_from_url(ctx, tmp_path, monkeypatch):
     ctx_obj, _ = ctx
     cfg = await _write_config(tmp_path)
-    monkeypatch.setenv("MRWATCH_CONFIG", str(cfg))
+    monkeypatch.setenv("LPDEV_CONFIG", str(cfg))
     ctx_obj.api = _ProjectResolver({
         "g/q": {"id": 99, "path_with_namespace": "g/q"},
     })
@@ -284,7 +284,7 @@ async def test_settings_save_resolves_slug_from_url(ctx, tmp_path, monkeypatch):
     }
     async with _client(ctx_obj) as client:
         resp = await client.post(
-            "/settings", json=payload, headers={"X-Requested-With": "mrwatch"}
+            "/settings", json=payload, headers={"X-Requested-With": "lpdev"}
         )
     assert resp.status_code == 303
     saved = yaml.safe_load(cfg.read_text(encoding="utf-8"))
@@ -295,7 +295,7 @@ async def test_settings_save_resolves_slug_from_url(ctx, tmp_path, monkeypatch):
 async def test_settings_save_resolve_failure_400(ctx, tmp_path, monkeypatch):
     ctx_obj, _ = ctx
     cfg = await _write_config(tmp_path)
-    monkeypatch.setenv("MRWATCH_CONFIG", str(cfg))
+    monkeypatch.setenv("LPDEV_CONFIG", str(cfg))
     ctx_obj.api = _ProjectResolver({})
     payload = {
         "gitlab": {"poll_interval_sec": 60},
@@ -307,7 +307,7 @@ async def test_settings_save_resolve_failure_400(ctx, tmp_path, monkeypatch):
     }
     async with _client(ctx_obj) as client:
         resp = await client.post(
-            "/settings", json=payload, headers={"X-Requested-With": "mrwatch"}
+            "/settings", json=payload, headers={"X-Requested-With": "lpdev"}
         )
     assert resp.status_code == 400
     saved = yaml.safe_load(cfg.read_text(encoding="utf-8"))
@@ -315,7 +315,7 @@ async def test_settings_save_resolve_failure_400(ctx, tmp_path, monkeypatch):
 
 
 def test_normalize_slug_variants():
-    from mrwatch.web.routes import _normalize_slug
+    from lpdev.web.routes import _normalize_slug
 
     url = "https://gitlab.example.com"
     assert _normalize_slug("https://gitlab.example.com/g/p/", url) == "g/p"
@@ -340,7 +340,7 @@ class _TreeApi:
 
 async def test_project_agents_returns_only_global_readonly(ctx, monkeypatch):
     ctx_obj, _ = ctx
-    monkeypatch.setattr("mrwatch.web.routes.list_readonly_agents", lambda: ["glob"])
+    monkeypatch.setattr("lpdev.web.routes.list_readonly_agents", lambda: ["glob"])
     ctx_obj.api = _TreeApi({".opencode/agents": [{"type": "blob", "name": "evil.md"}]})
     async with _client(ctx_obj) as client:
         resp = await client.get("/project-agents")
@@ -365,7 +365,7 @@ async def test_settings_save_preserves_unknown_sections(ctx, tmp_path, monkeypat
         "  db: /custom/db.sqlite\n",
         encoding="utf-8",
     )
-    monkeypatch.setenv("MRWATCH_CONFIG", str(cfg))
+    monkeypatch.setenv("LPDEV_CONFIG", str(cfg))
     payload = {
         "gitlab": {"poll_interval_sec": 30},
         "review": {},
@@ -374,7 +374,7 @@ async def test_settings_save_preserves_unknown_sections(ctx, tmp_path, monkeypat
     }
     async with _client(ctx_obj) as client:
         resp = await client.post(
-            "/settings", json=payload, headers={"X-Requested-With": "mrwatch"}
+            "/settings", json=payload, headers={"X-Requested-With": "lpdev"}
         )
     assert resp.status_code == 303
     saved = yaml.safe_load(cfg.read_text(encoding="utf-8"))
@@ -387,12 +387,12 @@ async def test_settings_save_preserves_unknown_sections(ctx, tmp_path, monkeypat
 async def test_settings_bad_body_400(ctx, tmp_path, monkeypatch):
     ctx_obj, _ = ctx
     cfg = await _write_config(tmp_path)
-    monkeypatch.setenv("MRWATCH_CONFIG", str(cfg))
+    monkeypatch.setenv("LPDEV_CONFIG", str(cfg))
     async with _client(ctx_obj) as client:
         resp = await client.post(
             "/settings",
             content=b"not json",
-            headers={"X-Requested-With": "mrwatch", "Content-Type": "application/json"},
+            headers={"X-Requested-With": "lpdev", "Content-Type": "application/json"},
         )
     assert resp.status_code == 400
     saved = yaml.safe_load(cfg.read_text(encoding="utf-8"))
@@ -543,7 +543,7 @@ async def test_foreign_mention_url_not_exposed_or_rendered(ctx):
 
 
 def _seed_updated(conn, project_id, values):
-    from mrwatch.db import upsert_mr
+    from lpdev.db import upsert_mr
 
     ids = {}
     for iid, updated in values.items():
@@ -568,7 +568,7 @@ UPDATED_ORDER_CASES = {
 
 
 async def test_list_mrs_and_api_sorted_by_updated_at(ctx):
-    from mrwatch.db import list_mrs
+    from lpdev.db import list_mrs
 
     ctx_obj, _ = ctx
     ids = _seed_updated(ctx_obj.conn, ctx_obj.project_ids[10], UPDATED_ORDER_CASES)
@@ -616,7 +616,7 @@ async def test_force_check_reschedules_followup_refreshes(ctx):
     assert "if (id === cycle) after();" in text
 
 
-H = {"X-Requested-With": "mrwatch"}
+H = {"X-Requested-With": "lpdev"}
 
 
 def _done(ctx_obj, review_id, session_id="ses_root1"):
@@ -647,7 +647,7 @@ async def test_ask_validation_errors(ctx):
     assert not_json.status_code == 400
     assert too_long.status_code == 413
     assert missing.status_code == 404
-    from mrwatch.db import list_questions
+    from lpdev.db import list_questions
 
     assert list_questions(ctx_obj.conn, review_id) == []
 
@@ -671,7 +671,7 @@ async def test_ask_creates_normalized_question_and_wakes_worker(ctx):
     import asyncio
     import unicodedata
 
-    from mrwatch.db import list_questions
+    from lpdev.db import list_questions
 
     ctx_obj, review_id = ctx
     _done(ctx_obj, review_id)
@@ -692,7 +692,7 @@ async def test_ask_creates_normalized_question_and_wakes_worker(ctx):
 
 
 async def test_questions_fragment_escapes_and_marks_previous(ctx):
-    from mrwatch.db import claim_next_question, create_question, finish_question, retry_review
+    from lpdev.db import claim_next_question, create_question, finish_question, retry_review
 
     ctx_obj, review_id = ctx
     conn = ctx_obj.conn
@@ -737,7 +737,7 @@ async def test_review_page_ask_form_only_for_done_with_session(ctx):
 
 
 async def test_api_review_exposes_questions_without_text(ctx):
-    from mrwatch.db import create_question
+    from lpdev.db import create_question
 
     ctx_obj, review_id = ctx
     _done(ctx_obj, review_id)
@@ -749,7 +749,7 @@ async def test_api_review_exposes_questions_without_text(ctx):
 
 
 async def test_retry_with_instructions(ctx):
-    from mrwatch.db import get_review
+    from lpdev.db import get_review
 
     ctx_obj, review_id = ctx
     _done(ctx_obj, review_id)
@@ -770,7 +770,7 @@ async def test_retry_with_instructions(ctx):
 
 
 async def test_retry_blocked_by_active_question(ctx):
-    from mrwatch.db import create_question, get_review
+    from lpdev.db import create_question, get_review
 
     ctx_obj, review_id = ctx
     _done(ctx_obj, review_id)

@@ -11,9 +11,9 @@ from pathlib import Path
 import httpx
 import pytest
 
-from mrwatch import main as main_module
-from mrwatch import opencode_runner, poller as poller_module, worker as worker_module
-from mrwatch.config import (
+from lpdev import main as main_module
+from lpdev import opencode_runner, poller as poller_module, worker as worker_module
+from lpdev.config import (
     Config,
     GitlabConfig,
     OpenCodeConfig,
@@ -22,7 +22,7 @@ from mrwatch.config import (
     ReviewConfig,
     resolve_paths,
 )
-from mrwatch.db import (
+from lpdev.db import (
     MR_CURSOR_KEY,
     SCAN_DONE_KEY,
     backup,
@@ -42,7 +42,7 @@ from mrwatch.db import (
     todo_seen_ids,
     upsert_mr,
 )
-from mrwatch.git_ops import (
+from lpdev.git_ops import (
     GitEnv,
     GitOpsError,
     HeadMismatchError,
@@ -53,10 +53,10 @@ from mrwatch.git_ops import (
     remove_workspace,
     run_git,
 )
-from mrwatch.gitlab_client import GitlabApiError
-from mrwatch.main import AppContext, create_app
-from mrwatch.opencode_runner import RunnerEnv, run_review
-from mrwatch.poller import Poller
+from lpdev.gitlab_client import GitlabApiError
+from lpdev.main import AppContext, create_app
+from lpdev.opencode_runner import RunnerEnv, run_review
+from lpdev.poller import Poller
 
 from tests.test_poller import StubApi, _config as poller_config, _mr, _detail
 from tests.test_worker import (
@@ -102,7 +102,7 @@ def conn(tmp_path):
 @pytest.fixture
 def db(tmp_path):
     (tmp_path / "data").mkdir(parents=True, exist_ok=True)
-    c = connect(tmp_path / "data" / "mrwatch.db")
+    c = connect(tmp_path / "data" / "lpdev.db")
     init_schema(c)
     yield c
     c.close()
@@ -143,7 +143,7 @@ async def test_backup_loop_writes_file(tmp_path, monkeypatch):
     )
     monkeypatch.setattr(main_module, "BACKUP_INTERVAL_SEC", 0)
     task = asyncio.create_task(main_module._backup_loop(ctx))
-    await _wait_for(lambda: any((path.parent / "backups").glob("mrwatch-*.db")))
+    await _wait_for(lambda: any((path.parent / "backups").glob("lpdev-*.db")))
     task.cancel()
     c.close()
 
@@ -178,7 +178,7 @@ async def test_run_git_cancel_kills_process_group(tmp_path):
 
 
 async def test_run_git_output_limit_kills(tmp_path, monkeypatch):
-    from mrwatch import git_ops
+    from lpdev import git_ops
 
     monkeypatch.setattr(git_ops, "GIT_HARD_LIMIT_BYTES", 10_000)
     pid_file = tmp_path / "pid"
@@ -327,15 +327,15 @@ async def test_supervise_logs_dead_task(caplog):
     async def die():
         raise RuntimeError("kaput")
 
-    task = main_module._supervise(asyncio.create_task(die(), name="mrwatch-test"))
+    task = main_module._supervise(asyncio.create_task(die(), name="lpdev-test"))
     with caplog.at_level("ERROR"):
         await asyncio.gather(task, return_exceptions=True)
         await asyncio.sleep(0)
-    assert any("mrwatch-test" in r.getMessage() and "died" in r.getMessage() for r in caplog.records)
+    assert any("lpdev-test" in r.getMessage() and "died" in r.getMessage() for r in caplog.records)
 
 
 async def test_supervise_ignores_cancelled(caplog):
-    task = main_module._supervise(asyncio.create_task(asyncio.sleep(10), name="mrwatch-c"))
+    task = main_module._supervise(asyncio.create_task(asyncio.sleep(10), name="lpdev-c"))
     await asyncio.sleep(0)
     task.cancel()
     with caplog.at_level("ERROR"):
@@ -350,7 +350,7 @@ def _app_ctx(tmp_path, max_parallel=1):
         projects=[ProjectConfig(gitlab_project_id=10, slug="g/p", agent="agent-a")],
         review=ReviewConfig(max_parallel=max_parallel),
         paths=PathsConfig(
-            db=str(tmp_path / "data" / "mrwatch.db"),
+            db=str(tmp_path / "data" / "lpdev.db"),
             workspaces=str(tmp_path / "workspaces"),
             logs=str(tmp_path / "logs"),
         ),
@@ -359,7 +359,7 @@ def _app_ctx(tmp_path, max_parallel=1):
     c = connect(paths.db)
     init_schema(c)
     mapping = sync_projects(c, [(10, "g/p", "agent-a", False, True)])
-    from mrwatch.gitlab_client import GitLabClient
+    from lpdev.gitlab_client import GitLabClient
 
     return AppContext(
         conn=c, config=config, paths=paths,
@@ -378,9 +378,9 @@ async def test_healthz_503_when_task_dead(tmp_path):
     async def die():
         return None
 
-    dead = asyncio.create_task(die(), name="mrwatch-worker-0")
+    dead = asyncio.create_task(die(), name="lpdev-worker-0")
     await dead
-    alive = asyncio.create_task(asyncio.sleep(30), name="mrwatch-poller")
+    alive = asyncio.create_task(asyncio.sleep(30), name="lpdev-poller")
     app.state.tasks = [dead, alive]
     async with _http(app) as client:
         response = await client.get("/healthz")
@@ -388,14 +388,14 @@ async def test_healthz_503_when_task_dead(tmp_path):
     body = response.json()
     assert response.status_code == 503
     assert body["status"] == "degraded"
-    assert body["dead_tasks"] == ["mrwatch-worker-0"]
+    assert body["dead_tasks"] == ["lpdev-worker-0"]
     assert {"last_poll", "last_error"} <= set(body)
 
 
 async def test_healthz_ok_when_tasks_alive(tmp_path):
     ctx = _app_ctx(tmp_path)
     app = create_app(ctx)
-    alive = asyncio.create_task(asyncio.sleep(30), name="mrwatch-poller")
+    alive = asyncio.create_task(asyncio.sleep(30), name="lpdev-poller")
     app.state.tasks = [alive]
     async with _http(app) as client:
         response = await client.get("/healthz")
@@ -412,7 +412,7 @@ async def test_lifespan_starts_supervised_tasks(tmp_path):
         assert app.state.worker_count == 2
         assert isinstance(app.state.work_event, asyncio.Event)
         assert isinstance(app.state.question_event, asyncio.Event)
-        assert "mrwatch-question-worker" in {t.get_name() for t in app.state.tasks}
+        assert "lpdev-question-worker" in {t.get_name() for t in app.state.tasks}
     assert all(t.done() for t in app.state.tasks)
 
 
@@ -576,11 +576,11 @@ async def _post_settings(ctx, tmp_path, monkeypatch, payload, app=None):
         "projects:\n  - gitlab_project_id: 10\n    slug: g/p\n    agent: agent-a\n",
         encoding="utf-8",
     )
-    monkeypatch.setenv("MRWATCH_CONFIG", str(cfg))
+    monkeypatch.setenv("LPDEV_CONFIG", str(cfg))
     app = app or create_app(ctx)
     async with _http(app) as client:
         return await client.post(
-            "/settings", json=payload, headers={"X-Requested-With": "mrwatch"}
+            "/settings", json=payload, headers={"X-Requested-With": "lpdev"}
         ), cfg
 
 
@@ -632,7 +632,7 @@ async def test_settings_page_shows_restart_notice(tmp_path, monkeypatch):
         "  - gitlab_project_id: 10\n    slug: g/p\n    agent: agent-a\n",
         encoding="utf-8",
     )
-    monkeypatch.setenv("MRWATCH_CONFIG", str(cfg))
+    monkeypatch.setenv("LPDEV_CONFIG", str(cfg))
     async with _http(create_app(ctx)) as client:
         plain = await client.get("/settings?saved=1")
         restart = await client.get("/settings?saved=1&restart=1")
@@ -649,10 +649,10 @@ async def test_settings_save_normalizes_opencode_bin(tmp_path, monkeypatch):
         "opencode:\n  bin: ~/custom/opencode\n",
         encoding="utf-8",
     )
-    monkeypatch.setenv("MRWATCH_CONFIG", str(cfg))
+    monkeypatch.setenv("LPDEV_CONFIG", str(cfg))
     payload = {"gitlab": {}, "review": {}, "projects": PROJECTS}
     async with _http(create_app(ctx)) as client:
-        resp = await client.post("/settings", json=payload, headers={"X-Requested-With": "mrwatch"})
+        resp = await client.post("/settings", json=payload, headers={"X-Requested-With": "lpdev"})
     assert resp.status_code == 303
     assert ctx.config.opencode.bin == str(Path.home() / "custom" / "opencode")
 
@@ -1027,7 +1027,7 @@ def test_review_config_log_ttl_default():
 async def test_retry_unknown_review_404(tmp_path):
     ctx = _app_ctx(tmp_path)
     async with _http(create_app(ctx)) as client:
-        resp = await client.post("/reviews/999/retry", headers={"X-Requested-With": "mrwatch"})
+        resp = await client.post("/reviews/999/retry", headers={"X-Requested-With": "lpdev"})
     assert resp.status_code == 404
 
 
@@ -1040,7 +1040,7 @@ async def test_retry_active_review_409(tmp_path, status):
     ctx.conn.commit()
     async with _http(create_app(ctx)) as client:
         resp = await client.post(
-            f"/reviews/{review_id}/retry", headers={"X-Requested-With": "mrwatch"}
+            f"/reviews/{review_id}/retry", headers={"X-Requested-With": "lpdev"}
         )
     assert resp.status_code == 409
     assert get_review(ctx.conn, review_id)["status"] == status
@@ -1055,7 +1055,7 @@ async def test_retry_wakes_workers(tmp_path):
     app.state.work_event = asyncio.Event()
     async with _http(app) as client:
         resp = await client.post(
-            f"/reviews/{review_id}/retry", headers={"X-Requested-With": "mrwatch"}
+            f"/reviews/{review_id}/retry", headers={"X-Requested-With": "lpdev"}
         )
     assert resp.status_code == 303
     assert app.state.work_event.is_set()
@@ -1067,9 +1067,9 @@ async def test_settings_non_dict_body_400(tmp_path, monkeypatch, body):
     ctx = _app_ctx(tmp_path)
     cfg = tmp_path / "cfg.yaml"
     cfg.write_text("gitlab:\n  url: https://x.example.com\n", encoding="utf-8")
-    monkeypatch.setenv("MRWATCH_CONFIG", str(cfg))
+    monkeypatch.setenv("LPDEV_CONFIG", str(cfg))
     async with _http(create_app(ctx)) as client:
-        resp = await client.post("/settings", json=body, headers={"X-Requested-With": "mrwatch"})
+        resp = await client.post("/settings", json=body, headers={"X-Requested-With": "lpdev"})
     assert resp.status_code == 400
 
 

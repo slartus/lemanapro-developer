@@ -17,9 +17,9 @@ from fastapi import APIRouter, Request
 from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse, RedirectResponse, Response
 from fastapi.templating import Jinja2Templates
 
-from mrwatch.agents import list_readonly_agents
-from mrwatch.config import Config, default_config_path, load_config
-from mrwatch.db import (
+from lpdev.agents import list_readonly_agents
+from lpdev.config import Config, default_config_path, load_config
+from lpdev.db import (
     create_question,
     get_review,
     has_active_question,
@@ -29,8 +29,8 @@ from mrwatch.db import (
     retry_review,
     sync_projects,
 )
-from mrwatch.gitlab_client import GitlabApiError
-from mrwatch.review_findings import layout_review, load_snippets
+from lpdev.gitlab_client import GitlabApiError
+from lpdev.review_findings import layout_review, load_snippets
 
 logger = logging.getLogger(__name__)
 
@@ -174,7 +174,7 @@ async def review_questions(request: Request, review_id: int):
 
 @router.post("/reviews/{review_id}/questions")
 async def review_ask(request: Request, review_id: int):
-    if request.headers.get("x-requested-with") != "mrwatch":
+    if request.headers.get("x-requested-with") != "lpdev":
         return PlainTextResponse("forbidden", status_code=403)
     ctx = _ctx(request)
     if get_review(ctx.conn, review_id) is None:
@@ -200,7 +200,7 @@ async def review_ask(request: Request, review_id: int):
 
 @router.post("/force-check")
 async def force_check(request: Request):
-    if request.headers.get("x-requested-with") != "mrwatch":
+    if request.headers.get("x-requested-with") != "lpdev":
         return PlainTextResponse("forbidden", status_code=403)
     try:
         config = load_config(default_config_path())
@@ -216,7 +216,7 @@ async def force_check(request: Request):
 
 @router.post("/reviews/{review_id}/retry")
 async def review_retry(request: Request, review_id: int):
-    if request.headers.get("x-requested-with") != "mrwatch":
+    if request.headers.get("x-requested-with") != "lpdev":
         return PlainTextResponse("forbidden", status_code=403)
     ctx = _ctx(request)
     review = get_review(ctx.conn, review_id)
@@ -427,7 +427,7 @@ async def project_agents(request: Request):
 
 @router.post("/settings")
 async def settings_save(request: Request):
-    if request.headers.get("x-requested-with") != "mrwatch":
+    if request.headers.get("x-requested-with") != "lpdev":
         return PlainTextResponse("forbidden", status_code=403)
     try:
         body = await request.json()

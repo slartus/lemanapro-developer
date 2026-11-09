@@ -3,11 +3,11 @@
 <plist version="1.0">
 <dict>
     <key>Label</key>
-    <string>ru.slinkin.mr-watch</string>
+    <string>ru.slinkin.lemanapro-developer</string>
     <key>ProgramArguments</key>
     <array>
         <string>__PROJECT_DIR__/.venv/bin/uvicorn</string>
-        <string>mrwatch.main:get_app</string>
+        <string>lpdev.main:get_app</string>
         <string>--factory</string>
         <string>--host</string>
         <string>127.0.0.1</string>
@@ -20,7 +20,7 @@
     <dict>
         <key>PATH</key>
         <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
-        <key>MRWATCH_CONFIG</key>
+        <key>LPDEV_CONFIG</key>
         <string>__PROJECT_DIR__/config.yaml</string>
     </dict>
     <key>RunAtLoad</key>
@@ -28,9 +28,9 @@
     <key>KeepAlive</key>
     <true/>
     <key>StandardOutPath</key>
-    <string>__HOME__/Library/Logs/mr-watch/out.log</string>
+    <string>__HOME__/Library/Logs/lemanapro-developer/out.log</string>
     <key>StandardErrorPath</key>
-    <string>__HOME__/Library/Logs/mr-watch/err.log</string>
+    <string>__HOME__/Library/Logs/lemanapro-developer/err.log</string>
     <key>ProcessType</key>
     <string>Background</string>
 </dict>

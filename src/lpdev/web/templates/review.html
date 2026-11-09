@@ -1,7 +1,7 @@
 {% extends "base.html" %}
 {% from "_macros.html" import render_rows, snippet_block %}
 {% set active = "" %}
-{% block title %}mr-watch — ревью #{{ review["id"] }}{% endblock %}
+{% block title %}lemanapro-developer — ревью #{{ review["id"] }}{% endblock %}
 {% block style %}
   .crumbs { margin-bottom: 0.6rem; }
   .meta { display: grid; grid-template-columns: max-content 1fr; gap: 0.35rem 1.2rem; margin: 0; }
@@ -162,7 +162,7 @@ async function retry() {
     const instructions = document.getElementById("retry-instructions");
     const r = await fetch("/reviews/{{ review["id"] }}/retry", {
       method: "POST",
-      headers: {"X-Requested-With": "mrwatch", "Content-Type": "application/json"},
+      headers: {"X-Requested-With": "lpdev", "Content-Type": "application/json"},
       body: JSON.stringify({instructions: instructions ? instructions.value : ""}),
     });
     if (!r.ok) {
@@ -238,7 +238,7 @@ async function ask(event) {
   try {
     const r = await fetch("/reviews/{{ review["id"] }}/questions", {
       method: "POST",
-      headers: {"X-Requested-With": "mrwatch", "Content-Type": "application/json"},
+      headers: {"X-Requested-With": "lpdev", "Content-Type": "application/json"},
       body: JSON.stringify({question: text.value}),
     });
     if (!r.ok) {

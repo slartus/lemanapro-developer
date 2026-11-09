@@ -4,7 +4,7 @@ import time
 
 import pytest
 
-from mrwatch.review_findings import split_inline_code
+from lpdev.review_findings import split_inline_code
 
 
 @pytest.mark.parametrize(

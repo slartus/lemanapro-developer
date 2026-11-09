@@ -1,6 +1,6 @@
 {% extends "base.html" %}
 {% set active = "index" %}
-{% block title %}mr-watch{% endblock %}
+{% block title %}lemanapro-developer{% endblock %}
 {% block style %}
   .toolbar { display: flex; flex-wrap: wrap; gap: 0.6rem; align-items: center; margin-bottom: 0.9rem; }
   .toolbar input[type="search"] { flex: 1 1 220px; min-width: 0; }
@@ -364,7 +364,7 @@ async function forceCheck() {
   try {
     const r = await fetch("/force-check", {
       method: "POST",
-      headers: {"X-Requested-With": "mrwatch"},
+      headers: {"X-Requested-With": "lpdev"},
     });
     if (r.ok) {
       status.textContent = "готово";
