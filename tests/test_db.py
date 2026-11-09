@@ -14,10 +14,14 @@ from mrwatch.db import (
     get_review,
     init_schema,
     list_mrs,
+    mark_reviewing,
     poll_state_get,
     poll_state_set,
+    rebase_review_head,
     requeue_incomplete,
+    requeue_review,
     retry_review,
+    supersede_reviews,
     sync_projects,
     upsert_mr,
 )
@@ -353,7 +357,7 @@ def test_migration_v1_to_v2_adds_severity_columns(tmp_path):
     assert {"crit_count", "major_count", "minor_count", "nit_count"} <= columns
     mr_columns = {r[1] for r in conn.execute("PRAGMA table_info(mr)")}
     assert "author_name" in mr_columns
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == 9
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 10
     assert "my_roles" in mr_columns
     conn.close()
 
@@ -392,7 +396,7 @@ def test_migration_v5_idempotent_and_keeps_data(tmp_path):
     init_schema(conn)
     _run_migration(conn, 5, _migrate_to_v5)
     init_schema(conn)
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == 9
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 10
     assert conn.execute("SELECT my_roles FROM mr").fetchone()["my_roles"] == "mentioned"
     conn.close()
 
@@ -428,11 +432,11 @@ def test_migration_v6_adds_is_draft_and_is_idempotent(tmp_path):
     columns = {r[1]: r for r in conn.execute("PRAGMA table_info(mr)")}
     assert columns["is_draft"][3] == 1
     assert columns["is_draft"][4] == "0"
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == 9
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 10
     conn.execute("PRAGMA user_version = 5")
     conn.commit()
     init_schema(conn)
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == 9
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 10
     conn.close()
 
 
@@ -461,7 +465,7 @@ def test_migration_v7_adds_verdict_backfills_and_is_idempotent(tmp_path):
     init_schema(conn)
     verdicts = [r[0] for r in conn.execute("SELECT verdict FROM review ORDER BY id")]
     assert verdicts == ["REQUEST_CHANGES", "APPROVE_WITH_NITS", None, None, None]
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == 9
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 10
     conn.execute("PRAGMA user_version = 6")
     conn.commit()
     init_schema(conn)
@@ -516,11 +520,11 @@ def test_migration_v8_adds_mention_url_idempotently(tmp_path):
     init_schema(conn)
     columns = {r[1]: r for r in conn.execute("PRAGMA table_info(mr)")}
     assert columns["mention_url"][3] == 0
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == 9
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 10
     conn.execute("PRAGMA user_version = 7")
     conn.commit()
     init_schema(conn)
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == 9
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 10
     conn.close()
 
 
@@ -575,3 +579,219 @@ def test_retry_review_keeps_agent_when_project_missing(conn):
 
     assert retry_review(conn, review_id) is True
     assert get_review(conn, review_id)["agent"] == "agent-a"
+
+
+V9_REVIEW_DDL = """
+CREATE TABLE review (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    mr_id INTEGER NOT NULL REFERENCES mr(id),
+    "trigger" TEXT NOT NULL CHECK("trigger" IN ('new','push','manual')),
+    head_sha TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'queued'
+        CHECK(status IN ('queued','cloning','reviewing','done','error')),
+    agent TEXT NOT NULL,
+    session_id TEXT,
+    review_md TEXT,
+    exit_code INTEGER,
+    error TEXT,
+    attempt INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL,
+    started_at TEXT,
+    finished_at TEXT,
+    UNIQUE(mr_id, head_sha, "trigger")
+);
+ALTER TABLE review ADD COLUMN crit_count INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE review ADD COLUMN major_count INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE review ADD COLUMN minor_count INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE review ADD COLUMN nit_count INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE review ADD COLUMN not_before TEXT;
+ALTER TABLE review ADD COLUMN verdict TEXT;
+ALTER TABLE review ADD COLUMN snippets_json TEXT;
+CREATE INDEX idx_review_status ON review(status);
+CREATE INDEX idx_review_mr ON review(mr_id);
+"""
+
+
+def _downgrade_review_to_v9(conn):
+    conn.execute("DROP TABLE review")
+    conn.executescript(V9_REVIEW_DDL)
+    conn.execute("PRAGMA user_version = 9")
+    conn.commit()
+
+
+def _review_indexes(conn):
+    return {
+        r[0] for r in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'review' "
+            "AND name LIKE 'idx_%'"
+        )
+    }
+
+
+def test_fresh_schema_accepts_cancelled(conn):
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 10
+    project_id = _sync_projects(conn)[10]
+    mr_id = _upsert_mr(conn, project_id).mr_id
+    review_id = create_review(conn, mr_id, "new", "a" * 40, "agent-a")
+    conn.execute("UPDATE review SET status = 'cancelled' WHERE id = ?", (review_id,))
+    assert get_review(conn, review_id)["status"] == "cancelled"
+    with pytest.raises(sqlite3.IntegrityError):
+        conn.execute("UPDATE review SET status = 'bogus' WHERE id = ?", (review_id,))
+    assert _review_indexes(conn) == {"idx_review_status", "idx_review_mr"}
+
+
+def test_migration_v9_to_v10_keeps_data_indexes_and_unique(tmp_path):
+    conn = connect(tmp_path / "v9.db")
+    init_schema(conn)
+    _downgrade_review_to_v9(conn)
+    project_id = _sync_projects(conn)[10]
+    mr_id = _upsert_mr(conn, project_id).mr_id
+    first = create_review(conn, mr_id, "new", "a" * 40, "agent-a")
+    second = create_review(conn, mr_id, "push", "b" * 40, "agent-a")
+    third = create_review(conn, mr_id, "manual", "c" * 40, "agent-a")
+    finish_review(
+        conn, first, "done", review_md="ok", session_id="s1", exit_code=0,
+        counts=(1, 2, 3, 4), verdict="APPROVE", snippets_json="[]",
+    )
+    conn.execute("UPDATE review SET not_before = 'later' WHERE id = ?", (second,))
+    conn.execute("DELETE FROM review WHERE id = ?", (third,))
+    with pytest.raises(sqlite3.IntegrityError):
+        conn.execute("UPDATE review SET status = 'cancelled' WHERE id = ?", (second,))
+    before = [tuple(r) for r in conn.execute("SELECT * FROM review ORDER BY id")]
+
+    init_schema(conn)
+
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 10
+    assert [tuple(r) for r in conn.execute("SELECT * FROM review ORDER BY id")] == before
+    assert _review_indexes(conn) == {"idx_review_status", "idx_review_mr"}
+    assert create_review(conn, mr_id, "new", "a" * 40, "agent-a") is None
+    conn.execute("UPDATE review SET status = 'cancelled' WHERE id = ?", (second,))
+    assert get_review(conn, second)["status"] == "cancelled"
+    assert create_review(conn, mr_id, "new", "d" * 40, "agent-a") > third
+    tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
+    assert "review_new" not in tables
+    conn.close()
+
+
+def _mr_with_reviews(conn):
+    project_id = _sync_projects(conn)[10]
+    return _upsert_mr(conn, project_id).mr_id
+
+
+def _set_status(conn, review_id, status):
+    conn.execute("UPDATE review SET status = ? WHERE id = ?", (status, review_id))
+
+
+def test_supersede_rebases_queued_review(conn):
+    mr_id = _mr_with_reviews(conn)
+    review_id = create_review(conn, mr_id, "new", "a" * 40, "agent-a")
+    conn.execute(
+        "UPDATE review SET attempt = 2, not_before = '2999-01-01T00:00:00Z' WHERE id = ?",
+        (review_id,),
+    )
+
+    result = supersede_reviews(conn, mr_id, "b" * 40)
+
+    assert result.rebased == [review_id]
+    assert result.cancelled_active == [] and result.cancelled_queued == []
+    assert result.touched
+    row = get_review(conn, review_id)
+    assert row["status"] == "queued"
+    assert row["head_sha"] == "b" * 40
+    assert row["attempt"] == 0
+    assert row["not_before"] is None
+
+
+def test_supersede_cancels_queued_on_conflict(conn):
+    mr_id = _mr_with_reviews(conn)
+    stale = create_review(conn, mr_id, "new", "a" * 40, "agent-a")
+    existing = create_review(conn, mr_id, "new", "b" * 40, "agent-a")
+
+    result = supersede_reviews(conn, mr_id, "b" * 40)
+
+    assert result.cancelled_queued == [stale]
+    assert result.rebased == [] and result.cancelled_active == []
+    row = get_review(conn, stale)
+    assert row["status"] == "cancelled"
+    assert row["head_sha"] == "a" * 40
+    assert row["finished_at"] is not None
+    assert get_review(conn, existing)["status"] == "queued"
+
+
+@pytest.mark.parametrize("status", ["cloning", "reviewing"])
+def test_supersede_cancels_active(conn, status):
+    mr_id = _mr_with_reviews(conn)
+    review_id = create_review(conn, mr_id, "new", "a" * 40, "agent-a")
+    _set_status(conn, review_id, status)
+
+    result = supersede_reviews(conn, mr_id, "b" * 40)
+
+    assert result.cancelled_active == [review_id]
+    row = get_review(conn, review_id)
+    assert row["status"] == "cancelled"
+    assert row["head_sha"] == "a" * 40
+    assert row["finished_at"] is not None
+    assert row["error"] == f"отменено: в MR новый коммит {'b' * 12}"
+
+
+def test_supersede_skips_finished_and_same_head(conn):
+    mr_id = _mr_with_reviews(conn)
+    done = create_review(conn, mr_id, "new", "a" * 40, "agent-a")
+    finish_review(conn, done, "done", review_md="ok")
+    failed = create_review(conn, mr_id, "manual", "a" * 40, "agent-a")
+    finish_review(conn, failed, "error", error="boom")
+    current = create_review(conn, mr_id, "push", "b" * 40, "agent-a")
+    _set_status(conn, current, "reviewing")
+
+    result = supersede_reviews(conn, mr_id, "b" * 40)
+
+    assert not result.touched
+    assert get_review(conn, done)["status"] == "done"
+    assert get_review(conn, failed)["status"] == "error"
+    assert get_review(conn, current)["status"] == "reviewing"
+
+
+def test_late_writes_do_not_override_cancelled(conn):
+    mr_id = _mr_with_reviews(conn)
+    review_id = create_review(conn, mr_id, "new", "a" * 40, "agent-a")
+    _set_status(conn, review_id, "reviewing")
+    supersede_reviews(conn, mr_id, "b" * 40)
+    cancelled = dict(get_review(conn, review_id))
+
+    finish_review(conn, review_id, "done", review_md="late")
+    mark_reviewing(conn, review_id)
+    requeue_review(conn, review_id)
+    assert rebase_review_head(conn, review_id, "c" * 40) is False
+
+    assert dict(get_review(conn, review_id)) == cancelled
+
+
+def test_retry_review_from_cancelled(conn):
+    mr_id = _mr_with_reviews(conn)
+    review_id = create_review(conn, mr_id, "new", "a" * 40, "agent-a")
+    _set_status(conn, review_id, "cloning")
+    supersede_reviews(conn, mr_id, "b" * 40)
+
+    assert retry_review(conn, review_id) is True
+
+    row = get_review(conn, review_id)
+    assert row["status"] == "queued"
+    assert row["error"] is None
+    assert row["finished_at"] is None
+
+
+def test_list_mrs_ignores_cancelled_for_verdict(conn):
+    mr_id = _mr_with_reviews(conn)
+    done = create_review(conn, mr_id, "new", "a" * 40, "agent-a")
+    finish_review(conn, done, "done", review_md="ok", counts=(1, 0, 0, 0), verdict="APPROVE")
+    active = create_review(conn, mr_id, "push", "b" * 40, "agent-a")
+    _set_status(conn, active, "reviewing")
+    conn.execute("UPDATE review SET verdict = 'REQUEST_CHANGES', crit_count = 9 WHERE id = ?", (active,))
+    supersede_reviews(conn, mr_id, "c" * 40)
+
+    row = list_mrs(conn)[0]
+    assert row["latest_done_review_id"] == done
+    assert row["verdict"] == "APPROVE"
+    assert row["crit_count"] == 1
+    assert row["latest_review_status"] == "cancelled"
+

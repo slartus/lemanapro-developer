@@ -21,12 +21,14 @@ from mrwatch.db import (
     poll_state_get,
     poll_state_set,
     set_mention_url,
+    supersede_reviews,
     todo_mark_seen,
     todo_seen_ids,
     update_mr_roles,
     upsert_mr,
 )
 from mrwatch.gitlab_client import GitLabClient
+from mrwatch.worker import ReviewRegistry
 
 logger = logging.getLogger(__name__)
 
@@ -51,12 +53,14 @@ class Poller:
         config: Config,
         project_ids: dict[int, int],
         work_event: asyncio.Event | None = None,
+        registry: ReviewRegistry | None = None,
     ) -> None:
         self._conn = conn
         self._api = api
         self._config = config
         self._project_ids = project_ids
         self._work_event = work_event
+        self._registry = registry
         self._me: dict[str, Any] | None = None
         self._wake = asyncio.Event()
 
@@ -148,6 +152,28 @@ class Poller:
             is_draft=parse_draft(mr),
         )
 
+    def _supersede_stale(
+        self, result: MrUpsertResult, mr: dict[str, Any], project_db_id: int
+    ) -> int | None:
+        if result.inserted or not result.head_sha_changed:
+            return None
+        outcome = supersede_reviews(self._conn, result.mr_id, mr["sha"])
+        if not outcome.touched:
+            return None
+        logger.info(
+            "MR %s head moved to %s: cancelled %s, rebased %s",
+            mr.get("iid"), mr["sha"][:12],
+            outcome.cancelled_active + outcome.cancelled_queued, outcome.rebased,
+        )
+        if self._registry is not None:
+            for review_id in outcome.cancelled_active:
+                self._registry.cancel(review_id)
+        if not outcome.cancelled_active or mr.get("state") not in (None, "opened"):
+            return 0
+        if review_exists_for_head(self._conn, result.mr_id, mr["sha"]):
+            return 0
+        return self._enqueue(result.mr_id, "push", mr, project_db_id)
+
     def _enqueue(self, mr_id: int, trigger: str, mr: dict[str, Any], project_db_id: int) -> int:
         review_id = create_review(
             self._conn, mr_id, trigger, mr["sha"], self._agent_for(project_db_id)
@@ -211,8 +237,11 @@ class Poller:
     def _handle_todo(self, todo: dict[str, Any], detail: dict[str, Any], gitlab_pid: int) -> int:
         project_db_id = self._project_ids[gitlab_pid]
         result = self._upsert(project_db_id, detail, todo_signal_roles(todo))
-        if result is None or detail.get("state") != "opened":
+        if result is None:
             return 0
+        superseded = self._supersede_stale(result, detail, project_db_id)
+        if detail.get("state") != "opened":
+            return superseded or 0
         mentioned = todo.get("action_name") in MENTION_ACTIONS
         if mentioned:
             try:
@@ -223,6 +252,8 @@ class Poller:
                     set_mention_url(self._conn, result.mr_id, mention_url)
             except Exception:
                 logger.exception("failed to save mention url for todo %s", todo.get("id"))
+        if superseded is not None:
+            return superseded
         is_reviewer = self._username() in _reviewer_usernames(detail)
         if result.inserted or mentioned or is_reviewer:
             return self._enqueue(result.mr_id, "new", detail, project_db_id)
@@ -265,6 +296,9 @@ class Poller:
         )
         if result is None:
             return 0
+        superseded = self._supersede_stale(result, mr, project_db_id)
+        if superseded is not None:
+            return superseded
         if (mine or mentioned) and mr.get("state") in (None, "opened"):
             return self._enqueue(result.mr_id, "new", mr, project_db_id)
         return 0
@@ -342,6 +376,9 @@ class Poller:
         result = self._upsert(project_db_id, mr)
         if result is None:
             return 0
+        superseded = self._supersede_stale(result, mr, project_db_id)
+        if superseded is not None:
+            return superseded
         username = self._username()
         mine = _author(mr).get("username") == username or username in _reviewer_usernames(mr)
         opened = mr.get("state") in (None, "opened")

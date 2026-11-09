@@ -189,7 +189,7 @@ def test_total_limit(tmp_path, monkeypatch):
 def test_migration_v9_idempotent(tmp_path):
     conn = connect(tmp_path / "m.db")
     init_schema(conn)
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 9
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 10
     conn.execute("PRAGMA user_version = 8")
     conn.commit()
     init_schema(conn)
@@ -215,7 +215,7 @@ def test_migration_v9_failure_rolls_back(tmp_path, monkeypatch):
     assert conn.execute("PRAGMA user_version").fetchone()[0] == 8
     monkeypatch.undo()
     init_schema(conn)
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == 9
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 10
     conn.close()
 
 

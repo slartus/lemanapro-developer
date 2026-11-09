@@ -18,7 +18,7 @@ from mrwatch.git_ops import cleanup_old_review_logs, cleanup_old_workspaces, cle
 from mrwatch.gitlab_client import GitLabClient
 from mrwatch.poller import Poller
 from mrwatch.web.routes import router as web_router
-from mrwatch.worker import start_workers
+from mrwatch.worker import ReviewRegistry, start_workers
 
 logger = logging.getLogger("mrwatch")
 
@@ -144,7 +144,10 @@ def create_app(ctx: AppContext, port: int = DEFAULT_PORT) -> FastAPI:
         tmp_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
         cleanup_stale_askpass(tmp_dir)
         work_event = asyncio.Event()
-        poller = Poller(ctx.conn, ctx.api, ctx.config, ctx.project_ids, work_event)
+        registry = ReviewRegistry()
+        poller = Poller(
+            ctx.conn, ctx.api, ctx.config, ctx.project_ids, work_event, registry=registry
+        )
         app.state.poller = poller
         app.state.work_event = work_event
         worker_count = ctx.config.review.max_parallel
@@ -153,6 +156,7 @@ def create_app(ctx: AppContext, port: int = DEFAULT_PORT) -> FastAPI:
         tasks.extend(start_workers(
             worker_count, ctx.conn, ctx.api, ctx.config,
             ctx.paths, work_event, config_provider=lambda: ctx.config,
+            registry=registry,
         ))
         tasks.append(asyncio.create_task(_backup_loop(ctx), name="mrwatch-backup"))
         for task in tasks:

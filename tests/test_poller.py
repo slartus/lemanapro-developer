@@ -10,6 +10,8 @@ from helpers import list_reviews
 from mrwatch.config import Config, GitlabConfig, ProjectConfig, ReviewConfig
 from mrwatch.db import (
     claim_next_review,
+    create_review,
+    finish_review,
     get_review,
     init_schema,
     poll_state_get,
@@ -103,11 +105,11 @@ def _config(re_review_on_push=False):
     )
 
 
-def _make_poller(conn, api, config=None, work_event=None):
+def _make_poller(conn, api, config=None, work_event=None, registry=None):
     config = config or _config()
     re_review = config.projects[0].re_review_on_push
     mapping = sync_projects(conn, [(10, "g/p", "agent-a", re_review, True)])
-    return Poller(conn, api, config, mapping, work_event=work_event)
+    return Poller(conn, api, config, mapping, work_event=work_event, registry=registry)
 
 
 async def test_todo_triggers_review_and_is_remembered(conn):
@@ -214,6 +216,7 @@ async def test_push_re_review_flag(conn):
     api.mrs = [_mr(10, 1, author="me")]
     poller = _make_poller(conn, api, _config(re_review_on_push=False))
     await poller.tick()
+    finish_review(conn, list_reviews(conn)[0]["id"], "done", review_md="ok")
     api.mrs = [_mr(10, 1, sha="b" * 40, author="me")]
     assert await poller.tick() == 0
 
@@ -850,3 +853,111 @@ async def test_todo_with_bool_id_is_skipped(conn):
     ]
     await _make_poller(conn, api).tick()
     assert conn.execute("SELECT COUNT(*) FROM mr").fetchone()[0] == 0
+
+
+class FakeRegistry:
+    def __init__(self) -> None:
+        self.cancelled: list[int] = []
+
+    def cancel(self, review_id: int) -> bool:
+        self.cancelled.append(review_id)
+        return True
+
+
+async def _seen_foreign_mr(conn, api, registry, work_event=None):
+    api.mrs = [_mr(10, 1, author="other")]
+    poller = _make_poller(conn, api, work_event=work_event, registry=registry)
+    assert await poller.tick() == 0
+    mr_id = conn.execute("SELECT id FROM mr WHERE iid = 1").fetchone()["id"]
+    return poller, mr_id
+
+
+async def test_head_change_cancels_active_review_and_enqueues_push(conn):
+    api = StubApi()
+    registry = FakeRegistry()
+    work_event = asyncio.Event()
+    poller, mr_id = await _seen_foreign_mr(conn, api, registry, work_event)
+    review_id = create_review(conn, mr_id, "manual", "a" * 40, "agent-a")
+    assert claim_next_review(conn)["id"] == review_id
+
+    api.mrs = [_mr(10, 1, sha="b" * 40, author="other")]
+    assert await poller.tick() == 1
+
+    assert registry.cancelled == [review_id]
+    assert get_review(conn, review_id)["status"] == "cancelled"
+    fresh = [r for r in list_reviews(conn) if r["head_sha"] == "b" * 40]
+    assert [(r["trigger"], r["status"]) for r in fresh] == [("push", "queued")]
+    assert work_event.is_set()
+
+
+async def test_head_change_rebases_queued_review_without_new_one(conn):
+    api = StubApi()
+    registry = FakeRegistry()
+    poller, mr_id = await _seen_foreign_mr(conn, api, registry)
+    review_id = create_review(conn, mr_id, "manual", "a" * 40, "agent-a")
+
+    api.mrs = [_mr(10, 1, sha="b" * 40, author="other")]
+    assert await poller.tick() == 0
+
+    assert registry.cancelled == []
+    reviews = list_reviews(conn)
+    assert len(reviews) == 1
+    assert reviews[0]["id"] == review_id
+    assert reviews[0]["head_sha"] == "b" * 40
+    assert reviews[0]["status"] == "queued"
+
+
+async def test_head_change_via_todo_does_not_duplicate_reviews(conn):
+    api = StubApi()
+    registry = FakeRegistry()
+    api.details[(10, 5)] = _detail(10, 5, reviewers=["me"])
+    api.todos = [{"id": 1, "target_type": "MergeRequest", "action_name": "review_requested",
+                  "target": {"project_id": 10, "iid": 5}}]
+    poller = _make_poller(conn, api, registry=registry)
+    assert await poller.tick() == 1
+    review_id = claim_next_review(conn)["id"]
+
+    api.details[(10, 5)] = _detail(10, 5, sha="b" * 40, reviewers=["me"])
+    api.todos.append({"id": 2, "target_type": "MergeRequest", "action_name": "mentioned",
+                      "target": {"project_id": 10, "iid": 5}})
+    api.mrs = [_mr(10, 5, sha="b" * 40, reviewers=["me"])]
+    assert await poller.tick() == 1
+
+    assert registry.cancelled == [review_id]
+    assert get_review(conn, review_id)["status"] == "cancelled"
+    fresh = [r for r in list_reviews(conn) if r["head_sha"] == "b" * 40]
+    assert [r["trigger"] for r in fresh] == ["push"]
+
+
+async def test_head_change_on_closed_mr_only_cancels(conn):
+    api = StubApi()
+    registry = FakeRegistry()
+    poller, mr_id = await _seen_foreign_mr(conn, api, registry)
+    review_id = create_review(conn, mr_id, "manual", "a" * 40, "agent-a")
+    claim_next_review(conn)
+
+    api.mrs = [_mr(10, 1, sha="b" * 40, author="other") | {"state": "merged"}]
+    assert await poller.tick() == 0
+
+    assert registry.cancelled == [review_id]
+    assert get_review(conn, review_id)["status"] == "cancelled"
+    assert len(list_reviews(conn)) == 1
+
+
+async def test_head_change_keeps_finished_reviews(conn):
+    api = StubApi()
+    registry = FakeRegistry()
+    poller, mr_id = await _seen_foreign_mr(conn, api, registry)
+    done = create_review(conn, mr_id, "new", "a" * 40, "agent-a")
+    finish_review(conn, done, "done", review_md="ok")
+    failed = create_review(conn, mr_id, "manual", "a" * 40, "agent-a")
+    finish_review(conn, failed, "error", error="boom")
+
+    api.mrs = [_mr(10, 1, sha="b" * 40, author="other")]
+    assert await poller.tick() == 0
+
+    assert registry.cancelled == []
+    assert get_review(conn, done)["status"] == "done"
+    assert get_review(conn, failed)["status"] == "error"
+    assert len(list_reviews(conn)) == 2
+

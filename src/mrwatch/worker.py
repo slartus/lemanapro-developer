@@ -48,6 +48,30 @@ IDLE_SLEEP_SEC = 2.0
 ERROR_PAUSE_SEC = 5.0
 
 
+class ReviewRegistry:
+    def __init__(self) -> None:
+        self._tasks: dict[int, asyncio.Task] = {}
+        self._cancelled: set[int] = set()
+
+    def register(self, review_id: int, task: asyncio.Task) -> None:
+        self._tasks[review_id] = task
+
+    def unregister(self, review_id: int) -> None:
+        self._tasks.pop(review_id, None)
+        self._cancelled.discard(review_id)
+
+    def cancel(self, review_id: int) -> bool:
+        task = self._tasks.get(review_id)
+        if task is None or task.done():
+            return False
+        self._cancelled.add(review_id)
+        task.cancel()
+        return True
+
+    def was_cancelled(self, review_id: int) -> bool:
+        return review_id in self._cancelled
+
+
 class Worker:
     def __init__(
         self,
@@ -60,6 +84,7 @@ class Worker:
         clone_harden: bool = True,
         agents_dirs: tuple[Path, ...] | None = None,
         config_provider: Callable[[], Config] | None = None,
+        registry: ReviewRegistry | None = None,
     ) -> None:
         self.worker_id = worker_id
         self._conn = conn
@@ -70,6 +95,7 @@ class Worker:
         self._work_event = work_event
         self._clone_harden = clone_harden
         self._agents_dirs = agents_dirs
+        self._registry = registry if registry is not None else ReviewRegistry()
 
     @property
     def _config(self) -> Config:
@@ -104,14 +130,28 @@ class Worker:
         review = claim_next_review(self._conn)
         if review is None:
             return False
+        review_id = review["id"]
+        task = asyncio.create_task(
+            self._process_review(review), name=f"mrwatch-review-{review_id}"
+        )
+        self._registry.register(review_id, task)
         try:
-            await self._process_review(review)
+            await task
+        except asyncio.CancelledError:
+            current = asyncio.current_task()
+            if current is not None and current.cancelling():
+                raise
+            if not self._registry.was_cancelled(review_id):
+                raise
+            logger.info("worker %s: review %s cancelled (MR head moved)", self.worker_id, review_id)
         except Exception:
-            logger.exception("worker %s: review %s crashed", self.worker_id, review["id"])
+            logger.exception("worker %s: review %s crashed", self.worker_id, review_id)
             finish_review(
-                self._conn, review["id"], "error",
+                self._conn, review_id, "error",
                 error="internal worker error (see app.log)",
             )
+        finally:
+            self._registry.unregister(review_id)
         return True
 
     def _load_mr(self, mr_id: int) -> sqlite3.Row | None:
@@ -183,6 +223,11 @@ class Worker:
             return None
         return dump_snippets(snippets)
 
+    async def _discard_workspace(self, workspace: Path) -> None:
+        await asyncio.shield(
+            asyncio.to_thread(remove_workspace, workspace, self._paths.workspaces)
+        )
+
     async def _process_review(self, review: sqlite3.Row) -> None:
         review_id = review["id"]
         config = self._config
@@ -230,6 +275,9 @@ class Worker:
             await asyncio.to_thread(remove_workspace, workspace, self._paths.workspaces)
             self._handle_head_mismatch(review, exc)
             return
+        except asyncio.CancelledError:
+            await self._discard_workspace(workspace)
+            raise
         except Exception as exc:
             await asyncio.to_thread(remove_workspace, workspace, self._paths.workspaces)
             logger.warning("review %s: clone failed: %s", review_id, exc)
@@ -274,7 +322,7 @@ class Worker:
             finish_review(self._conn, review_id, "error", error=f"opencode failed: {exc}")
             return
         finally:
-            await asyncio.to_thread(remove_workspace, workspace, self._paths.workspaces)
+            await self._discard_workspace(workspace)
         if result.error is not None and result.review_md is None:
             finish_review(
                 self._conn, review_id, "error",
@@ -303,9 +351,14 @@ def start_workers(
     paths: ResolvedPaths,
     work_event: asyncio.Event,
     config_provider: Callable[[], Config] | None = None,
+    registry: ReviewRegistry | None = None,
 ) -> list[asyncio.Task]:
+    registry = registry if registry is not None else ReviewRegistry()
     workers = [
-        Worker(i, conn, api, config, paths, work_event, config_provider=config_provider)
+        Worker(
+            i, conn, api, config, paths, work_event,
+            config_provider=config_provider, registry=registry,
+        )
         for i in range(count)
     ]
     return [asyncio.create_task(w.run(), name=f"mrwatch-worker-{i}") for i, w in enumerate(workers)]

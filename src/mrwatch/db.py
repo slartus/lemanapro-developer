@@ -9,7 +9,7 @@ from mrwatch.opencode_runner import MAX_VERDICT_INPUT_CHARS, parse_verdict
 
 MAX_REVIEW_MD_LENGTH = MAX_VERDICT_INPUT_CHARS
 TRUNCATION_MARKER = "...[truncated]"
-SCHEMA_VERSION = 9
+SCHEMA_VERSION = 10
 
 DERIVED_ROLES = frozenset({"reviewer", "assignee", "author"})
 MENTIONED_ROLE = "mentioned"
@@ -27,6 +27,17 @@ class MrUpsertResult:
     mr_id: int
     inserted: bool
     head_sha_changed: bool
+
+
+@dataclass(frozen=True)
+class SupersedeResult:
+    cancelled_active: list[int]
+    rebased: list[int]
+    cancelled_queued: list[int]
+
+    @property
+    def touched(self) -> bool:
+        return bool(self.cancelled_active or self.rebased or self.cancelled_queued)
 
 
 def connect(db_path: Path) -> sqlite3.Connection:
@@ -73,7 +84,7 @@ def init_schema(conn: sqlite3.Connection) -> None:
             "trigger" TEXT NOT NULL CHECK("trigger" IN ('new','push','manual')),
             head_sha TEXT NOT NULL,
             status TEXT NOT NULL DEFAULT 'queued'
-                CHECK(status IN ('queued','cloning','reviewing','done','error')),
+                CHECK(status IN ('queued','cloning','reviewing','done','error','cancelled')),
             agent TEXT NOT NULL,
             session_id TEXT,
             review_md TEXT,
@@ -113,6 +124,8 @@ def init_schema(conn: sqlite3.Connection) -> None:
         _run_migration(conn, 8, _migrate_to_v8)
     if version < 9:
         _run_migration(conn, 9, _migrate_to_v9)
+    if version < 10:
+        _run_migration(conn, 10, _migrate_to_v10)
     conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
     conn.commit()
 
@@ -472,6 +485,99 @@ def _migrate_to_v9(conn: sqlite3.Connection) -> None:
     _add_column(conn, "review", "snippets_json", "TEXT")
 
 
+REVIEW_V10_COLUMNS = (
+    'id, mr_id, "trigger", head_sha, status, agent, session_id, review_md, exit_code, error, '
+    "attempt, created_at, started_at, finished_at, crit_count, major_count, minor_count, "
+    "nit_count, not_before, verdict, snippets_json"
+)
+
+
+def _migrate_to_v10(conn: sqlite3.Connection) -> None:
+    seq_row = conn.execute("SELECT seq FROM sqlite_sequence WHERE name = 'review'").fetchone()
+    conn.execute("DROP TABLE IF EXISTS review_new")
+    conn.execute(
+        """
+        CREATE TABLE review_new (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            mr_id INTEGER NOT NULL REFERENCES mr(id),
+            "trigger" TEXT NOT NULL CHECK("trigger" IN ('new','push','manual')),
+            head_sha TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'queued'
+                CHECK(status IN ('queued','cloning','reviewing','done','error','cancelled')),
+            agent TEXT NOT NULL,
+            session_id TEXT,
+            review_md TEXT,
+            exit_code INTEGER,
+            error TEXT,
+            attempt INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL,
+            started_at TEXT,
+            finished_at TEXT,
+            crit_count INTEGER NOT NULL DEFAULT 0,
+            major_count INTEGER NOT NULL DEFAULT 0,
+            minor_count INTEGER NOT NULL DEFAULT 0,
+            nit_count INTEGER NOT NULL DEFAULT 0,
+            not_before TEXT,
+            verdict TEXT,
+            snippets_json TEXT,
+            UNIQUE(mr_id, head_sha, "trigger")
+        )
+        """
+    )
+    conn.execute(
+        f"INSERT INTO review_new ({REVIEW_V10_COLUMNS}) SELECT {REVIEW_V10_COLUMNS} FROM review"
+    )
+    conn.execute("DROP TABLE review")
+    conn.execute("ALTER TABLE review_new RENAME TO review")
+    if seq_row is not None:
+        conn.execute(
+            "UPDATE sqlite_sequence SET seq = MAX(seq, ?) WHERE name = 'review'", (seq_row[0],)
+        )
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_review_status ON review(status)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_review_mr ON review(mr_id)")
+
+
+def supersede_reviews(conn: sqlite3.Connection, mr_id: int, new_sha: str) -> SupersedeResult:
+    cancelled_active: list[int] = []
+    rebased: list[int] = []
+    cancelled_queued: list[int] = []
+    error = f"отменено: в MR новый коммит {new_sha[:12]}"
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        rows = conn.execute(
+            """
+            SELECT id, status FROM review
+            WHERE mr_id = ? AND head_sha != ? AND status IN ('queued', 'cloning', 'reviewing')
+            ORDER BY id
+            """,
+            (mr_id, new_sha),
+        ).fetchall()
+        now = utcnow_iso()
+        for row in rows:
+            if row["status"] == "queued":
+                try:
+                    conn.execute(
+                        "UPDATE review SET head_sha = ?, attempt = 0, not_before = NULL "
+                        "WHERE id = ?",
+                        (new_sha, row["id"]),
+                    )
+                    rebased.append(row["id"])
+                    continue
+                except sqlite3.IntegrityError:
+                    cancelled_queued.append(row["id"])
+            else:
+                cancelled_active.append(row["id"])
+            conn.execute(
+                "UPDATE review SET status = 'cancelled', finished_at = ?, error = ? WHERE id = ?",
+                (now, error, row["id"]),
+            )
+        conn.commit()
+    except BaseException:
+        conn.rollback()
+        raise
+    return SupersedeResult(cancelled_active, rebased, cancelled_queued)
+
+
 def finish_review(
     conn: sqlite3.Connection,
     review_id: int,
@@ -492,7 +598,7 @@ def finish_review(
         SET status = ?, review_md = ?, session_id = ?, exit_code = ?, error = ?,
             finished_at = ?, crit_count = ?, major_count = ?, minor_count = ?, nit_count = ?,
             verdict = ?, snippets_json = ?
-        WHERE id = ?
+        WHERE id = ? AND status IN ('queued', 'cloning', 'reviewing')
         """,
         (
             status,
@@ -525,7 +631,7 @@ def retry_review(conn: sqlite3.Connection, review_id: int) -> bool:
                  WHERE mr.id = review.mr_id),
                 agent
             )
-        WHERE id = ? AND status IN ('error', 'done')
+        WHERE id = ? AND status IN ('error', 'done', 'cancelled')
         """,
         (review_id,),
     )
@@ -535,17 +641,22 @@ def retry_review(conn: sqlite3.Connection, review_id: int) -> bool:
 
 def rebase_review_head(conn: sqlite3.Connection, review_id: int, head_sha: str) -> bool:
     try:
-        conn.execute("UPDATE review SET head_sha = ? WHERE id = ?", (head_sha, review_id))
+        cursor = conn.execute(
+            "UPDATE review SET head_sha = ? "
+            "WHERE id = ? AND status IN ('queued', 'cloning', 'reviewing')",
+            (head_sha, review_id),
+        )
         conn.commit()
     except sqlite3.IntegrityError:
         conn.rollback()
         return False
-    return True
+    return cursor.rowcount > 0
 
 
 def mark_reviewing(conn: sqlite3.Connection, review_id: int) -> None:
     conn.execute(
-        "UPDATE review SET status = 'reviewing' WHERE id = ?",
+        "UPDATE review SET status = 'reviewing' "
+        "WHERE id = ? AND status IN ('cloning', 'reviewing')",
         (review_id,),
     )
     conn.commit()
@@ -564,7 +675,7 @@ def requeue_review(conn: sqlite3.Connection, review_id: int, delay_sec: float = 
         UPDATE review
         SET status = 'queued', error = NULL, started_at = NULL, finished_at = NULL,
             not_before = ?
-        WHERE id = ?
+        WHERE id = ? AND status IN ('queued', 'cloning', 'reviewing')
         """,
         (not_before, review_id),
     )
