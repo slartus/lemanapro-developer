@@ -353,12 +353,24 @@ function renderReviewCell(row) {
   return cell;
 }
 
+function focusById(id) {
+  const target = id ? document.querySelector(`[data-focus-id="${CSS.escape(id)}"]`) : null;
+  target?.focus({ preventScroll: true });
+  return Boolean(target);
+}
+
+function neighbourFocusId(node) {
+  const item = node.closest('tr, li');
+  const neighbour = item?.nextElementSibling ?? item?.previousElementSibling;
+  return neighbour?.querySelector('[data-focus-id]')?.getAttribute('data-focus-id') ?? null;
+}
+
 function closeSnoozeMenu({ focusButton = false } = {}) {
   const key = state.openSnoozeKey;
   if (key === null) return;
   state.openSnoozeKey = null;
   render();
-  if (focusButton) document.querySelector(`[data-focus-id="${CSS.escape(`snooze:${key}`)}"]`)?.focus();
+  if (focusButton) focusById(`snooze:${key}`);
 }
 
 function snoozeControl(key, item, sectionId, title) {
@@ -378,7 +390,7 @@ function snoozeControl(key, item, sectionId, title) {
   button.addEventListener('click', () => {
     state.openSnoozeKey = isOpen ? null : key;
     render();
-    if (!isOpen) document.querySelector('.snooze-menu button')?.focus();
+    if (!isOpen) document.querySelector('.snooze-menu button')?.focus({ preventScroll: true });
   });
   const wrap = el('span', { className: 'snooze-wrap' }, [button]);
   if (isOpen) {
@@ -386,9 +398,11 @@ function snoozeControl(key, item, sectionId, title) {
     Object.entries(snoozeOptions(sectionId)).forEach(([option, { label, title: hint }]) => {
       const choice = el('button', { text: label, attrs: { type: 'button', ...(hint && { title: hint }) } });
       choice.addEventListener('click', () => {
+        const nextFocus = neighbourFocusId(choice);
+        const blockFocus = choice.closest('details')?.querySelector('summary')?.getAttribute('data-focus-id');
         state.openSnoozeKey = null;
         updateSnoozed((snoozed) => ({ ...snoozed, [key]: createSnooze(option, item) }));
-        $('search').focus();
+        if (!focusById(nextFocus) && !focusById(blockFocus)) $('chips').querySelector('.chip.active')?.focus({ preventScroll: true });
       });
       menu.append(choice);
     });
@@ -506,7 +520,7 @@ function renderExtras(view) {
   const add = (id, title, items, sectionId, options) => {
     if (!items.length) return;
     const details = el('details', { className: 'extra', attrs: { 'data-block': id } }, [
-      el('summary', {}, [el('span', { text: title }), el('span', { className: 'chip-count', text: String(items.length) })]),
+      el('summary', { attrs: { 'data-focus-id': `block:${id}` } }, [el('span', { text: title }), el('span', { className: 'chip-count', text: String(items.length) })]),
       el('ul', {}, items.map((item) => renderExtraItem(item, sectionId ?? item.sectionId, options))),
     ]);
     if (state.openBlocks.has(id)) details.open = true;
@@ -594,7 +608,7 @@ function render() {
   renderExtras(view);
   updateCounters(rows.filter((row) => actionable.has(row.key)).length);
   scheduleSnoozeExpiry();
-  if (focus) document.querySelector(`[data-focus-id="${CSS.escape(focus)}"]`)?.focus();
+  if (focus) focusById(focus);
 }
 
 function hasSelection() {
