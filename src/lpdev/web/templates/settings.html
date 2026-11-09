@@ -19,6 +19,8 @@
   .tree-tools input[type="search"] { flex: 1 1 220px; max-width: 360px; }
   .radar-mode { border: 0; padding: 0; margin: 0; display: flex; gap: 0.3rem 1rem; flex-wrap: wrap; align-items: center; }
   .radar-mode legend { float: left; margin-right: 0.6rem; padding: 0; }
+  .add-project { display: flex; gap: 0.5rem; margin: 0.4rem 0 0.6rem; flex-wrap: wrap; }
+  .add-project input { flex: 1 1 280px; max-width: 520px; }
   .tree { display: flex; flex-direction: column; gap: 0.2rem; }
   .tree-group > summary { cursor: pointer; display: flex; align-items: center; gap: 0.5rem; padding: 0.3rem 0.2rem; font-weight: 600; }
   .tree-group-name { overflow-wrap: anywhere; }
@@ -69,6 +71,10 @@
     <input type="search" id="tree-search" placeholder="Поиск проекта" aria-label="Поиск проекта">
     <span id="tree-summary" class="muted small"></span>
   </div>
+  <form id="add-project" class="add-project">
+    <input type="text" id="add-project-input" placeholder="Проект не в списке? Ссылка или путь group/project" aria-label="Добавить проект для авторевью по ссылке или пути">
+    <button type="submit">Добавить для авторевью</button>
+  </form>
   <p class="muted small">«Радар» — секции «Ждут моего апрува», «Возможные MR», «Сломан default branch» (MR, где я ревьюер или автор, видны всегда). «Авторевью» — MR проекта ревьюятся автоматически.</p>
   <div id="tree" class="tree"></div>
 </div>

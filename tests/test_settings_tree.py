@@ -40,22 +40,19 @@ def _client(app):
     return httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://127.0.0.1:8123")
 
 
-async def test_projects_api_lists_my_projects_with_maintainer_flag(ctx):
+async def test_projects_api_marks_maintainer_projects_like_the_radar(ctx):
     seen = []
 
     def gitlab(request):
-        seen.append(request.url)
+        seen.append(dict(request.url.params))
+        if request.url.params["min_access_level"] == "40":
+            return httpx.Response(200, json=[{"id": 1}, {"id": 2}])
         return httpx.Response(
             200,
             json=[
-                {"id": 1, "path_with_namespace": "g/a", "name": "a", "permissions": {"project_access": {"access_level": 40}, "group_access": None}},
-                {
-                    "id": 2,
-                    "path_with_namespace": "g/b",
-                    "name": "b",
-                    "permissions": {"project_access": {"access_level": 30}, "group_access": {"access_level": 50}},
-                },
-                {"id": 3, "path_with_namespace": "g/c", "name": "c", "permissions": {"project_access": {"access_level": 20}}},
+                {"id": 1, "path_with_namespace": "g/a", "name": "a"},
+                {"id": 2, "path_with_namespace": "g/b", "name": "b", "permissions": {"project_access": None, "group_access": None}},
+                {"id": 3, "path_with_namespace": "g/c", "name": "c", "permissions": {"project_access": {"access_level": 40}}},
                 {"id": "bad"},
             ],
         )
@@ -69,8 +66,8 @@ async def test_projects_api_lists_my_projects_with_maintainer_flag(ctx):
         {"id": 2, "path": "g/b", "name": "b", "maintainer": True},
         {"id": 3, "path": "g/c", "name": "c", "maintainer": False},
     ]
-    params = seen[0].params
-    assert params["membership"] == "true" and params["min_access_level"] == "20" and params["archived"] == "false"
+    assert {params["min_access_level"] for params in seen} == {"20", "40"}
+    assert all(params["membership"] == "true" and params["archived"] == "false" for params in seen)
 
 
 async def test_projects_api_reports_gitlab_failure(ctx):
@@ -113,6 +110,7 @@ async def test_settings_save_writes_radar_section_and_keeps_other_radar_keys(ctx
         {"project_filter_mode": "some"},
         {"hidden_sections": ["unknown"]},
         {"selected_project_ids": ["x"]},
+        {"project_filter_mode": "selected", "selected_project_ids": []},
     ],
 )
 async def test_settings_save_rejects_invalid_radar_values(ctx, tmp_path, monkeypatch, radar):
@@ -137,5 +135,40 @@ async def test_settings_page_embeds_tree_data(ctx, tmp_path, monkeypatch):
     data = json.loads(raw)
     assert data["reviewProjects"][0]["gitlab_project_id"] == 10
     assert data["radar"]["project_filter_mode"] == "all"
+    assert data["gitlabUrl"] == "https://gitlab.example.com"
     assert '<script type="module" src="/static/settings.js"></script>' in page.text
     assert script.status_code == 200
+
+
+async def test_settings_save_writes_validated_radar_values(ctx, tmp_path, monkeypatch):
+    cfg = _config(tmp_path)
+    monkeypatch.setenv("LPDEV_CONFIG", str(cfg))
+    app, _ = _app(ctx)
+    radar = {"interval_minutes": "9", "selected_project_ids": ["5"], "project_filter_mode": "selected", "fast_refresh_while_ci": "yes"}
+    async with _client(app) as client:
+        response = await client.post("/settings", json={**BASE_PAYLOAD, "radar": radar}, headers=H)
+    assert response.status_code == 303
+    saved = yaml.safe_load(cfg.read_text())["radar"]
+    assert saved["interval_minutes"] == 9
+    assert saved["selected_project_ids"] == [5]
+    assert saved["fast_refresh_while_ci"] is True
+
+
+async def test_settings_save_resolves_a_project_added_by_path(ctx, tmp_path, monkeypatch):
+    cfg = _config(tmp_path)
+    monkeypatch.setenv("LPDEV_CONFIG", str(cfg))
+
+    def gitlab(request):
+        assert request.url.raw_path == b"/api/v4/projects/other%2Fteam%2Fapp"
+        return httpx.Response(200, json={"id": 77, "path_with_namespace": "other/team/app"})
+
+    app, ctx_obj = _app(ctx, gitlab)
+    projects = BASE_PAYLOAD["projects"] + [
+        {"gitlab_project_id": None, "slug": "other/team/app", "agent": "agent-a", "re_review_on_push": False}
+    ]
+    async with _client(app) as client:
+        response = await client.post("/settings", json={**BASE_PAYLOAD, "projects": projects}, headers=H)
+    assert response.status_code == 303
+    saved = yaml.safe_load(cfg.read_text())["projects"]
+    assert saved[-1]["gitlab_project_id"] == 77 and saved[-1]["slug"] == "other/team/app"
+    assert 77 in ctx_obj.project_ids

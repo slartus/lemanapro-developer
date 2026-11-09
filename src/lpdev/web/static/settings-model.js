@@ -21,6 +21,7 @@ export function mergeProjects(gitlabProjects, reviewProjects, radarIds) {
   return [...byId.values()]
     .map((project) => ({
       ...project,
+      key: String(project.id),
       radar: radar.has(project.id),
       review: review.has(project.id)
         ? { agent: review.get(project.id).agent, push: Boolean(review.get(project.id).re_review_on_push) }
@@ -61,16 +62,32 @@ export function matchesQuery(project, query) {
   return !needle || project.path.toLowerCase().includes(needle) || project.name.toLowerCase().includes(needle);
 }
 
+export function projectPathFromInput(input, gitlabUrl) {
+  let value = input.trim();
+  if (gitlabUrl && value.toLowerCase().startsWith(`${gitlabUrl.toLowerCase()}/`)) value = value.slice(gitlabUrl.length + 1);
+  value = value.split('/-/')[0].replace(/\.git$/, '').replace(/^\/+|\/+$/g, '');
+  return /^[A-Za-z0-9_.-]+(\/[A-Za-z0-9_.-]+)+$/.test(value) ? value : null;
+}
+
+export function addProjectByPath(projects, path, agent) {
+  const existing = projects.find((project) => project.path.toLowerCase() === path.toLowerCase());
+  if (existing) {
+    return projects.map((project) => (project === existing && !project.review ? { ...project, review: { agent, push: false } } : project));
+  }
+  const added = { id: null, key: `new:${path}`, path, name: path, maintainer: false, known: false, radar: false, review: { agent, push: false } };
+  return [...projects, added].sort((a, b) => a.path.localeCompare(b.path));
+}
+
 export function settingsPayloadProjects(projects, defaultAgent) {
   return {
     review: projects
       .filter((project) => project.review)
       .map((project) => ({
         gitlab_project_id: project.id,
-        slug: project.known || !project.path.startsWith('#') ? project.path : '',
+        slug: project.path.startsWith('#') ? '' : project.path,
         agent: project.review.agent || defaultAgent,
         re_review_on_push: project.review.push,
       })),
-    radarIds: projects.filter((project) => project.radar).map((project) => project.id).sort((a, b) => a - b),
+    radarIds: projects.filter((project) => project.radar && project.id !== null).map((project) => project.id).sort((a, b) => a - b),
   };
 }

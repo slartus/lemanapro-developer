@@ -73,3 +73,31 @@ describe('settingsPayloadProjects', () => {
     });
   });
 });
+
+describe('adding a project by link or path', async () => {
+  const { addProjectByPath, projectPathFromInput } = await import('../../src/lpdev/web/static/settings-model.js');
+
+  it('extracts the project path from links and plain paths', () => {
+    const base = 'https://gitlab.example.com';
+    assert.equal(projectPathFromInput(' https://gitlab.example.com/group/sub/app/-/merge_requests/5 ', base), 'group/sub/app');
+    assert.equal(projectPathFromInput('group/app.git', base), 'group/app');
+    assert.equal(projectPathFromInput('/group/app/', base), 'group/app');
+    assert.equal(projectPathFromInput('app', base), null);
+    assert.equal(projectPathFromInput('https://evil.example.com/group/app', base), null);
+    assert.equal(projectPathFromInput('group/app with space', base), null);
+  });
+
+  it('adds an unknown project for auto review and reuses a listed one', () => {
+    const projects = mergeProjects(gitlab, [], []);
+    const added = addProjectByPath(projects, 'other/team/app', 'agent-x');
+    const fresh = added.find((project) => project.key === 'new:other/team/app');
+    assert.deepEqual(fresh.review, { agent: 'agent-x', push: false });
+    assert.equal(fresh.id, null);
+    const reused = addProjectByPath(projects, 'TOOLS/ci', 'agent-x');
+    assert.equal(reused.length, projects.length);
+    assert.deepEqual(reused.find((project) => project.id === 3).review, { agent: 'agent-x', push: false });
+    assert.deepEqual(settingsPayloadProjects(added, 'd').review, [
+      { gitlab_project_id: null, slug: 'other/team/app', agent: 'agent-x', re_review_on_push: false },
+    ]);
+  });
+});

@@ -473,8 +473,8 @@ async def settings_page(request: Request):
         {
             "config": config,
             "config_error": error,
-            "agents": _list_agents(),
             "settings_data": {
+                "gitlabUrl": config.gitlab.url,
                 "agents": _list_agents(),
                 "reviewProjects": [project.model_dump() for project in config.projects],
                 "radar": config.radar.model_dump(),
@@ -504,20 +504,15 @@ RADAR_SETTINGS_FIELDS = (
 )
 
 
-def _access_level(project: dict) -> int:
-    permissions = project.get("permissions") or {}
-    levels = [
-        (permissions.get(scope) or {}).get("access_level") or 0
-        for scope in ("project_access", "group_access")
-    ]
-    return max(levels)
-
-
 @router.get("/api/settings/projects")
 async def settings_projects(request: Request):
     ctx = _ctx(request)
     try:
         projects = await ctx.api.get_member_projects(REPORTER_ACCESS)
+        maintained = {
+            project.get("id") for project in await ctx.api.get_member_projects(MAINTAINER_ACCESS)
+            if isinstance(project, dict)
+        }
     except GitlabApiError as exc:
         logger.warning("settings: project list failed: %s", exc)
         return PlainTextResponse("GitLab не отдал список проектов", status_code=502)
@@ -527,7 +522,7 @@ async def settings_projects(request: Request):
                 "id": project["id"],
                 "path": project.get("path_with_namespace") or str(project["id"]),
                 "name": project.get("name") or project.get("path_with_namespace") or str(project["id"]),
-                "maintainer": _access_level(project) >= MAINTAINER_ACCESS,
+                "maintainer": project["id"] in maintained,
             }
             for project in projects
             if isinstance(project, dict) and isinstance(project.get("id"), int)
@@ -611,6 +606,9 @@ async def settings_save(request: Request):
     except Exception as exc:
         logger.warning("settings: invalid config: %s", exc)
         return PlainTextResponse("невалидные значения: проверьте числа и заполненность проектов", status_code=400)
+    if isinstance(radar, dict):
+        validated = config.radar.model_dump()
+        raw["radar"].update({key: validated[key] for key in RADAR_SETTINGS_FIELDS if key in radar})
     try:
         backup = path.with_suffix(".yaml.bak")
         if path.is_file():
