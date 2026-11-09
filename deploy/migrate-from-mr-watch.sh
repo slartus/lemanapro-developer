@@ -34,7 +34,7 @@ fi
 
 TMP_DB="$DST_DB.tmp"
 TMP_CONFIG="$DST_CONFIG.tmp"
-trap 'rm -f "$TMP_DB" "$TMP_CONFIG"' EXIT
+trap 'rm -f "$TMP_DB" "$TMP_DB-wal" "$TMP_DB-shm" "$TMP_CONFIG"' EXIT
 
 mkdir -p "$PROJECT_DIR/data"
 rm -f "$TMP_DB" "$TMP_CONFIG"
