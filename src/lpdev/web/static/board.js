@@ -121,6 +121,8 @@ const state = {
   forceCheck: null,
   pendingRender: false,
   finishedBaseline: null,
+  userStateVersion: 0,
+  forceCheckTimer: null,
 };
 
 const $ = (id) => document.getElementById(id);
@@ -340,6 +342,7 @@ function snoozeControl(key, item, sectionId, title) {
       choice.addEventListener('click', () => {
         state.openSnoozeKey = null;
         updateSnoozed((snoozed) => ({ ...snoozed, [key]: createSnooze(option, item) }));
+        $('search').focus();
       });
       menu.append(choice);
     });
@@ -433,7 +436,13 @@ function renderExtraItem(item, sectionId, { snoozedBlock = false } = {}) {
   } else {
     actions.append(snoozeControl(item.key, item, sectionId, item.title));
     if (sectionId === 'possibleMrs' && item.projectPath) {
-      actions.append(link(branchesUrl(item), [el('span', { text: '🗑' })], { className: 'icon-btn', title: 'Открыть ветки в GitLab, чтобы удалить ветку' }));
+      actions.append(
+        link(branchesUrl(item), [el('span', { text: '🗑', attrs: { 'aria-hidden': 'true' } })], {
+          class: 'icon-btn',
+          title: 'Открыть ветки в GitLab, чтобы удалить ветку',
+          'aria-label': `Открыть ветки: ${item.title}`,
+        }),
+      );
     }
   }
   return el('li', { className: 'extra-item' }, [
@@ -583,20 +592,23 @@ async function fetchUserState() {
 let userStateWrite = Promise.resolve();
 
 function updateUserState(change) {
+  state.userStateVersion += 1;
   state.userState = change(state.userState);
   render();
   userStateWrite = userStateWrite
     .then(async () => {
       const fresh = await fetchUserState().catch(() => state.userState);
       state.userState = change(fresh);
-      await fetch('/api/ui-state/radar', {
+      const response = await fetch('/api/ui-state/radar', {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'lpdev' },
         body: JSON.stringify(state.userState),
       });
+      if (!response.ok) throw new Error(String(response.status));
+      state.userStateVersion += 1;
       renderWhenIdle();
     })
-    .catch(() => {});
+    .catch(() => showStatus({ text: 'не удалось сохранить отложенные — повтори позже', error: true }));
   return userStateWrite;
 }
 
@@ -627,6 +639,7 @@ let inFlight = false;
 async function refresh() {
   if (inFlight) return;
   inFlight = true;
+  const userStateVersion = state.userStateVersion;
   try {
     const [mrsResponse, radarResponse, userState] = await Promise.all([
       fetch('/api/mrs', { cache: 'no-store' }),
@@ -635,7 +648,7 @@ async function refresh() {
     ]);
     if (mrsResponse.ok) state.mrs = await mrsResponse.json();
     if (radarResponse.ok) state.radar = await radarResponse.json();
-    if (userState) state.userState = userState;
+    if (userState && userStateVersion === state.userStateVersion) state.userState = userState;
     trackFinishedReviews();
     renderWhenIdle();
   } catch {
@@ -647,24 +660,28 @@ async function refresh() {
   }
 }
 
+function showStatus(status, clearAfterMs = 12000) {
+  clearTimeout(state.forceCheckTimer);
+  state.forceCheck = status;
+  renderWhenIdle();
+  state.forceCheckTimer = setTimeout(() => {
+    state.forceCheck = null;
+    renderWhenIdle();
+  }, clearAfterMs);
+}
+
 async function forceCheck(button) {
   button.disabled = true;
-  state.forceCheck = { text: 'проверяю…' };
-  render();
+  showStatus({ text: 'проверяю…' });
   try {
     const response = await fetch('/force-check', { method: 'POST', headers: { 'X-Requested-With': 'lpdev' } });
-    state.forceCheck = response.ok
-      ? { text: 'запрошено, обновляю…' }
-      : { text: (await response.text()) || `ошибка ${response.status}`, error: true };
-    [2000, 5000, 10000].forEach((delay) => setTimeout(refresh, delay));
-    setTimeout(() => {
-      state.forceCheck = null;
-      renderWhenIdle();
-    }, 12000);
+    showStatus(
+      response.ok ? { text: 'запрошено, обновляю…' } : { text: (await response.text()) || `ошибка ${response.status}`, error: true },
+    );
+    if (response.ok) [2000, 5000, 10000].forEach((delay) => setTimeout(refresh, delay));
   } catch {
-    state.forceCheck = { text: 'сервис не отвечает', error: true };
+    showStatus({ text: 'сервис не отвечает', error: true });
   } finally {
-    render();
     setTimeout(() => (button.disabled = false), 2000);
   }
 }
