@@ -24,3 +24,17 @@ jobs:
         run: ruff check src tests
       - name: Test
         run: pytest tests -q --cov
+
+  radar:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: radar
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Test
+        run: node --test

@@ -1,4 +1,13 @@
-# mr-watch
+# lemanapro-developer
+
+Локальная страница разработчика для self-hosted GitLab. Объединяет два инструмента:
+
+- **авторевью MR** (бывший mr-watch) — описан ниже;
+- **радар MR** (бывший gitlab-mr-radar, каталог `radar/`) — секции «на ревью», «назначены», «упомянули», «ждут апрува», «треды», «мои MR», «возможные MR», «сломан default branch». Логика на JS, запускается бэкендом; тесты — `cd radar && node --test`.
+
+План объединения в одну таблицу MR — в разработке. Перенос данных со старого mr-watch — `deploy/migrate-from-mr-watch.sh`.
+
+## Авторевью
 
 Локальный сервис автоматического ревью merge request для self-hosted GitLab.
 Следит за MR, где вы упомянуты, назначены ревьювером/исполнителем или являетесь
@@ -44,9 +53,9 @@
   иначе ревью переносится на новый head и возвращается в очередь с той же
   отсрочкой `push_debounce_sec` (если на новый head уже есть такое ревью —
   `cancelled`). Дальше — shallow-клон ровно на `head_sha` ревью, base-ветка в
-  `refs/mrwatch/base`, diff `git diff <base_sha> <head_sha>` (base —
+  `refs/lpdev/base`, diff `git diff <base_sha> <head_sha>` (base —
   `diff_refs.base_sha` MR, а если head MR ушёл вперёд — merge-base с
-  `refs/mrwatch/base`), затем `opencode run` с агентом проекта. После ответа,
+  `refs/lpdev/base`), затем `opencode run` с агентом проекта. После ответа,
   до удаления клона, сервис сам вырезает код к находкам по `путь:строка`:
   hunk диффа ±6 строк, а если строки нет в диффе — ±4 строки файла из клона.
   Ошибки клона — до 3 попыток с бэкоффом; если head MR уехал —
@@ -108,7 +117,7 @@
 - `gitlab.url` — только `https://`, без логина/пароля, query и fragment.
   Ссылки в UI проходят `safe_url` (только хост GitLab).
 - Веб-UI: bind `127.0.0.1`, Host-check (`127.0.0.1:8123`/`localhost:8123`),
-  POST-ручки требуют `X-Requested-With: mrwatch` (CSRF), HTML с `no-store`.
+  POST-ручки требуют `X-Requested-With: lpdev` (CSRF), HTML с `no-store`.
 - Конфиг: при group/other-writable или чужом владельце сервис не стартует,
   world-readable — warning; UI пишет конфиг и `.yaml.bak` с правами 0600.
   PAT — в macOS Keychain, в конфиге только `pat_command`.
@@ -133,8 +142,8 @@ $EDITOR config.yaml
 
 ## Конфиг
 
-Путь — `$MRWATCH_CONFIG`; launchd-plist задаёт `<проект>/config.yaml`, без
-переменной — `~/.config/mr-watch/config.yaml`. Поля — в `config.example.yaml`:
+Путь — `$LPDEV_CONFIG`; launchd-plist задаёт `<проект>/config.yaml`, без
+переменной — `~/.config/lemanapro-developer/config.yaml`. Поля — в `config.example.yaml`:
 GitLab (URL, интервал, `pat_command`), проекты (`gitlab_project_id`, `slug`,
 `agent`, `re_review_on_push`, опционально `model`/`variant`), ревью
 (параллельность, таймаут, глубина клона, TTL workspaces и логов, отсрочка
@@ -171,15 +180,15 @@ GitLab (URL, интервал, `pat_command`), проекты (`gitlab_project_i
 ## Эксплуатация
 
 ```bash
-launchctl load|unload ~/Library/LaunchAgents/ru.slinkin.mr-watch.plist
+launchctl load|unload ~/Library/LaunchAgents/ru.slinkin.lemanapro-developer.plist
 tail -f logs/app.log                      # основной лог
-tail -f ~/Library/Logs/mr-watch/err.log   # stdout/stderr launchd (out.log/err.log)
+tail -f ~/Library/Logs/lemanapro-developer/err.log   # stdout/stderr launchd (out.log/err.log)
 curl -s http://127.0.0.1:8123/healthz     # status, last_poll, last_error, dead_tasks
 ```
 
 - `/healthz`: 200 `ok`; 503 `degraded`, если последний опрос упал или умерла
   фоновая задача (поллер/воркер/бэкап — в `dead_tasks`).
-- БД: `data/mrwatch.db` (SQLite WAL, миграции через `PRAGMA user_version`).
+- БД: `data/lpdev.db` (SQLite WAL, миграции через `PRAGMA user_version`).
   Бэкап раз в сутки в `data/backups/` (при старте — сразу, если последний
   старше суток), хранится 7.
 - Логи: `logs/app.log` (ротация 5 × 5 МБ), `logs/review-<id>.log` — удаляются
