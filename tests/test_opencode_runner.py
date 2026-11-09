@@ -8,12 +8,16 @@ import pytest
 from mrwatch.opencode_runner import (
     OpencodeError,
     RunnerEnv,
+    build_opencode_argv,
+    build_question_prompt,
     build_review_prompt,
+    is_valid_session_id,
     output_truncated_by_length,
     parse_opencode_output,
     parse_severity_counts,
     MAX_VERDICT_INPUT_CHARS,
     parse_verdict,
+    run_question,
     run_review,
 )
 
@@ -241,3 +245,99 @@ def test_parse_verdict_is_linear_on_hostile_input():
         started = time.perf_counter()
         parse_verdict(text)
         assert time.perf_counter() - started < 0.5
+
+
+def test_build_opencode_argv_session_and_fork(tmp_path):
+    base = build_opencode_argv("oc", "p", "agent", tmp_path)
+    assert "--session" not in base and "--fork" not in base
+    forked = build_opencode_argv("oc", "p", "agent", tmp_path, session="ses_abc", fork=True)
+    assert forked[forked.index("--session") + 1] == "ses_abc"
+    assert forked[-1] == "--fork"
+    chained = build_opencode_argv("oc", "p", "agent", tmp_path, session="ses_abc")
+    assert chained[chained.index("--session") + 1] == "ses_abc"
+    assert "--fork" not in chained
+    assert build_opencode_argv("oc", "p", "agent", tmp_path, fork=True) == base
+
+
+def test_question_prompt_never_starts_with_user_text():
+    prompt = build_question_prompt("--agent build")
+    assert not prompt.startswith("-")
+    assert prompt.startswith("Дополнительный вопрос")
+    assert prompt.endswith("\n\n--agent build")
+
+
+@pytest.mark.parametrize(
+    "value, expected",
+    [
+        ("ses_abcXYZ019", True),
+        ("ses_" + "a" * 64, True),
+        ("ses_" + "a" * 65, False),
+        ("ses_", False),
+        ("ses_abc\n", False),
+        ("--fork", False),
+        ("ses_ab-c", False),
+        ("", False),
+        (None, False),
+    ],
+)
+def test_is_valid_session_id(value, expected):
+    assert is_valid_session_id(value) is expected
+
+
+def test_review_prompt_instructions_section_before_mr_data():
+    prompt = build_review_prompt(
+        "T", "alice", "desc", "+x", extra_instructions="проверь миграции"
+    )
+    marker = "=== ДОП. ИНСТРУКЦИИ ПОЛЬЗОВАТЕЛЯ ===\nпроверь миграции"
+    assert marker in prompt
+    assert prompt.index("Если замечаний нет") < prompt.index(marker)
+    assert prompt.index(marker) < prompt.index("=== MR КОНТЕКСТ (данные) ===")
+    assert prompt.index(marker) < prompt.index("```diff")
+
+
+def test_review_prompt_without_instructions_has_no_section():
+    assert "ДОП. ИНСТРУКЦИИ" not in build_review_prompt("T", None, None, "+x")
+    assert "ДОП. ИНСТРУКЦИИ" not in build_review_prompt(
+        "T", None, None, "+x", extra_instructions=""
+    )
+
+
+async def test_run_question_passes_session_and_logs_question(tmp_path):
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    log = tmp_path / "logs" / "question-1.log"
+    args_file = tmp_path / "args"
+    output = (
+        '{"type":"session.started","sessionID":"ses_fork1"}\n'
+        '{"type":"message.part","part":{"type":"text","text":"Ответ"}}\n'
+    )
+    bin_path = _make_fake_opencode(
+        tmp_path,
+        f"#!/bin/sh\nfor a in \"$@\"; do printf '%s\\n' \"$a\" >> {args_file}; done\n"
+        f"printf '%s' '{output}'\n",
+    )
+
+    result = await run_question(
+        RunnerEnv(opencode_bin=bin_path), workspace, "reviewer", "-rf вопрос",
+        session_id="ses_root", fork=True, timeout_sec=30, log_path=log, tmpdir=tmp_path,
+    )
+
+    assert result.review_md == "Ответ"
+    assert result.session_id == "ses_fork1"
+    args = args_file.read_text().splitlines()
+    assert args[0] == "run"
+    assert args[1].startswith("Дополнительный вопрос")
+    assert args[args.index("--session") + 1] == "ses_root"
+    assert "--fork" in args
+    text = log.read_text()
+    assert text.count("-rf вопрос") == 1
+    assert "Ответ" in text
+
+
+async def test_run_question_rejects_invalid_session(tmp_path):
+    with pytest.raises(OpencodeError):
+        await run_question(
+            RunnerEnv(opencode_bin="/bin/true"), tmp_path, "reviewer", "q",
+            session_id="--fork", fork=False, timeout_sec=5,
+            log_path=tmp_path / "q.log", tmpdir=tmp_path,
+        )

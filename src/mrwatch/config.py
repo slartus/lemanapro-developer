@@ -81,6 +81,7 @@ class ReviewConfig(BaseModel):
 
     max_parallel: int = Field(default=2, ge=1)
     timeout_sec: int = Field(default=1800, ge=1)
+    question_timeout_sec: int = Field(default=600, ge=1)
     clone_depth: int = Field(default=50, ge=1)
     workspace_ttl_days: int = Field(default=3, ge=1)
     log_ttl_days: int = Field(default=14, ge=1)

@@ -12,13 +12,17 @@ import mrwatch.worker as worker_module
 from mrwatch.config import Config, GitlabConfig, PathsConfig, ProjectConfig, ReviewConfig
 from mrwatch.config import resolve_paths
 from mrwatch.db import (
+    create_question,
     create_review,
+    finish_review,
     get_review,
+    list_questions,
     supersede_reviews,
     sync_projects,
     upsert_mr,
 )
-from mrwatch.worker import ReviewRegistry, Worker
+from mrwatch.opencode_runner import ReviewResult
+from mrwatch.worker import QUESTION_HEAD_GONE_ERROR, QuestionWorker, ReviewRegistry, Worker
 
 NDJSON_OUTPUT = (
     '{"type":"session.started","sessionID":"sess-w1"}\n'
@@ -411,3 +415,209 @@ async def test_worker_shutdown_propagates_cancel(tmp_path, db, origin, monkeypat
     assert not _workspace(tmp_path, review_id).exists()
     assert registry.cancel(review_id) is False
 
+
+
+def _question_worker(
+    tmp_path: Path, db_conn, origin: Path, registry: ReviewRegistry | None = None
+) -> QuestionWorker:
+    config = _config(tmp_path, "/bin/true")
+    paths = resolve_paths(config)
+    (paths.workspaces.parent / "tmp").mkdir(parents=True, exist_ok=True)
+
+    class LocalQuestionWorker(QuestionWorker):
+        def _repo_url(self, mr) -> str:
+            return str(origin)
+
+    agents_dir = tmp_path / "agents"
+    agents_dir.mkdir(exist_ok=True)
+    (agents_dir / "agent-a.md").write_text(READONLY_AGENT)
+    return LocalQuestionWorker(
+        0, db_conn, None, config, paths, clone_harden=False, agents_dirs=(agents_dir,),
+        registry=registry,
+    )
+
+
+def _done_review_with_question(db_conn, origin: Path, session_id: str = "ses_root1"):
+    review_id = _queued_review(db_conn, origin)
+    finish_review(db_conn, review_id, "done", review_md="ok", session_id=session_id)
+    question_id = create_question(db_conn, review_id, "почему так?")
+    assert question_id is not None
+    return review_id, question_id
+
+
+def _question(db_conn, review_id: int, question_id: int):
+    return next(q for q in list_questions(db_conn, review_id) if q["id"] == question_id)
+
+
+def _spy_run_question(monkeypatch, answer: str = "ответ", session: str = "ses_out1"):
+    calls: list[dict] = []
+
+    async def fake(**kwargs):
+        kwargs["workspace_existed"] = (kwargs["workspace"] / ".git").is_dir()
+        calls.append(kwargs)
+        return ReviewResult(review_md=answer, session_id=session, exit_code=0)
+
+    monkeypatch.setattr(worker_module, "run_question", fake)
+    return calls
+
+
+async def test_question_first_forks_root_then_chains_parent(tmp_path, db, origin, monkeypatch):
+    review_id, first = _done_review_with_question(db, origin)
+    worker = _question_worker(tmp_path, db, origin)
+    calls = _spy_run_question(monkeypatch, session="ses_out1")
+    validated: list[str] = []
+    real_validate = worker_module.validate_agent
+
+    def spy_validate(agent, dirs=None):
+        validated.append(agent)
+        return real_validate(agent, dirs)
+
+    monkeypatch.setattr(worker_module, "validate_agent", spy_validate)
+
+    assert await worker.process_one() is True
+
+    row = _question(db, review_id, first)
+    assert row["status"] == "done"
+    assert row["answer_md"] == "ответ"
+    assert row["session_id"] == "ses_out1"
+    assert validated == ["agent-a"]
+    call = calls[0]
+    assert call["session_id"] == "ses_root1"
+    assert call["fork"] is True
+    assert call["question"] == "почему так?"
+    assert call["agent"] == "agent-a"
+    assert call["workspace"] == _workspace(tmp_path, review_id)
+    assert call["workspace_existed"] is True
+    assert call["timeout_sec"] == 600
+    assert call["log_path"].name == f"question-{first}.log"
+    assert not _workspace(tmp_path, review_id).exists()
+
+    second = create_question(db, review_id, "а ещё?")
+    calls.clear()
+    assert await worker.process_one() is True
+    assert calls[0]["session_id"] == "ses_out1"
+    assert calls[0]["fork"] is False
+    assert _question(db, review_id, second)["status"] == "done"
+    assert not _workspace(tmp_path, review_id).exists()
+    assert await worker.process_one() is False
+
+
+async def test_question_head_gone_marks_error(tmp_path, db, origin, monkeypatch):
+    review_id, question_id = _done_review_with_question(db, origin)
+    db.execute("UPDATE review SET head_sha = ? WHERE id = ?", ("e" * 40, review_id))
+    worker = _question_worker(tmp_path, db, origin)
+    calls = _spy_run_question(monkeypatch)
+
+    assert await worker.process_one() is True
+
+    row = _question(db, review_id, question_id)
+    assert row["status"] == "error"
+    assert row["error"] == QUESTION_HEAD_GONE_ERROR
+    assert calls == []
+    assert not _workspace(tmp_path, review_id).exists()
+
+
+async def test_question_invalid_session_marks_error(tmp_path, db, origin, monkeypatch):
+    review_id, question_id = _done_review_with_question(db, origin, session_id="--fork")
+    worker = _question_worker(tmp_path, db, origin)
+    calls = _spy_run_question(monkeypatch)
+
+    assert await worker.process_one() is True
+
+    row = _question(db, review_id, question_id)
+    assert row["status"] == "error"
+    assert "сессии" in row["error"]
+    assert calls == []
+
+
+async def test_question_rejects_unsafe_agent(tmp_path, db, origin, monkeypatch):
+    review_id, question_id = _done_review_with_question(db, origin)
+    worker = _question_worker(tmp_path, db, origin)
+    (tmp_path / "agents" / "agent-a.md").write_text("---\ndescription: r\n---\nbody\n")
+    calls = _spy_run_question(monkeypatch)
+
+    assert await worker.process_one() is True
+
+    row = _question(db, review_id, question_id)
+    assert row["status"] == "error"
+    assert row["error"].startswith("agent rejected")
+    assert calls == []
+
+
+async def test_question_opencode_without_answer_marks_error(tmp_path, db, origin, monkeypatch):
+    review_id, question_id = _done_review_with_question(db, origin)
+    worker = _question_worker(tmp_path, db, origin)
+
+    async def failing(**kwargs):
+        return ReviewResult(exit_code=1, error="opencode exit 1: boom")
+
+    monkeypatch.setattr(worker_module, "run_question", failing)
+
+    assert await worker.process_one() is True
+
+    row = _question(db, review_id, question_id)
+    assert row["status"] == "error"
+    assert row["error"] == "opencode exit 1: boom"
+    assert not _workspace(tmp_path, review_id).exists()
+
+
+async def test_question_cancel_removes_workspace(tmp_path, db, origin, monkeypatch):
+    review_id, question_id = _done_review_with_question(db, origin)
+    registry = ReviewRegistry()
+    worker = _question_worker(tmp_path, db, origin, registry)
+    started = asyncio.Event()
+
+    async def blocking(**kwargs):
+        started.set()
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(worker_module, "run_question", blocking)
+    task = asyncio.create_task(worker.process_one())
+    await asyncio.wait_for(started.wait(), timeout=10)
+    assert _workspace(tmp_path, review_id).exists()
+
+    assert registry.cancel(question_id) is True
+    assert await task is True
+
+    row = _question(db, review_id, question_id)
+    assert row["status"] == "cancelled"
+    assert not _workspace(tmp_path, review_id).exists()
+    assert registry.cancel(question_id) is False
+
+
+async def test_question_shutdown_propagates_cancel(tmp_path, db, origin, monkeypatch):
+    review_id, question_id = _done_review_with_question(db, origin)
+    worker = _question_worker(tmp_path, db, origin, ReviewRegistry())
+    started = asyncio.Event()
+
+    async def blocking(**kwargs):
+        started.set()
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(worker_module, "run_question", blocking)
+    task = asyncio.create_task(worker.process_one())
+    await asyncio.wait_for(started.wait(), timeout=10)
+
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert _question(db, review_id, question_id)["status"] == "running"
+    assert not _workspace(tmp_path, review_id).exists()
+
+
+async def test_review_prompt_gets_extra_instructions(tmp_path, db, origin, monkeypatch):
+    review_id = _queued_review(db, origin)
+    db.execute(
+        "UPDATE review SET extra_instructions = ? WHERE id = ?", ("смотри SQL", review_id)
+    )
+    worker = _worker(tmp_path, db, origin, "/bin/true")
+    prompts: list[str] = []
+
+    async def fake_review(**kwargs):
+        prompts.append(kwargs["prompt"])
+        return ReviewResult(review_md="ok", session_id="ses_r", exit_code=0)
+
+    monkeypatch.setattr(worker_module, "run_review", fake_review)
+    assert await worker.process_one() is True
+    assert "=== ДОП. ИНСТРУКЦИИ ПОЛЬЗОВАТЕЛЯ ===\nсмотри SQL" in prompts[0]

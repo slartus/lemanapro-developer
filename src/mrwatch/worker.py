@@ -10,8 +10,11 @@ from pathlib import Path
 from mrwatch.agents import AgentError, validate_agent
 from mrwatch.config import Config, ResolvedPaths
 from mrwatch.db import (
+    claim_next_question,
     claim_next_review,
+    finish_question,
     finish_review,
+    get_review,
     mark_reviewing,
     rebase_review_head,
     requeue_review,
@@ -34,8 +37,10 @@ from mrwatch.opencode_runner import (
     OpencodeError,
     RunnerEnv,
     build_review_prompt,
+    is_valid_session_id,
     parse_severity_counts,
     parse_verdict,
+    run_question,
     run_review,
 )
 
@@ -46,6 +51,8 @@ MAX_CLONE_ATTEMPTS = 3
 MIN_FREE_DISK_BYTES = 5 * 1024**3
 IDLE_SLEEP_SEC = 2.0
 ERROR_PAUSE_SEC = 5.0
+QUESTION_HEAD_GONE_ERROR = "коммит ревью больше недоступен в репозитории"
+QUESTION_CANCELLED_ERROR = "отменено"
 
 
 class ReviewRegistry:
@@ -297,6 +304,7 @@ class Worker:
                 author=mr["author_username"],
                 description=detail.get("description"),
                 diff=diff,
+                extra_instructions=review["extra_instructions"],
             )
             log_path = self._paths.logs / f"review-{review_id}.log"
             project_cfg = next(
@@ -341,6 +349,134 @@ class Worker:
                 verdict=parse_verdict(result.review_md),
                 snippets_json=snippets_json,
             )
+
+
+class QuestionWorker(Worker):
+    async def process_one(self) -> bool:
+        question = claim_next_question(self._conn)
+        if question is None:
+            return False
+        question_id = question["id"]
+        task = asyncio.create_task(
+            self._process_question(question), name=f"mrwatch-question-{question_id}"
+        )
+        self._registry.register(question_id, task)
+        try:
+            await task
+        except asyncio.CancelledError:
+            current = asyncio.current_task()
+            if current is not None and current.cancelling():
+                raise
+            if not self._registry.was_cancelled(question_id):
+                raise
+            logger.info("question %s cancelled", question_id)
+            finish_question(self._conn, question_id, "cancelled", error=QUESTION_CANCELLED_ERROR)
+        except Exception:
+            logger.exception("question %s crashed", question_id)
+            finish_question(
+                self._conn, question_id, "error",
+                error="internal worker error (see app.log)",
+            )
+        finally:
+            self._registry.unregister(question_id)
+        return True
+
+    def _fail(self, question_id: int, error: str) -> None:
+        finish_question(self._conn, question_id, "error", error=error)
+
+    async def _process_question(self, question: sqlite3.Row) -> None:
+        question_id = question["id"]
+        config = self._config
+        if self._low_disk():
+            self._fail(question_id, "low disk: <5GB free")
+            return
+        review = get_review(self._conn, question["review_id"])
+        if review is None:
+            self._fail(question_id, "review row missing")
+            return
+        mr = self._load_mr(review["mr_id"])
+        if mr is None:
+            self._fail(question_id, "mr row missing")
+            return
+        try:
+            validate_agent(review["agent"], self._agents_dirs)
+        except AgentError as exc:
+            self._fail(question_id, f"agent rejected: {exc}")
+            return
+        fork = question["parent_session_id"] is None
+        session_id = question["root_session_id"] if fork else question["parent_session_id"]
+        if not is_valid_session_id(session_id):
+            self._fail(question_id, "некорректный id сессии opencode")
+            return
+
+        workspace = (
+            self._paths.workspaces
+            / str(mr["gitlab_project_id"])
+            / str(mr["iid"])
+            / str(review["id"])
+        )
+        tmpdir = self._paths.workspaces.parent / "tmp"
+        try:
+            try:
+                await clone_for_review(
+                    workspace=workspace,
+                    repo_url=self._repo_url(mr),
+                    mr_iid=mr["iid"],
+                    target_branch=None,
+                    depth=config.review.clone_depth,
+                    env=make_git_env(config.gitlab.pat_command, tmpdir),
+                    tmpdir=tmpdir,
+                    harden=self._clone_harden,
+                    expected_sha=review["head_sha"],
+                )
+            except HeadMismatchError as exc:
+                logger.warning("question %s: %s", question_id, exc)
+                self._fail(question_id, QUESTION_HEAD_GONE_ERROR)
+                return
+            except Exception as exc:
+                logger.warning("question %s: clone failed: %s", question_id, exc)
+                self._fail(question_id, f"clone failed: {exc}")
+                return
+            project_cfg = next(
+                (p for p in config.projects if p.gitlab_project_id == mr["gitlab_project_id"]),
+                None,
+            )
+            oc = config.opencode
+            try:
+                result = await run_question(
+                    env=RunnerEnv(opencode_bin=oc.bin),
+                    workspace=workspace,
+                    agent=review["agent"],
+                    question=question["question"],
+                    session_id=session_id,
+                    fork=fork,
+                    timeout_sec=config.review.question_timeout_sec,
+                    log_path=self._paths.logs / f"question-{question_id}.log",
+                    tmpdir=tmpdir,
+                    model=(project_cfg.model if project_cfg and project_cfg.model else oc.model),
+                    variant=(
+                        project_cfg.variant if project_cfg and project_cfg.variant else oc.variant
+                    ),
+                )
+            except OpencodeError as exc:
+                self._fail(question_id, f"opencode failed: {exc}")
+                return
+        finally:
+            await self._discard_workspace(workspace)
+        if result.review_md is None:
+            finish_question(
+                self._conn, question_id, "error",
+                session_id=result.session_id,
+                exit_code=result.exit_code,
+                error=result.error or "opencode produced no answer",
+            )
+            return
+        finish_question(
+            self._conn, question_id, "done",
+            answer_md=result.review_md,
+            session_id=result.session_id,
+            exit_code=result.exit_code,
+        )
 
 
 def start_workers(

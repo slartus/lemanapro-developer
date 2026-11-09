@@ -1,0 +1,20 @@
+{% from "_macros.html" import render_rows %}
+{% macro qa_item(item) %}{% set q = item["q"] %}<article class="qa" data-id="{{ q["id"] }}" data-status="{{ q["status"] }}">
+<div class="qa-head small"><span class="badge status {{ {"running": "reviewing"}.get(q["status"], q["status"]) }}">{{ q["status"] }}</span><time data-ts="{{ q["created_at"] }}">{{ q["created_at"] }}</time></div>
+<div class="qa-question">{{ q["question"] }}</div>
+{% if q["status"] in ("queued", "running") %}<p class="muted small">ответ готовится…</p>
+{% elif q["status"] == "done" %}<div class="review-text qa-answer">{{ render_rows(item["rows"]) }}</div>
+{% elif q["status"] == "cancelled" %}<div class="error-block cancelled" role="status"><strong>Вопрос отменён</strong>{% if q["error"] %}<pre>{{ q["error"] }}</pre>{% endif %}</div>
+{% else %}<div class="error-block" role="alert"><strong>Ответ не получен</strong><pre>{{ q["error"] or "неизвестная ошибка" }}</pre></div>
+{% endif %}
+</article>{% endmacro %}
+{% set previous = questions | selectattr("previous") | list %}
+{% set current = questions | rejectattr("previous") | list %}
+{% if previous %}
+<details class="qa-old"><summary class="small muted">{{ previous | length }} — к предыдущей версии ревью</summary>
+{% for item in previous %}{{ qa_item(item) }}
+{% endfor %}</details>
+{% endif %}
+{% for item in current %}{{ qa_item(item) }}
+{% endfor %}
+{% if not questions %}<p class="muted small">вопросов пока нет</p>{% endif %}

@@ -408,9 +408,11 @@ async def test_lifespan_starts_supervised_tasks(tmp_path):
     ctx = _app_ctx(tmp_path, max_parallel=2)
     app = create_app(ctx)
     async with app.router.lifespan_context(app):
-        assert len(app.state.tasks) == 4
+        assert len(app.state.tasks) == 5
         assert app.state.worker_count == 2
         assert isinstance(app.state.work_event, asyncio.Event)
+        assert isinstance(app.state.question_event, asyncio.Event)
+        assert "mrwatch-question-worker" in {t.get_name() for t in app.state.tasks}
     assert all(t.done() for t in app.state.tasks)
 
 
@@ -711,7 +713,7 @@ def test_migration_v3_to_v4_moves_legacy_cursor(tmp_path):
     assert poll_state_get(c, MR_CURSOR_KEY.format(10)) == "2026-01-01T00:00:00+00:00"
     assert poll_state_get(c, MR_CURSOR_KEY.format(20)) is None
     assert poll_state_get(c, "mr_cursor") is None
-    assert c.execute("PRAGMA user_version").fetchone()[0] == 10
+    assert c.execute("PRAGMA user_version").fetchone()[0] == 11
     assert {r[1] for r in c.execute("PRAGMA table_info(review)")} >= {"not_before"}
     c.close()
 
@@ -1093,7 +1095,7 @@ async def test_api_review_json(tmp_path):
         resp = await client.get(f"/api/reviews/{review_id}")
         missing = await client.get("/api/reviews/999")
     body = resp.json()
-    assert set(body) == {"id", "status", "error", "finished_at", "verdict"}
+    assert set(body) == {"id", "status", "error", "finished_at", "verdict", "questions"}
     assert body["status"] == "error" and body["error"] == "bad"
     assert body["finished_at"] is not None
     assert missing.status_code == 404

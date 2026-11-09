@@ -320,13 +320,14 @@ def cleanup_old_workspaces(workspaces_root: Path, ttl_days: int) -> int:
 def cleanup_old_review_logs(logs_dir: Path, ttl_days: int) -> int:
     cutoff = (datetime.now(UTC) - timedelta(days=ttl_days)).timestamp()
     removed = 0
-    for log in logs_dir.glob("review-*.log"):
-        try:
-            if log.is_file() and log.stat().st_mtime < cutoff:
-                log.unlink()
-                removed += 1
-        except OSError:
-            continue
+    for pattern in ("review-*.log", "question-*.log"):
+        for log in logs_dir.glob(pattern):
+            try:
+                if log.is_file() and log.stat().st_mtime < cutoff:
+                    log.unlink()
+                    removed += 1
+            except OSError:
+                continue
     return removed
 
 

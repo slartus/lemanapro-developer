@@ -18,7 +18,7 @@ from mrwatch.git_ops import cleanup_old_review_logs, cleanup_old_workspaces, cle
 from mrwatch.gitlab_client import GitLabClient
 from mrwatch.poller import Poller
 from mrwatch.web.routes import router as web_router
-from mrwatch.worker import ReviewRegistry, start_workers
+from mrwatch.worker import QuestionWorker, ReviewRegistry, start_workers
 
 logger = logging.getLogger("mrwatch")
 
@@ -158,6 +158,15 @@ def create_app(ctx: AppContext, port: int = DEFAULT_PORT) -> FastAPI:
             ctx.paths, work_event, config_provider=lambda: ctx.config,
             registry=registry,
         ))
+        question_event = asyncio.Event()
+        app.state.question_event = question_event
+        question_worker = QuestionWorker(
+            0, ctx.conn, ctx.api, ctx.config, ctx.paths, question_event,
+            config_provider=lambda: ctx.config, registry=ReviewRegistry(),
+        )
+        tasks.append(
+            asyncio.create_task(question_worker.run(), name="mrwatch-question-worker")
+        )
         tasks.append(asyncio.create_task(_backup_loop(ctx), name="mrwatch-backup"))
         for task in tasks:
             _supervise(task)

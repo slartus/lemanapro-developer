@@ -9,7 +9,7 @@ from mrwatch.opencode_runner import MAX_VERDICT_INPUT_CHARS, parse_verdict
 
 MAX_REVIEW_MD_LENGTH = MAX_VERDICT_INPUT_CHARS
 TRUNCATION_MARKER = "...[truncated]"
-SCHEMA_VERSION = 10
+SCHEMA_VERSION = 11
 
 DERIVED_ROLES = frozenset({"reviewer", "assignee", "author"})
 MENTIONED_ROLE = "mentioned"
@@ -17,6 +17,8 @@ READY_REVIEW_ROLES = frozenset({"reviewer", "author", MENTIONED_ROLE})
 
 
 DRAFT_CANCEL_ERROR = "отменено: MR переведён в draft"
+
+MAX_QUESTIONS_PER_REVIEW = 50
 
 SEVERITY_COLUMNS = ("crit_count", "major_count", "minor_count", "nit_count")
 
@@ -131,6 +133,8 @@ def init_schema(conn: sqlite3.Connection) -> None:
         _run_migration(conn, 9, _migrate_to_v9)
     if version < 10:
         _run_migration(conn, 10, _migrate_to_v10)
+    if version < 11:
+        _run_migration(conn, 11, _migrate_to_v11)
     conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
     conn.commit()
 
@@ -556,6 +560,36 @@ def _migrate_to_v10(conn: sqlite3.Connection) -> None:
     conn.execute("CREATE INDEX IF NOT EXISTS idx_review_mr ON review(mr_id)")
 
 
+def _migrate_to_v11(conn: sqlite3.Connection) -> None:
+    _add_column(conn, "review", "extra_instructions", "TEXT")
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS review_question (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            review_id INTEGER NOT NULL,
+            question TEXT NOT NULL,
+            answer_md TEXT,
+            status TEXT NOT NULL DEFAULT 'queued'
+                CHECK(status IN ('queued','running','done','error','cancelled')),
+            root_session_id TEXT,
+            parent_session_id TEXT,
+            session_id TEXT,
+            exit_code INTEGER,
+            error TEXT,
+            created_at TEXT NOT NULL,
+            started_at TEXT,
+            finished_at TEXT
+        )
+        """
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_review_question_review ON review_question(review_id, id)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_review_question_status ON review_question(status)"
+    )
+
+
 def supersede_reviews(conn: sqlite3.Connection, mr_id: int, new_sha: str) -> SupersedeResult:
     cancelled_active: list[int] = []
     rebased: list[int] = []
@@ -663,7 +697,9 @@ def finish_review(
     conn.commit()
 
 
-def retry_review(conn: sqlite3.Connection, review_id: int) -> bool:
+def retry_review(
+    conn: sqlite3.Connection, review_id: int, instructions: str | None = None
+) -> bool:
     cursor = conn.execute(
         """
         UPDATE review
@@ -671,7 +707,7 @@ def retry_review(conn: sqlite3.Connection, review_id: int) -> bool:
             error = NULL, started_at = NULL, finished_at = NULL,
             attempt = 0, not_before = NULL,
             crit_count = 0, major_count = 0, minor_count = 0, nit_count = 0,
-            verdict = NULL, snippets_json = NULL,
+            verdict = NULL, snippets_json = NULL, extra_instructions = ?,
             agent = COALESCE(
                 (SELECT project.agent FROM project
                  JOIN mr ON mr.project_id = project.id
@@ -679,8 +715,13 @@ def retry_review(conn: sqlite3.Connection, review_id: int) -> bool:
                 agent
             )
         WHERE id = ? AND status IN ('error', 'done', 'cancelled')
+            AND NOT EXISTS (
+                SELECT 1 FROM review_question
+                WHERE review_question.review_id = review.id
+                    AND review_question.status IN ('queued', 'running')
+            )
         """,
-        (review_id,),
+        (instructions or None, review_id),
     )
     conn.commit()
     return cursor.rowcount > 0
@@ -733,8 +774,112 @@ def requeue_incomplete(conn: sqlite3.Connection) -> int:
     cursor = conn.execute(
         "UPDATE review SET status = 'queued' WHERE status IN ('queued', 'cloning', 'reviewing')"
     )
+    conn.execute(
+        "UPDATE review_question SET status = 'queued', started_at = NULL, "
+        "parent_session_id = NULL WHERE status = 'running'"
+    )
     conn.commit()
     return cursor.rowcount
+
+
+def create_question(conn: sqlite3.Connection, review_id: int, question: str) -> int | None:
+    cursor = conn.execute(
+        """
+        INSERT INTO review_question (review_id, question, status, root_session_id, created_at)
+        SELECT review.id, ?, 'queued', review.session_id, ?
+        FROM review
+        WHERE review.id = ? AND review.status = 'done' AND review.session_id IS NOT NULL
+            AND NOT EXISTS (
+                SELECT 1 FROM review_question q
+                WHERE q.review_id = review.id AND q.status IN ('queued', 'running')
+            )
+            AND (SELECT COUNT(*) FROM review_question q WHERE q.review_id = review.id) < ?
+        """,
+        (question, utcnow_iso(), review_id, MAX_QUESTIONS_PER_REVIEW),
+    )
+    conn.commit()
+    if cursor.rowcount == 0:
+        return None
+    return int(cursor.lastrowid)
+
+
+def question_rejection_reason(conn: sqlite3.Connection, review_id: int) -> str:
+    review = get_review(conn, review_id)
+    if review is None or review["status"] != "done":
+        return "вопросы доступны только для завершённого ревью"
+    if not review["session_id"]:
+        return "у ревью нет сессии opencode"
+    if has_active_question(conn, review_id):
+        return "предыдущий вопрос ещё обрабатывается, дождитесь ответа"
+    return f"достигнут лимит вопросов к ревью ({MAX_QUESTIONS_PER_REVIEW})"
+
+
+def has_active_question(conn: sqlite3.Connection, review_id: int) -> bool:
+    row = conn.execute(
+        "SELECT 1 FROM review_question WHERE review_id = ? AND status IN ('queued', 'running') "
+        "LIMIT 1",
+        (review_id,),
+    ).fetchone()
+    return row is not None
+
+
+def claim_next_question(conn: sqlite3.Connection) -> sqlite3.Row | None:
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        row = conn.execute(
+            "SELECT id, review_id, root_session_id FROM review_question "
+            "WHERE status = 'queued' ORDER BY id LIMIT 1"
+        ).fetchone()
+        if row is None:
+            conn.commit()
+            return None
+        parent = conn.execute(
+            """
+            SELECT session_id FROM review_question
+            WHERE review_id = ? AND root_session_id = ? AND status = 'done'
+                AND session_id IS NOT NULL AND id < ?
+            ORDER BY id DESC LIMIT 1
+            """,
+            (row["review_id"], row["root_session_id"], row["id"]),
+        ).fetchone()
+        conn.execute(
+            "UPDATE review_question SET status = 'running', started_at = ?, "
+            "parent_session_id = ? WHERE id = ?",
+            (utcnow_iso(), parent["session_id"] if parent is not None else None, row["id"]),
+        )
+        conn.commit()
+    except BaseException:
+        conn.rollback()
+        raise
+    return conn.execute("SELECT * FROM review_question WHERE id = ?", (row["id"],)).fetchone()
+
+
+def finish_question(
+    conn: sqlite3.Connection,
+    question_id: int,
+    status: str,
+    answer_md: str | None = None,
+    session_id: str | None = None,
+    exit_code: int | None = None,
+    error: str | None = None,
+) -> None:
+    if answer_md is not None and len(answer_md) > MAX_REVIEW_MD_LENGTH:
+        answer_md = answer_md[:MAX_REVIEW_MD_LENGTH] + TRUNCATION_MARKER
+    conn.execute(
+        """
+        UPDATE review_question
+        SET status = ?, answer_md = ?, session_id = ?, exit_code = ?, error = ?, finished_at = ?
+        WHERE id = ? AND status IN ('queued', 'running')
+        """,
+        (status, answer_md, session_id, exit_code, error, utcnow_iso(), question_id),
+    )
+    conn.commit()
+
+
+def list_questions(conn: sqlite3.Connection, review_id: int) -> list[sqlite3.Row]:
+    return conn.execute(
+        "SELECT * FROM review_question WHERE review_id = ? ORDER BY id", (review_id,)
+    ).fetchall()
 
 
 def get_review(conn: sqlite3.Connection, review_id: int) -> sqlite3.Row | None:

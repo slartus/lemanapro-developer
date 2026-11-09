@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
+import re
+import unicodedata
 from functools import lru_cache
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -16,7 +19,16 @@ from fastapi.templating import Jinja2Templates
 
 from mrwatch.agents import list_readonly_agents
 from mrwatch.config import Config, default_config_path, load_config
-from mrwatch.db import get_review, list_mrs, retry_review, sync_projects
+from mrwatch.db import (
+    create_question,
+    get_review,
+    has_active_question,
+    list_mrs,
+    list_questions,
+    question_rejection_reason,
+    retry_review,
+    sync_projects,
+)
 from mrwatch.gitlab_client import GitlabApiError
 from mrwatch.review_findings import layout_review, load_snippets
 
@@ -27,6 +39,10 @@ router = APIRouter()
 templates = Jinja2Templates(directory=str(Path(__file__).parent / "templates"))
 
 FAVICON_PATH = Path(__file__).parent / "static" / "favicon.svg"
+
+MAX_QUESTION_CHARS = 4000
+MAX_INSTRUCTIONS_CHARS = 2000
+CONTROL_CHARS_RE = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]")
 
 
 @lru_cache(maxsize=1)
@@ -99,11 +115,87 @@ async def review_detail(request: Request, review_id: int):
     rows, orphans = await asyncio.to_thread(
         layout_review, review["review_md"], load_snippets(review["snippets_json"])
     )
+    questions = await _question_items(ctx.conn, review)
     return templates.TemplateResponse(
         request, "review.html",
         {"review": review, "mr": mr, "siblings": siblings,
-         "rows": rows, "snippets": orphans},
+         "rows": rows, "snippets": orphans, "questions": questions,
+         "max_question_chars": MAX_QUESTION_CHARS,
+         "max_instructions_chars": MAX_INSTRUCTIONS_CHARS},
     )
+
+
+def _layout_answers(questions: list, session_id: str | None) -> list[dict]:
+    return [
+        {
+            "q": q,
+            "rows": layout_review(q["answer_md"], [])[0],
+            "previous": q["root_session_id"] != session_id,
+        }
+        for q in questions
+    ]
+
+
+async def _question_items(conn, review) -> list[dict]:
+    return await asyncio.to_thread(
+        _layout_answers, list_questions(conn, review["id"]), review["session_id"]
+    )
+
+
+def normalize_user_text(value: str) -> str:
+    text = unicodedata.normalize("NFC", value)
+    return CONTROL_CHARS_RE.sub("", text).strip()
+
+
+async def _read_json_body(request: Request) -> tuple[dict | None, bool]:
+    raw = await request.body()
+    if not raw.strip():
+        return None, True
+    try:
+        body = json.loads(raw)
+    except (ValueError, UnicodeDecodeError):
+        return None, False
+    if not isinstance(body, dict):
+        return None, False
+    return body, True
+
+
+@router.get("/reviews/{review_id}/questions", response_class=HTMLResponse)
+async def review_questions(request: Request, review_id: int):
+    ctx = _ctx(request)
+    review = get_review(ctx.conn, review_id)
+    if review is None:
+        return PlainTextResponse("not found", status_code=404)
+    questions = await _question_items(ctx.conn, review)
+    return templates.TemplateResponse(
+        request, "_qa.html", {"review": review, "questions": questions},
+    )
+
+
+@router.post("/reviews/{review_id}/questions")
+async def review_ask(request: Request, review_id: int):
+    if request.headers.get("x-requested-with") != "mrwatch":
+        return PlainTextResponse("forbidden", status_code=403)
+    ctx = _ctx(request)
+    if get_review(ctx.conn, review_id) is None:
+        return PlainTextResponse("not found", status_code=404)
+    body, ok = await _read_json_body(request)
+    if not ok or body is None or not isinstance(body.get("question"), str):
+        return PlainTextResponse("неверное тело запроса", status_code=400)
+    question = normalize_user_text(body["question"])
+    if not question:
+        return PlainTextResponse("вопрос пустой", status_code=400)
+    if len(question) > MAX_QUESTION_CHARS:
+        return PlainTextResponse(
+            f"вопрос длиннее {MAX_QUESTION_CHARS} символов", status_code=413
+        )
+    question_id = create_question(ctx.conn, review_id, question)
+    if question_id is None:
+        return PlainTextResponse(
+            question_rejection_reason(ctx.conn, review_id), status_code=409
+        )
+    _wake_question_worker(request)
+    return JSONResponse({"id": question_id}, status_code=201)
 
 
 @router.post("/force-check")
@@ -132,8 +224,23 @@ async def review_retry(request: Request, review_id: int):
         return PlainTextResponse("not found", status_code=404)
     if review["status"] in ACTIVE_STATUSES:
         return PlainTextResponse("ревью уже выполняется", status_code=409)
-    if retry_review(ctx.conn, review_id):
+    body, ok = await _read_json_body(request)
+    if not ok:
+        return PlainTextResponse("неверное тело запроса", status_code=400)
+    raw_instructions = (body or {}).get("instructions")
+    if raw_instructions is not None and not isinstance(raw_instructions, str):
+        return PlainTextResponse("неверное тело запроса", status_code=400)
+    instructions = normalize_user_text(raw_instructions or "")
+    if len(instructions) > MAX_INSTRUCTIONS_CHARS:
+        return PlainTextResponse(
+            f"инструкции длиннее {MAX_INSTRUCTIONS_CHARS} символов", status_code=413
+        )
+    if retry_review(ctx.conn, review_id, instructions or None):
         _wake_workers(request)
+    elif has_active_question(ctx.conn, review_id):
+        return PlainTextResponse(
+            "по ревью обрабатывается вопрос, дождитесь ответа", status_code=409
+        )
     return RedirectResponse(f"/reviews/{review_id}", status_code=303)
 
 
@@ -168,6 +275,12 @@ def _wake_workers(request: Request) -> None:
         work_event.set()
 
 
+def _wake_question_worker(request: Request) -> None:
+    question_event = getattr(request.app.state, "question_event", None)
+    if question_event is not None:
+        question_event.set()
+
+
 @router.get("/api/reviews/{review_id}")
 async def api_review(request: Request, review_id: int):
     review = get_review(_ctx(request).conn, review_id)
@@ -179,6 +292,10 @@ async def api_review(request: Request, review_id: int):
         "error": review["error"],
         "finished_at": review["finished_at"],
         "verdict": review["verdict"],
+        "questions": [
+            {"id": q["id"], "status": q["status"]}
+            for q in list_questions(_ctx(request).conn, review_id)
+        ],
     })
 
 

@@ -34,6 +34,8 @@ review:
   max_parallel: 2
   # Таймаут opencode run на одно ревью (включая автоповтор при reason=length), секунды.
   timeout_sec: 1800
+  # Таймаут opencode run на один вопрос ревьюеру, секунды.
+  question_timeout_sec: 600
   # Глубина shallow-клона.
   clone_depth: 50
   # Удалять рабочие каталоги старше N дней (страховка на случай краха).
