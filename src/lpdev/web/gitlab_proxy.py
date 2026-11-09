@@ -28,6 +28,7 @@ ALLOWED_REST_PATHS = tuple(
         r"/todos",
         r"/personal_access_tokens/self",
         rf"/projects/{_SEGMENT}/merge_requests",
+        rf"/projects/{_SEGMENT}/merge_requests/\d+",
         rf"/projects/{_SEGMENT}/merge_requests/\d+/(approvals|discussions)",
         rf"/projects/{_SEGMENT}/repository/(branches|compare)",
         rf"/projects/{_SEGMENT}/pipelines/\d+/(jobs|bridges)",

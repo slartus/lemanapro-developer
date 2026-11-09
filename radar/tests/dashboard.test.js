@@ -723,6 +723,110 @@ describe('collectDashboard', () => {
     assert.equal(item.pipeline.onlyIgnoredFailures, false);
     assert.equal(deriveView(dashboard).counts.failedCi, 1);
   });
+
+  it('attaches head pipeline failures to MRs from other sections', async () => {
+    const reviewing = mr({ iid: 2, detailed_merge_status: 'ci_must_pass' });
+    const mentionedTarget = mr({ projectId: 11, iid: 3, detailed_merge_status: 'ci_must_pass' });
+    const withPipeline = (mr, pipeline) => ({ ...mr, head_pipeline: pipeline });
+    const job = (id, name) => ({ id, name, stage: 'test', failure_reason: 'script_failure', web_url: 'u' });
+    const client = new FakeClient({
+      ...emptyDashboardRoutes(),
+      '/merge_requests': mergeRequestsRoute({ reviewing: [reviewing] }),
+      '/projects/10/merge_requests/2/approvals': approvals(),
+      '/projects/10/merge_requests/2': withPipeline(reviewing, {
+        id: 201,
+        sha: 'sha201',
+        status: 'failed',
+        web_url: 'https://gitlab.example.com/group/project/-/pipelines/201',
+      }),
+      '/projects/11/merge_requests/3': withPipeline(mentionedTarget, {
+        id: 301,
+        sha: 'sha301',
+        status: 'failed',
+        web_url: 'https://gitlab.example.com/group/project/-/pipelines/301',
+      }),
+      '/todos': [
+        {
+          id: 1,
+          action_name: 'mentioned',
+          target_type: 'MergeRequest',
+          target: { ...mentionedTarget, state: 'opened' },
+          target_url: 'u',
+          author: ALICE,
+          created_at: '2026-01-02T00:00:00Z',
+        },
+      ],
+      '/projects/group%2Fproject/pipelines/201/jobs': [job(5, 'unit')],
+      '/projects/group%2Fproject/pipelines/201/bridges': [],
+      '/projects/group%2Fproject/pipelines/301/jobs': [job(6, 'lint')],
+      '/projects/group%2Fproject/pipelines/301/bridges': [],
+    });
+
+    const { sections } = await collectDashboard(client);
+    const reviewingItem = sections.reviewing.find((item) => item.key === '10!2');
+    const mentionedItem = sections.mentioned.find((item) => item.key === '11!3');
+
+    assert.equal(reviewingItem.pipeline.status, 'failed');
+    assert.deepEqual(reviewingItem.pipeline.failures.map((failure) => failure.name), ['unit']);
+    assert.equal(mentionedItem.pipeline.status, 'failed');
+    assert.deepEqual(mentionedItem.pipeline.failures.map((failure) => failure.name), ['lint']);
+  });
+
+  it('does not fetch failures for healthy head pipelines of other sections', async () => {
+    const reviewing = mr({
+      iid: 2,
+      head_pipeline: { id: 202, sha: 'sha202', status: 'running', web_url: 'https://gitlab.example.com/group/project/-/pipelines/202' },
+    });
+    const client = new FakeClient({
+      ...emptyDashboardRoutes(),
+      '/merge_requests': mergeRequestsRoute({ reviewing: [reviewing] }),
+      '/projects/10/merge_requests/2/approvals': approvals(),
+    });
+
+    const { sections } = await collectDashboard(client);
+
+    assert.equal(sections.reviewing[0].pipeline.status, 'running');
+    assert.ok(!client.calls.some((call) => call.path.includes('/pipelines/202/jobs')));
+  });
+
+  it('does not resolve head pipelines for other sections without a blocked merge status', async () => {
+    const reviewing = mr({ iid: 2 });
+    const client = new FakeClient({
+      ...emptyDashboardRoutes(),
+      '/merge_requests': mergeRequestsRoute({ reviewing: [reviewing] }),
+      '/projects/10/merge_requests/2/approvals': approvals(),
+    });
+
+    const { sections } = await collectDashboard(client);
+
+    assert.equal(sections.reviewing[0].pipeline, null);
+    assert.ok(!client.calls.some((call) => call.path === '/projects/10/merge_requests/2'));
+  });
+
+  it('resolves head pipelines for transient merge statuses using the previous status', async () => {
+    const reviewing = mr({ iid: 2, detailed_merge_status: 'unchecked' });
+    const client = new FakeClient({
+      ...emptyDashboardRoutes(),
+      '/merge_requests': mergeRequestsRoute({ reviewing: [reviewing] }),
+      '/projects/10/merge_requests/2/approvals': approvals(),
+      '/projects/10/merge_requests/2': {
+        ...reviewing,
+        head_pipeline: { id: 203, sha: 'sha203', status: 'failed', web_url: 'https://gitlab.example.com/group/project/-/pipelines/203' },
+      },
+      '/projects/group%2Fproject/pipelines/203/jobs': [{ id: 7, name: 'unit', stage: 'test', failure_reason: 'script_failure', web_url: 'u' }],
+      '/projects/group%2Fproject/pipelines/203/bridges': [],
+    });
+
+    const withoutPrevious = await collectDashboard(client);
+    assert.ok(!client.calls.some((call) => call.path === '/projects/10/merge_requests/2'));
+    assert.equal(withoutPrevious.sections.reviewing[0].pipeline, null);
+
+    const withPrevious = await collectDashboard(client, { previousStatuses: new Map([['10!2', 'ci_must_pass']]) });
+    const [item] = withPrevious.sections.reviewing;
+
+    assert.equal(item.pipeline.status, 'failed');
+    assert.deepEqual(item.pipeline.failures.map((failure) => failure.name), ['unit']);
+  });
 });
 
 describe('collectDashboard with GraphQL merge request states', () => {

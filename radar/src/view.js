@@ -17,7 +17,7 @@ export const SECTION_META = [
 
 export const SECTION_IDS = SECTION_META.map(({ id }) => id);
 
-const TRANSIENT_MERGE_STATUSES = new Set([
+export const TRANSIENT_MERGE_STATUSES = new Set([
   'checking',
   'unchecked',
   'preparing',

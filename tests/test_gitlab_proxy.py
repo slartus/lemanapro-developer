@@ -82,6 +82,7 @@ async def test_forwards_allowed_rest_path_with_raw_path_query_and_real_token(ctx
         "/gl/api/v4/todos?state=pending",
         "/gl/api/v4/personal_access_tokens/self",
         "/gl/api/v4/projects/42/merge_requests?state=opened",
+        "/gl/api/v4/projects/42/merge_requests/5",
         "/gl/api/v4/projects/42/merge_requests/5/approvals",
         "/gl/api/v4/projects/42/merge_requests/5/discussions",
         "/gl/api/v4/projects/42/repository/branches",

@@ -25,6 +25,18 @@ export function describeError(error) {
 
 const sortedNumbers = (values) => [...values].sort((a, b) => a - b);
 
+const previousStatusesOf = (previous) => {
+  const statuses = new Map();
+  Object.values(previous?.sections ?? {}).forEach((items) =>
+    items.forEach((item) => {
+      if (item.kind === 'mr' && item.status) {
+        statuses.set(item.key, item.status);
+      }
+    }),
+  );
+  return statuses;
+};
+
 export async function refreshDashboard(
   { baseUrl, apiBase, token, settings = {}, previous = null, threadCache = null },
   { createClient = (url, secret, options) => new GitLabClient(url, secret, options), now = () => Date.now() } = {},
@@ -46,6 +58,7 @@ export async function refreshDashboard(
       approvalThreshold,
       skipSections: sectionsToSkip({ hiddenSections }),
       threadCache: threadCache?.baseUrl === baseUrl ? threadCache : null,
+      previousStatuses: previousStatusesOf(previous),
     });
     const dashboard = withStableStatuses(previous, {
       ...collected,
