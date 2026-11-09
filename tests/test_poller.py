@@ -1105,3 +1105,103 @@ async def test_push_in_draft_cancels_without_new_review(conn):
     assert registry.cancelled == [active]
     assert get_review(conn, active)["status"] == "cancelled"
     assert [r["id"] for r in list_reviews(conn)] == [active]
+
+
+def _debounce_config(debounce_sec, re_review_on_push=False):
+    config = _config(re_review_on_push=re_review_on_push)
+    config.review.push_debounce_sec = debounce_sec
+    return config
+
+
+def _delay_sec(row) -> float:
+    not_before = datetime.fromisoformat(row["not_before"].replace("Z", "+00:00"))
+    return (not_before - datetime.now(not_before.tzinfo)).total_seconds()
+
+
+async def test_push_review_after_cancel_is_deferred(conn):
+    api = StubApi()
+    registry = FakeRegistry()
+    api.mrs = [_mr(10, 1, author="other")]
+    poller = _make_poller(conn, api, _debounce_config(300), registry=registry)
+    await poller.tick()
+    mr_id = conn.execute("SELECT id FROM mr WHERE iid = 1").fetchone()["id"]
+    active = create_review(conn, mr_id, "manual", "a" * 40, "agent-a")
+    claim_next_review(conn)
+
+    api.mrs = [_mr(10, 1, sha="b" * 40, author="other")]
+    assert await poller.tick() == 1
+
+    assert registry.cancelled == [active]
+    assert get_review(conn, active)["status"] == "cancelled"
+    assert get_review(conn, active)["not_before"] is None
+    fresh = [r for r in list_reviews(conn) if r["head_sha"] == "b" * 40]
+    assert [r["trigger"] for r in fresh] == ["push"]
+    assert 290 < _delay_sec(fresh[0]) <= 300
+    assert claim_next_review(conn) is None
+
+
+async def test_re_review_on_push_is_deferred(conn):
+    api = StubApi()
+    api.mrs = [_mr(10, 1, author="me")]
+    poller = _make_poller(conn, api, _debounce_config(300, re_review_on_push=True))
+    await poller.tick()
+    finish_review(conn, list_reviews(conn)[0]["id"], "done", review_md="ok")
+
+    api.mrs = [_mr(10, 1, sha="b" * 40, author="me")]
+    assert await poller.tick() == 1
+
+    fresh = list_reviews(conn)[0]
+    assert fresh["trigger"] == "push"
+    assert 290 < _delay_sec(fresh) <= 300
+
+
+async def test_repeated_push_moves_queued_review_start_forward(conn):
+    api = StubApi()
+    poller, mr_id = await _seen_foreign_mr(conn, api, FakeRegistry())
+    review_id = create_review(conn, mr_id, "push", "a" * 40, "agent-a", delay_sec=10)
+    poller.reload(_debounce_config(300), poller._project_ids)
+
+    api.mrs = [_mr(10, 1, sha="b" * 40, author="other")]
+    await poller.tick()
+
+    row = get_review(conn, review_id)
+    assert row["head_sha"] == "b" * 40
+    assert 290 < _delay_sec(row) <= 300
+
+
+async def test_zero_debounce_does_not_defer(conn):
+    api = StubApi()
+    api.mrs = [_mr(10, 1, author="other"), _mr(10, 2, author="other")]
+    poller = _make_poller(conn, api, _debounce_config(0), registry=FakeRegistry())
+    await poller.tick()
+    first, second = (
+        conn.execute("SELECT id FROM mr WHERE iid = ?", (iid,)).fetchone()["id"] for iid in (1, 2)
+    )
+    create_review(conn, first, "manual", "a" * 40, "agent-a")
+    claim_next_review(conn)
+    queued = create_review(conn, second, "new", "a" * 40, "agent-a", delay_sec=60)
+
+    api.mrs = [_mr(10, 1, sha="b" * 40, author="other"), _mr(10, 2, sha="b" * 40, author="other")]
+    await poller.tick()
+
+    fresh = [r for r in list_reviews(conn) if r["head_sha"] == "b" * 40]
+    assert sorted((r["iid"], r["trigger"]) for r in fresh) == [(1, "push"), (2, "new")]
+    assert all(r["not_before"] is None for r in fresh)
+    assert get_review(conn, queued)["head_sha"] == "b" * 40
+
+
+async def test_new_and_ready_reviews_are_not_deferred(conn):
+    api = StubApi()
+    api.details[(10, 5)] = _detail(10, 5, reviewers=["me"])
+    api.todos = [{"id": 1, "target_type": "MergeRequest", "action_name": "mentioned",
+                  "target": {"project_id": 10, "iid": 5}}]
+    api.mrs = [_draft(_mr(10, 1, author="me"))]
+    poller = _make_poller(conn, api, _debounce_config(300))
+    await poller.tick()
+
+    api.mrs = [_draft(_mr(10, 1, author="me", updated_at="2026-01-02T12:00:00Z"), False)]
+    await poller.tick()
+
+    reviews = list_reviews(conn)
+    assert sorted(r["trigger"] for r in reviews) == ["new", "new"]
+    assert all(r["not_before"] is None for r in reviews)

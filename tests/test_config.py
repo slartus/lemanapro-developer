@@ -153,3 +153,14 @@ def test_gitlab_url_accepted():
     assert GitlabConfig(url="https://gitlab.example.com").url == "https://gitlab.example.com"
     assert GitlabConfig(url="https://gitlab.example.com:8443/").url == "https://gitlab.example.com:8443"
     assert GitlabConfig(url="https://example.com/gitlab/").url == "https://example.com/gitlab"
+
+
+def test_push_debounce_default_and_validation():
+    raw = {
+        "gitlab": {"url": "https://gitlab.example.com"},
+        "projects": [{"gitlab_project_id": 1, "slug": "a/b", "agent": "a"}],
+    }
+    assert Config.model_validate(raw).review.push_debounce_sec == 120
+    assert Config.model_validate(raw | {"review": {"push_debounce_sec": 0}}).review.push_debounce_sec == 0
+    with pytest.raises(ValidationError):
+        Config.model_validate(raw | {"review": {"push_debounce_sec": -1}})

@@ -179,6 +179,7 @@ async def test_settings_page_renders(ctx, tmp_path, monkeypatch):
         resp = await client.get("/settings")
     assert resp.status_code == 200
     assert "g/p" in resp.text
+    assert 'id="push_debounce_sec" value="120" min="0"' in resp.text
 
 
 async def test_settings_save_requires_header(ctx, tmp_path, monkeypatch):

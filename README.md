@@ -32,8 +32,18 @@
   всегда, независимо от `re_review_on_push`, но только для открытого MR.
   Ревью в очереди (`queued`) просто переносится на новый head; завершённые
   (`done`/`error`) не трогаются. Отменённое ревью можно перезапустить (Re-review).
+  Debounce: ревью `push` и перенос ревью из очереди на новый head
+  откладывают старт на `review.push_debounce_sec` (по умолчанию 120 с, 0 —
+  без отсрочки), каждый следующий push отодвигает его снова — серия push'ей
+  даёт одно ревью по устоявшемуся head. Ревью `new` (todo, ревьюер, Ready) и
+  ручной Re-review не откладываются.
 - **Worker'ы** (`review.max_parallel`, по умолчанию 2) берут ревью из очереди в
-  SQLite: shallow-клон ровно на `head_sha` ревью, base-ветка в
+  SQLite и до клона сверяют `head_sha` ревью с текущим head MR в GitLab
+  (закрывает рестарт с ревью на старом коммите и пропущенную poller'ом смену
+  head). Если head ушёл: MR закрыт/смержен или в draft — ревью `cancelled`;
+  иначе ревью переносится на новый head и возвращается в очередь с той же
+  отсрочкой `push_debounce_sec` (если на новый head уже есть такое ревью —
+  `cancelled`). Дальше — shallow-клон ровно на `head_sha` ревью, base-ветка в
   `refs/mrwatch/base`, diff `git diff <base_sha> <head_sha>` (base —
   `diff_refs.base_sha` MR, а если head MR ушёл вперёд — merge-base с
   `refs/mrwatch/base`), затем `opencode run` с агентом проекта. После ответа,
@@ -127,7 +137,8 @@ $EDITOR config.yaml
 переменной — `~/.config/mr-watch/config.yaml`. Поля — в `config.example.yaml`:
 GitLab (URL, интервал, `pat_command`), проекты (`gitlab_project_id`, `slug`,
 `agent`, `re_review_on_push`, опционально `model`/`variant`), ревью
-(параллельность, таймаут, глубина клона, TTL workspaces и логов), opencode
+(параллельность, таймаут, глубина клона, TTL workspaces и логов, отсрочка
+ревью после push `push_debounce_sec`), opencode
 (`bin`, `model`, `variant`, `length_retry_variant`), пути.
 
 Если модель упёрлась в лимит вывода (`reason=length`) и не выдала текста, ревью

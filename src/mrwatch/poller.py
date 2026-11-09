@@ -29,7 +29,7 @@ from mrwatch.db import (
     update_mr_roles,
     upsert_mr,
 )
-from mrwatch.gitlab_client import GitLabClient
+from mrwatch.gitlab_client import GitLabClient, parse_draft
 from mrwatch.worker import ReviewRegistry
 
 logger = logging.getLogger(__name__)
@@ -159,7 +159,9 @@ class Poller:
     ) -> int | None:
         if result.inserted or not result.head_sha_changed:
             return None
-        outcome = supersede_reviews(self._conn, result.mr_id, mr["sha"])
+        outcome = supersede_reviews(
+            self._conn, result.mr_id, mr["sha"], self._config.review.push_debounce_sec
+        )
         if not outcome.touched:
             return None
         logger.info(
@@ -215,8 +217,9 @@ class Poller:
     def _enqueue(self, mr_id: int, trigger: str, mr: dict[str, Any], project_db_id: int) -> int:
         if parse_draft(mr) is True:
             return 0
+        delay_sec = self._config.review.push_debounce_sec if trigger == "push" else 0
         review_id = create_review(
-            self._conn, mr_id, trigger, mr["sha"], self._agent_for(project_db_id)
+            self._conn, mr_id, trigger, mr["sha"], self._agent_for(project_db_id), delay_sec
         )
         return 1 if review_id is not None else 0
 
@@ -455,14 +458,6 @@ def _has_mention(text: str | None, username: str) -> bool:
     return re.search(
         rf"(?<![\w.@])@{re.escape(username)}(?![\w]|[.-]\w)", text, re.IGNORECASE
     ) is not None
-
-
-def parse_draft(mr: dict[str, Any]) -> bool | None:
-    for key in ("draft", "work_in_progress"):
-        value = mr.get(key)
-        if isinstance(value, bool):
-            return value
-    return None
 
 
 def derived_scope(mr: dict[str, Any]) -> frozenset[str]:

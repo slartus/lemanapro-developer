@@ -616,3 +616,29 @@ addRow была задвоенная кнопка. Блок <script> переп�
   ревью (`_macros.html`); «Доп. инструкции» у Re-review и в мета ревью.
 - `review.question_timeout_sec` (по умолчанию 600); логи `question-*.log`
   чистятся по `log_ttl_days`.
+
+## 2026-11-09 — Сверка head перед запуском ревью и debounce push
+
+**Что:**
+- Worker после `get_project_mr` и до клона сверяет `head_sha` ревью с `sha`
+  MR. При расхождении: MR не открыт → `cancelled` «отменено: MR закрыт»; MR в
+  draft → `cancelled` «отменено: MR переведён в draft»; иначе ревью
+  перебазируется на новый head и возвращается в `queued` с `attempt = 0` и
+  отсрочкой `push_debounce_sec` (`rebase_and_defer_review`, `extra_instructions`
+  сохраняются), клон в этом проходе не делается. Конфликт уникальности на новом
+  head → `cancelled` «отменено: в MR новый коммит <sha12>». Закрывает ревью по
+  устаревшему коммиту после рестарта (`requeue_incomplete`) и потерю смены head
+  при падении между `upsert_mr` и `supersede_reviews`. При совпадении sha
+  поведение прежнее (ручной Re-review драфта работает).
+- Смена head, обнаруженная при клоне (`_handle_head_mismatch`), при конфликте
+  теперь даёт `cancelled` вместо `error`.
+- `review.push_debounce_sec` (по умолчанию 120, `ge=0`, 0 — выключено; поле в
+  /settings): ревью `push` (после отмены активного и по `re_review_on_push`)
+  создаётся с `not_before = now + debounce`; `supersede_reviews` при переносе
+  `queued`-ревью на новый head ставит ту же отсрочку, так что каждый push
+  отодвигает старт. Активные ревью по старому head отменяются сразу; `new` и
+  ручной Re-review (`retry_review` обнуляет `not_before`) не откладываются.
+- `mr.head_sha` worker не обновляет: иначе poller не увидит смену head и не
+  перенесёт/отменит другие ревью этого MR.
+- `parse_draft` перенесён в `gitlab_client` (импорт в worker без цикла
+  poller ↔ worker), из `poller` по-прежнему импортируется.
