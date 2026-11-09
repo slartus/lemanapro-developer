@@ -474,6 +474,11 @@ async def settings_page(request: Request):
             "config": config,
             "config_error": error,
             "agents": _list_agents(),
+            "settings_data": {
+                "agents": _list_agents(),
+                "reviewProjects": [project.model_dump() for project in config.projects],
+                "radar": config.radar.model_dump(),
+            },
             "saved": request.query_params.get("saved") == "1",
             "restart_needed": request.query_params.get("restart") == "1",
         },
@@ -483,6 +488,52 @@ async def settings_page(request: Request):
 @router.get("/project-agents")
 async def project_agents(request: Request):
     return JSONResponse({"agents": _list_agents()})
+
+
+REPORTER_ACCESS = 20
+MAINTAINER_ACCESS = 40
+RADAR_SETTINGS_FIELDS = (
+    "enabled",
+    "interval_minutes",
+    "fast_refresh_while_ci",
+    "project_filter_mode",
+    "selected_project_ids",
+    "ignored_check_names",
+    "approval_threshold",
+    "hidden_sections",
+)
+
+
+def _access_level(project: dict) -> int:
+    permissions = project.get("permissions") or {}
+    levels = [
+        (permissions.get(scope) or {}).get("access_level") or 0
+        for scope in ("project_access", "group_access")
+    ]
+    return max(levels)
+
+
+@router.get("/api/settings/projects")
+async def settings_projects(request: Request):
+    ctx = _ctx(request)
+    try:
+        projects = await ctx.api.get_member_projects(REPORTER_ACCESS)
+    except GitlabApiError as exc:
+        logger.warning("settings: project list failed: %s", exc)
+        return PlainTextResponse("GitLab не отдал список проектов", status_code=502)
+    return JSONResponse(
+        [
+            {
+                "id": project["id"],
+                "path": project.get("path_with_namespace") or str(project["id"]),
+                "name": project.get("name") or project.get("path_with_namespace") or str(project["id"]),
+                "maintainer": _access_level(project) >= MAINTAINER_ACCESS,
+            }
+            for project in projects
+            if isinstance(project, dict) and isinstance(project.get("id"), int)
+        ],
+        headers={"Cache-Control": "no-store"},
+    )
 
 
 @router.post("/settings")
@@ -512,6 +563,12 @@ async def settings_save(request: Request):
         review_section = raw.setdefault("review", {})
         if isinstance(review_section, dict):
             review_section.update(review)
+    radar = body.get("radar")
+    if isinstance(radar, dict):
+        radar_section = raw.setdefault("radar", {})
+        if not isinstance(radar_section, dict):
+            radar_section = raw["radar"] = {}
+        radar_section.update({key: radar[key] for key in RADAR_SETTINGS_FIELDS if key in radar})
     logger.info(
         "settings: saving projects: %s",
         [

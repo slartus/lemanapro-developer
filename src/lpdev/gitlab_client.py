@@ -201,6 +201,19 @@ class GitLabClient:
             f"/api/v4/projects/{project_id}/merge_requests", params
         )
 
+    async def get_member_projects(self, min_access_level: int) -> list[dict[str, Any]]:
+        return await self._paginated(
+            "/api/v4/projects",
+            {
+                "membership": "true",
+                "min_access_level": min_access_level,
+                "archived": "false",
+                "order_by": "path",
+                "sort": "asc",
+                "per_page": 100,
+            },
+        )
+
     async def get_project_by_path(self, path: str) -> dict[str, Any]:
         encoded = quote(path, safe="")
         response = await self._get(f"/api/v4/projects/{encoded}")

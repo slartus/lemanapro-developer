@@ -6,9 +6,6 @@
   .field label { display: block; font-size: 0.85rem; color: var(--muted); margin-bottom: 0.25rem; }
   .field input { width: 100%; }
   .field .err { color: var(--err-fg); font-size: 0.8rem; min-height: 1.1em; }
-  td input.wslug { width: 100%; min-width: 240px; }
-  td select.wagent { min-width: 180px; }
-  .agent-cell { display: flex; gap: 0.4rem; align-items: center; }
   .save-bar { display: flex; flex-wrap: wrap; gap: 0.8rem; align-items: center; margin-top: 1.25rem; }
   #status.err { color: var(--err-fg); }
   #status.ok { color: var(--ok-fg); }
@@ -16,6 +13,30 @@
   dl.ro dt { color: var(--muted); }
   dl.ro dd { margin: 0; overflow-wrap: anywhere; }
   .center { text-align: center; }
+  .check input, .field .check input { width: auto; flex: none; margin: 0; }
+  .check, .field label.check { display: inline-flex; gap: 0.4rem; align-items: center; color: var(--text); font-size: 0.9rem; margin: 0; }
+  .tree-tools { display: flex; flex-wrap: wrap; gap: 0.8rem 1.2rem; align-items: center; margin-bottom: 0.4rem; }
+  .tree-tools input[type="search"] { flex: 1 1 220px; max-width: 360px; }
+  .radar-mode { border: 0; padding: 0; margin: 0; display: flex; gap: 0.3rem 1rem; flex-wrap: wrap; align-items: center; }
+  .radar-mode legend { float: left; margin-right: 0.6rem; padding: 0; }
+  .tree { display: flex; flex-direction: column; gap: 0.2rem; }
+  .tree-group > summary { cursor: pointer; display: flex; align-items: center; gap: 0.5rem; padding: 0.3rem 0.2rem; font-weight: 600; }
+  .tree-group-name { overflow-wrap: anywhere; }
+  .tree-children { padding-left: 1.4rem; border-left: 1px solid var(--border); margin-left: 0.55rem; }
+  .tree-row { display: grid; grid-template-columns: minmax(0, 1fr) 5.5rem 7.5rem minmax(0, 23rem); align-items: center; gap: 0.3rem 0.8rem; padding: 0.3rem 0.2rem; border-radius: 6px; }
+  .tree-row:hover { background: var(--surface-2); }
+  .tree-name { min-width: 0; overflow-wrap: anywhere; }
+  @media (max-width: 900px) {
+    .tree-row { display: flex; flex-wrap: wrap; }
+    .tree-name { flex: 1 1 100%; }
+  }
+  .tree-check { display: inline-flex; gap: 0.3rem; align-items: center; font-size: 0.85rem; }
+  .review-opts { display: inline-flex; gap: 0.6rem; align-items: center; flex-wrap: wrap; }
+  .tag { display: inline-block; padding: 0.02rem 0.45rem; border-radius: 6px; font-size: 0.72rem; font-weight: 600; background: var(--neutral-bg); color: var(--neutral-fg); }
+  .tag.ok { background: var(--ok-bg); color: var(--ok-fg); }
+  .hidden-sections { display: flex; flex-direction: column; gap: 0.25rem; margin-top: 0.4rem; }
+  .field-check { display: flex; align-items: center; min-height: 100%; }
+  textarea { width: 100%; }
 {% endblock %}
 {% block content %}
 <h1>Настройки</h1>
@@ -38,34 +59,36 @@
 </div>
 
 <h2>Проекты</h2>
-<div class="table-wrap">
-<table id="projects">
-  <thead><tr><th>Проект (ссылка или slug)</th><th>Агент</th><th class="center">Re-review на push</th><th></th></tr></thead>
-  <tbody>
-  {% for p in config.projects %}
-  <tr data-pid="{{ p.gitlab_project_id }}">
-    <td><input type="text" class="wslug wide" value="{{ p.slug }}" aria-label="Проект"></td>
-    <td><div class="agent-cell">
-      <select class="wagent" aria-label="Агент">
-        {% for a in agents %}
-        <option value="{{ a }}" {% if a == p.agent %}selected{% endif %}>{{ a }}</option>
-        {% endfor %}
-        {% if p.agent not in agents %}
-        <option value="{{ p.agent }}" selected>{{ p.agent }}</option>
-        {% endif %}
-      </select>
-    </div></td>
-    <td class="center"><input type="checkbox" class="wpush" aria-label="Re-review на push" {% if p.re_review_on_push %}checked{% endif %}></td>
-    <td><button type="button" class="danger" onclick="delRow(this)">удалить</button></td>
-  </tr>
-  {% endfor %}
-  </tbody>
-</table>
+<div class="card">
+  <div class="tree-tools">
+    <fieldset class="radar-mode">
+      <legend class="muted small">Радар смотрит</legend>
+      <label class="check"><input type="radio" name="radar-mode" id="radar-mode-all" value="all"> все проекты, где я Maintainer+</label>
+      <label class="check"><input type="radio" name="radar-mode" id="radar-mode-selected" value="selected"> только отмеченные</label>
+    </fieldset>
+    <input type="search" id="tree-search" placeholder="Поиск проекта" aria-label="Поиск проекта">
+    <span id="tree-summary" class="muted small"></span>
+  </div>
+  <p class="muted small">«Радар» — секции «Ждут моего апрува», «Возможные MR», «Сломан default branch» (MR, где я ревьюер или автор, видны всегда). «Авторевью» — MR проекта ревьюятся автоматически.</p>
+  <div id="tree" class="tree"></div>
 </div>
-<p><button type="button" onclick="addRow()">+ добавить проект</button></p>
+
+<h2>Радар</h2>
+<div class="card">
+<div class="form-grid">
+  <div class="field field-check"><label class="check"><input type="checkbox" id="radar-enabled" {% if config.radar.enabled %}checked{% endif %}> Радар включён</label></div>
+  <div class="field"><label for="radar-interval">Интервал обновления, мин</label><input type="number" id="radar-interval" value="{{ config.radar.interval_minutes }}" min="1" max="120" step="1"><div class="err"></div></div>
+  <div class="field field-check"><label class="check"><input type="checkbox" id="radar-fast" {% if config.radar.fast_refresh_while_ci %}checked{% endif %}> Раз в минуту, пока идёт мой CI (до часа)</label></div>
+  <div class="field"><label for="radar-threshold">Порог апрувов («Ждут моего апрува», 0 — выкл)</label><input type="number" id="radar-threshold" value="{{ config.radar.approval_threshold }}" min="0" max="20" step="1"><div class="err"></div></div>
+</div>
+<div class="form-grid" style="margin-top:1rem">
+  <div class="field"><label for="radar-ignored">Проверки, падение которых не считается упавшим CI (через запятую или с новой строки)</label><textarea id="radar-ignored" rows="2">{{ config.radar.ignored_check_names | join(", ") }}</textarea></div>
+  <div class="field"><span class="muted small">Скрытые секции</span><div id="radar-hidden" class="hidden-sections"></div></div>
+</div>
+</div>
 
 <div class="save-bar">
-  <button class="primary" id="save" onclick="save()">Сохранить и применить</button>
+  <button class="primary" id="save" type="button">Сохранить и применить</button>
   <span id="status" class="small muted" role="status"></span>
 </div>
 
@@ -79,133 +102,6 @@
 </div>
 {% endblock %}
 {% block scripts %}
-<script>
-const AGENTS = {{ agents | tojson }};
-const statusEl = document.getElementById("status");
-
-function setStatus(text, kind) {
-  statusEl.textContent = text;
-  statusEl.className = "small " + (kind || "muted");
-}
-
-function makeOption(value) {
-  const opt = document.createElement("option");
-  opt.value = value;
-  opt.textContent = value;
-  return opt;
-}
-
-function el(tag, props, children) {
-  const node = document.createElement(tag);
-  Object.assign(node, props || {});
-  (children || []).forEach(function (c) { node.appendChild(c); });
-  return node;
-}
-
-function buildRow() {
-  const slug = el("input", {type: "text", className: "wslug wide", placeholder: "ссылка на проект или group/project"});
-  slug.setAttribute("aria-label", "Проект");
-  const select = el("select", {className: "wagent"}, AGENTS.map(makeOption));
-  select.setAttribute("aria-label", "Агент");
-  const push = el("input", {type: "checkbox", className: "wpush"});
-  push.setAttribute("aria-label", "Re-review на push");
-  const del = el("button", {type: "button", className: "danger", textContent: "удалить"});
-  del.addEventListener("click", function () { delRow(del); });
-  const tr = document.createElement("tr");
-  tr.appendChild(el("td", {}, [slug]));
-  tr.appendChild(el("td", {}, [el("div", {className: "agent-cell"}, [select])]));
-  tr.appendChild(el("td", {className: "center"}, [push]));
-  tr.appendChild(el("td", {}, [del]));
-  return tr;
-}
-
-function addRow() {
-  document.querySelector("#projects tbody").appendChild(buildRow());
-}
-
-function delRow(btn) {
-  const rows = document.querySelectorAll("#projects tbody tr");
-  if (rows.length <= 1) { setStatus("Нужен хотя бы один проект", "err"); return; }
-  btn.closest("tr").remove();
-}
-
-function readInt(id, min = 1) {
-  const input = document.getElementById(id);
-  const err = input.parentElement.querySelector(".err");
-  const raw = input.value.trim();
-  const n = Number(raw);
-  const ok = raw !== "" && Number.isInteger(n) && n >= min;
-  input.classList.toggle("invalid", !ok);
-  err.textContent = ok ? "" : "целое число от " + min;
-  return ok ? n : null;
-}
-
-async function save() {
-  const btn = document.getElementById("save");
-  if (btn.disabled) return;
-  const ids = ["poll_interval_sec", "max_parallel", "timeout_sec", "clone_depth", "workspace_ttl_days"];
-  const values = {};
-  let valid = true;
-  ids.forEach(function (id) {
-    values[id] = readInt(id);
-    if (values[id] === null) valid = false;
-  });
-  values.push_debounce_sec = readInt("push_debounce_sec", 0);
-  if (values.push_debounce_sec === null) valid = false;
-  const projects = [];
-  document.querySelectorAll("#projects tbody tr").forEach(function (tr) {
-    const slugInput = tr.querySelector(".wslug");
-    const slug = slugInput.value.trim();
-    slugInput.classList.toggle("invalid", !slug);
-    if (!slug) { valid = false; return; }
-    projects.push({
-      gitlab_project_id: tr.dataset.pid ? parseInt(tr.dataset.pid, 10) : null,
-      slug: slug,
-      agent: tr.querySelector(".wagent").value.trim() || "mr-watch-reviewer",
-      re_review_on_push: tr.querySelector(".wpush").checked,
-    });
-  });
-  if (!projects.length && valid) {
-    setStatus("Нужен хотя бы один проект", "err");
-    return;
-  }
-  if (!valid) {
-    setStatus("Исправьте выделенные поля: числа должны быть целыми от 1 (отсрочка — от 0), проект не может быть пустым", "err");
-    return;
-  }
-  const payload = {
-    gitlab: {poll_interval_sec: values.poll_interval_sec},
-    review: {
-      max_parallel: values.max_parallel,
-      timeout_sec: values.timeout_sec,
-      clone_depth: values.clone_depth,
-      workspace_ttl_days: values.workspace_ttl_days,
-      push_debounce_sec: values.push_debounce_sec,
-    },
-    projects: projects,
-  };
-  btn.disabled = true;
-  setStatus("Сохраняю…");
-  try {
-    const resp = await fetch("/settings", {
-      method: "POST",
-      headers: {"Content-Type": "application/json", "X-Requested-With": "lpdev"},
-      body: JSON.stringify(payload),
-    });
-    if (resp.ok) {
-      setStatus("Сохранено, обновляю страницу…", "ok");
-      location.href = resp.redirected ? resp.url : "/settings?saved=1";
-      return;
-    }
-    setStatus("Ошибка " + resp.status + ": " + (await resp.text()), "err");
-  } catch (err) {
-    setStatus("Ошибка сети: " + err, "err");
-  }
-  btn.disabled = false;
-}
-
-document.addEventListener("input", function (e) {
-  if (e.target.classList && e.target.classList.contains("invalid")) e.target.classList.remove("invalid");
-});
-</script>
+<script type="application/json" id="settings-data">{{ settings_data | tojson }}</script>
+<script type="module" src="/static/settings.js"></script>
 {% endblock %}
