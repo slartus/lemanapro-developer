@@ -73,7 +73,7 @@ try { if (localStorage.getItem("lpdev.sidebar") === "collapsed") document.docume
   .collapse-btn:hover:not(:disabled) { background: var(--surface-2); color: var(--text); }
   .collapse-btn svg { flex: none; width: 20px; height: 20px; transition: transform 0.15s ease; }
   :root { --sidebar-w: 220px; }
-  @media (min-width: 761px) {
+  @media (width > 760px) {
     :root[data-sidebar="collapsed"] { --sidebar-w: 60px; }
     :root[data-sidebar="collapsed"] .nav-label, :root[data-sidebar="collapsed"] .nav-count { display: none; }
     :root[data-sidebar="collapsed"] .collapse-btn svg { transform: rotate(180deg); }
