@@ -359,10 +359,20 @@ function focusById(id) {
   return Boolean(target);
 }
 
-function neighbourFocusId(node) {
+function focusTargetsAfterRemoval(node, prefix) {
   const item = node.closest('tr, li');
   const neighbour = item?.nextElementSibling ?? item?.previousElementSibling;
-  return neighbour?.querySelector('[data-focus-id]')?.getAttribute('data-focus-id') ?? null;
+  const sameKind = neighbour?.querySelector(`[data-focus-id^="${prefix}"]`) ?? neighbour?.querySelector('[data-focus-id]');
+  const block = node.closest('details');
+  const nearbyBlock = block?.nextElementSibling ?? block?.previousElementSibling;
+  return [
+    sameKind?.getAttribute('data-focus-id'),
+    nearbyBlock?.querySelector('summary')?.getAttribute('data-focus-id'),
+  ].filter(Boolean);
+}
+
+function focusAfterRemoval(targets) {
+  if (!targets.some((id) => focusById(id))) $('chips').querySelector('.chip.active')?.focus({ preventScroll: true });
 }
 
 function closeSnoozeMenu({ focusButton = false } = {}) {
@@ -390,7 +400,11 @@ function snoozeControl(key, item, sectionId, title) {
   button.addEventListener('click', () => {
     state.openSnoozeKey = isOpen ? null : key;
     render();
-    if (!isOpen) document.querySelector('.snooze-menu button')?.focus({ preventScroll: true });
+    if (!isOpen) {
+      const first = document.querySelector('.snooze-menu button');
+      first?.focus({ preventScroll: true });
+      first?.closest('.snooze-menu')?.scrollIntoView({ block: 'nearest' });
+    }
   });
   const wrap = el('span', { className: 'snooze-wrap' }, [button]);
   if (isOpen) {
@@ -398,11 +412,10 @@ function snoozeControl(key, item, sectionId, title) {
     Object.entries(snoozeOptions(sectionId)).forEach(([option, { label, title: hint }]) => {
       const choice = el('button', { text: label, attrs: { type: 'button', ...(hint && { title: hint }) } });
       choice.addEventListener('click', () => {
-        const nextFocus = neighbourFocusId(choice);
-        const blockFocus = choice.closest('details')?.querySelector('summary')?.getAttribute('data-focus-id');
+        const targets = focusTargetsAfterRemoval(choice, 'snooze:');
         state.openSnoozeKey = null;
         updateSnoozed((snoozed) => ({ ...snoozed, [key]: createSnooze(option, item) }));
-        if (!focusById(nextFocus) && !focusById(blockFocus)) $('chips').querySelector('.chip.active')?.focus({ preventScroll: true });
+        focusAfterRemoval(targets);
       });
       menu.append(choice);
     });
@@ -491,7 +504,11 @@ function renderExtraItem(item, sectionId, { snoozedBlock = false } = {}) {
   const actions = el('span', { className: 'extra-actions' });
   if (snoozedBlock) {
     const back = el('button', { className: 'icon-btn', text: '↩', attrs: { type: 'button', title: 'Вернуть', 'aria-label': `Вернуть: ${item.title}`, 'data-focus-id': `unsnooze:${item.key}` } });
-    back.addEventListener('click', () => updateSnoozed(({ [item.key]: _removed, ...rest }) => rest));
+    back.addEventListener('click', () => {
+      const targets = focusTargetsAfterRemoval(back, 'unsnooze:');
+      updateSnoozed(({ [item.key]: _removed, ...rest }) => rest);
+      focusAfterRemoval(targets);
+    });
     actions.append(back);
   } else {
     actions.append(snoozeControl(item.key, item, sectionId, item.title));
