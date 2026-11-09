@@ -34,7 +34,9 @@
   td.actions { width: 1%; white-space: nowrap; position: relative; }
   .icon-btn { padding: 0.15rem 0.45rem; border: 0; background: none; opacity: 0.35; }
   tr:hover .icon-btn, .icon-btn:focus-visible, .icon-btn[aria-expanded="true"] { opacity: 1; }
-  .snooze-menu { position: absolute; right: 0.5rem; top: 2.2rem; z-index: 3; display: flex; flex-direction: column; min-width: 170px;
+  .snooze-wrap { position: relative; display: inline-block; }
+  .extra-actions { display: inline-flex; gap: 0.2rem; align-items: center; }
+  .snooze-menu { position: absolute; right: 0; top: calc(100% + 0.25rem); z-index: 3; display: flex; flex-direction: column; min-width: 170px;
                  background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 0.3rem;
                  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.18); }
   .snooze-menu button { border: 0; background: none; text-align: left; padding: 0.35rem 0.6rem; }
@@ -48,6 +50,8 @@
   .extra-item { display: flex; align-items: flex-start; gap: 0.5rem; }
   .extra-item > :first-child { flex: 1; min-width: 0; }
   .extra-item .icon-btn { opacity: 0.6; }
+  .legend { margin-top: 0.6rem; font-size: 0.8rem; }
+  .legend .sev { margin: 0 0.15rem 0 0.4rem; }
   .visually-hidden { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
   #banners .flash { display: flex; align-items: center; gap: 0.6rem; flex-wrap: wrap; }
   @media (max-width: 760px) {
@@ -76,6 +80,7 @@
   </table>
   <div class="empty" id="no-match" hidden></div>
 </div>
+<div class="legend muted">Находки последнего завершённого ревью:<span class="sev crit">●</span>крит<span class="sev major">●</span>мажор<span class="sev minor">●</span>минор<span class="sev nit">●</span>нит</div>
 <div class="extras" id="extras"></div>
 <script type="application/json" id="initial-data">{{ initial | tojson }}</script>
 {% endblock %}

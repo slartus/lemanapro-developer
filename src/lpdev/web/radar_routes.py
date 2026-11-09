@@ -56,7 +56,7 @@ async def api_ui_state_put(request: Request, key: str) -> Response:
         return PlainTextResponse("too large", status_code=413)
     try:
         value = json.loads(body)
-    except (UnicodeDecodeError, ValueError):
+    except (UnicodeDecodeError, ValueError, RecursionError):
         return PlainTextResponse("invalid json", status_code=400)
     if not isinstance(value, dict):
         return PlainTextResponse("object expected", status_code=400)

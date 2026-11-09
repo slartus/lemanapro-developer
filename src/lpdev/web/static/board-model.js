@@ -44,7 +44,26 @@ export function matchesFilter(row, filter, actionable) {
   if (filter === 'action') return actionable.has(row.key);
   if (filter === 'changes') return row.watch?.verdict === 'REQUEST_CHANGES';
   if (filter === 'reviewRunning') return ACTIVE_REVIEW_STATUSES.has(row.watch?.latest_review_status);
+  if (filter === 'reviewError') return row.watch?.latest_review_status === 'error';
   return rowSections(row).includes(filter);
+}
+
+export function visibleActionable(view, hiddenSections, actionableKeys) {
+  if (!view) return new Set();
+  const hidden = new Set(hiddenSections);
+  const sections = Object.fromEntries(Object.entries(view.sections).map(([id, items]) => [id, hidden.has(id) ? [] : items]));
+  const { waiting, failedCi } = actionableKeys(sections);
+  return new Set([...waiting, ...failedCi]);
+}
+
+const FINISHED_REVIEW_STATUSES = new Set(['done', 'error']);
+
+export function finishedReviewMarks(mrs) {
+  return new Set(
+    mrs
+      .filter((mr) => mr.latest_review_id && FINISHED_REVIEW_STATUSES.has(mr.latest_review_status))
+      .map((mr) => `${mr.latest_review_id}:${mr.latest_review_status}`),
+  );
 }
 
 export function matchesSearch(row, search) {
@@ -66,7 +85,7 @@ export function matchesSearch(row, search) {
 
 export function filterCounts(rows, actionable) {
   const counts = Object.fromEntries(
-    ['all', 'action', 'changes', 'reviewRunning', ...MR_SECTIONS].map((filter) => [
+    ['all', 'action', 'changes', 'reviewRunning', 'reviewError', ...MR_SECTIONS].map((filter) => [
       filter,
       rows.filter((row) => matchesFilter(row, filter, actionable)).length,
     ]),

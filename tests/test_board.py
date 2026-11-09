@@ -81,3 +81,11 @@ async def test_board_modules_are_served_as_javascript(ctx, path):
         response = await client.get(path)
     assert response.status_code == 200
     assert "javascript" in response.headers["content-type"]
+
+
+async def test_ui_state_rejects_deeply_nested_json(ctx):
+    async with _client(ctx[0]) as client:
+        response = await client.put(
+            "/api/ui-state/radar", headers={**H, "Content-Type": "application/json"}, content=b"[" * 100_000
+        )
+    assert response.status_code == 400

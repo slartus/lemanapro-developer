@@ -112,3 +112,41 @@ describe('filters', () => {
     assert.equal(matchesSearch(row, 'nothing'), false);
   });
 });
+
+describe('visibleActionable', () => {
+  it('ignores hidden sections like the extension badge did', async () => {
+    const { actionableKeys } = await import('../../radar/src/view.js');
+    const { visibleActionable } = await import('../../src/lpdev/web/static/board-model.js');
+    const sections = {
+      reviewing: [],
+      assigned: [],
+      mentioned: [{ key: '10!1' }],
+      awaitingApproval: [],
+      threads: [{ key: '10!2' }],
+      authored: [{ key: '10!1' }, { key: '10!3', pipeline: { status: 'failed' } }],
+    };
+    assert.deepEqual([...visibleActionable({ sections }, ['mentioned', 'threads'], actionableKeys)], ['10!3']);
+    assert.deepEqual([...visibleActionable({ sections }, [], actionableKeys)].sort(), ['10!1', '10!2', '10!3']);
+    assert.deepEqual([...visibleActionable(null, [], actionableKeys)], []);
+  });
+});
+
+describe('finishedReviewMarks', () => {
+  it('marks finished and failed reviews by id and status', async () => {
+    const { finishedReviewMarks } = await import('../../src/lpdev/web/static/board-model.js');
+    const marks = finishedReviewMarks([
+      watch({ latest_review_id: 5, latest_review_status: 'done' }),
+      watch({ latest_review_id: 6, latest_review_status: 'error' }),
+      watch({ latest_review_id: 7, latest_review_status: 'reviewing' }),
+      watch({ latest_review_id: null, latest_review_status: null }),
+    ]);
+    assert.deepEqual([...marks], ['5:done', '6:error']);
+  });
+});
+
+describe('reviewError filter', () => {
+  it('selects rows whose latest review failed', () => {
+    const rows = buildRows(null, [watch({ latest_review_status: 'error' }), watch({ iid: 2 })]);
+    assert.deepEqual(rows.filter((row) => matchesFilter(row, 'reviewError', new Set())).map((row) => row.key), ['10!1']);
+  });
+});

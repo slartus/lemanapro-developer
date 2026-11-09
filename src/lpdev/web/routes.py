@@ -256,7 +256,6 @@ MR_ROW_FIELDS = (
 )
 
 
-
 def _mr_payload(row, gitlab_url: str) -> dict:
     payload = {field: row[field] for field in MR_ROW_FIELDS}
     payload["is_draft"] = bool(row["is_draft"])

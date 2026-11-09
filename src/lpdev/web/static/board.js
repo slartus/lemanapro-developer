@@ -1,7 +1,17 @@
 import { SECTION_META, actionableKeys, awaitsAuthor, deriveView, itemsByKey, tokenProblems } from '/static/radar/view.js';
 import { createSnooze, nextSnoozeExpiry, pruneSnoozed, snoozeOptions } from '/static/radar/snooze.js';
 import { failureUrl, isHttpsUrl, isUnderBaseUrl } from '/static/radar/links.js';
-import { ACTIVE_REVIEW_STATUSES, MR_SECTIONS, buildRows, filterCounts, matchesFilter, matchesSearch, rowSections } from '/static/board-model.js';
+import {
+  ACTIVE_REVIEW_STATUSES,
+  MR_SECTIONS,
+  buildRows,
+  filterCounts,
+  finishedReviewMarks,
+  matchesFilter,
+  matchesSearch,
+  rowSections,
+  visibleActionable,
+} from '/static/board-model.js';
 
 const SECTION_TITLES = Object.fromEntries(SECTION_META.map(({ id, title }) => [id, title]));
 const CHIP_LABELS = {
@@ -20,6 +30,14 @@ const ROLE_LABELS = {
   mentioned: 'упомянули',
   threads: 'тред',
 };
+const PARTIAL_FLAGS = {
+  projectsUnavailable: 'проекты',
+  pipelinesUnavailable: 'статусы CI',
+  mentionsUnavailable: 'упоминания',
+  assignedUnavailable: 'назначенные на меня',
+  defaultBranchesUnavailable: 'статусы default-веток',
+  possibleMrsUnavailable: 'возможные MR',
+};
 const ALLOWED_TOKEN_SCOPES = ['read_api', 'read_repository'];
 const VERDICT_LABELS = { APPROVE: 'approve', APPROVE_WITH_NITS: 'approve · nits', REQUEST_CHANGES: 'changes' };
 const SEVERITIES = [['crit', 'crit_count'], ['major', 'major_count'], ['minor', 'minor_count'], ['nit', 'nit_count']];
@@ -28,6 +46,9 @@ const REFRESH_ACTIVE_MS = 5000;
 const REFRESH_IDLE_MS = 30000;
 const REFRESH_HIDDEN_MS = 60000;
 const DAY_MS = 24 * 60 * 60 * 1000;
+const BASE_TITLE = document.title;
+const iconLink = document.querySelector('link[rel="icon"]');
+const ORIGINAL_ICON = iconLink?.getAttribute('href') ?? null;
 
 const STATUS_TAGS = {
   mergeable: ['можно мёржить', 'ok'],
@@ -96,6 +117,10 @@ const state = {
   search: '',
   expandedPipelines: new Set(),
   openSnoozeKey: null,
+  openBlocks: new Set(),
+  forceCheck: null,
+  pendingRender: false,
+  finishedBaseline: null,
 };
 
 const $ = (id) => document.getElementById(id);
@@ -134,27 +159,28 @@ function link(url, children, attrs = {}) {
   return safe ? el('a', { attrs: { href: safe, rel: 'noopener noreferrer', ...attrs } }, children) : el('span', { attrs }, children);
 }
 
-function relTime(iso) {
+function relTime(iso, suffix = '') {
   const time = Date.parse(iso);
   if (Number.isNaN(time)) return '';
   const minutes = Math.round((Date.now() - time) / 60000);
   if (minutes < 1) return 'только что';
-  if (minutes < 60) return `${minutes} мин`;
+  if (minutes < 60) return `${minutes} мин${suffix}`;
   const hours = Math.round(minutes / 60);
-  if (hours < 24) return `${hours} ч`;
-  return `${Math.round(hours / 24)} дн`;
+  if (hours < 24) return `${hours} ч${suffix}`;
+  return `${Math.round(hours / 24)} дн${suffix}`;
 }
 
-function ageNode(iso) {
-  const age = Date.now() - Date.parse(iso);
+function ageNode(iso, suffix = '') {
+  const time = Date.parse(iso);
+  if (Number.isNaN(time)) return null;
+  const age = Date.now() - time;
   const tone = age > 7 * DAY_MS ? 'stale-bad' : age > 3 * DAY_MS ? 'stale-warn' : '';
-  return el('time', { className: tone, text: relTime(iso), attrs: { datetime: iso, title: new Date(iso).toLocaleString('ru-RU') } });
+  return el('time', { className: tone, text: relTime(iso, suffix), attrs: { datetime: iso, title: new Date(time).toLocaleString('ru-RU') } });
 }
-
 
 function currentView() {
   const dashboard = state.radar?.dashboard;
-  if (!dashboard?.sections) return null;
+  if (!state.radar?.enabled || !dashboard?.sections) return null;
   return deriveView(dashboard, state.userState, Date.now(), state.radar.hiddenSections ?? []);
 }
 
@@ -203,11 +229,13 @@ function describeFailure(failure) {
 }
 
 function renderFailures(pipeline) {
-  const failures = pipeline.failures ?? [];
-  if (!failures.length) {
+  if (!Array.isArray(pipeline.failures)) {
+    return [el('div', { className: 'ci-job' }, [link(pipeline.webUrl, [el('span', { text: 'Не удалось загрузить джобы — открыть пайплайн' })])])];
+  }
+  if (!pipeline.failures.length) {
     return [el('div', { className: 'ci-job' }, [link(pipeline.webUrl, [el('span', { text: 'Упавших джоб не найдено — открыть пайплайн' })])])];
   }
-  return failures.map((failure) => {
+  return pipeline.failures.map((failure) => {
     const url = failureUrl(failure, state.gitlabUrl);
     const name = failure.stage && failure.stage !== 'external' ? `${failure.stage} / ${failure.name}` : failure.name;
     const body = [el('span', { className: 'ci-job-name', text: `✖ ${name}` }), el('span', { className: 'muted', text: describeFailure(failure) })];
@@ -230,7 +258,7 @@ function renderGitlabCell(row) {
     const toggle = el('button', {
       className: `tag ci-toggle ${pipeline.onlyIgnoredFailures ? '' : 'bad'}`.trim(),
       text: `${label} ${expanded ? '▾' : '▸'}`,
-      attrs: { type: 'button', 'aria-expanded': String(expanded) },
+      attrs: { type: 'button', 'aria-expanded': String(expanded), 'data-focus-id': `ci:${row.key}` },
     });
     toggle.addEventListener('click', () => {
       if (expanded) state.expandedPipelines.delete(row.key);
@@ -247,7 +275,8 @@ function renderGitlabCell(row) {
   const status = hasPipelineTag && CI_MERGE_STATUSES.has(radar.status) ? null : STATUS_TAGS[radar.status];
   if (status && !(radar.draft && radar.status === 'draft_status')) cell.append(tag(status[0], status[1]));
   if (typeof radar.approvalsCount === 'number' && row.sections.has('authored')) {
-    cell.append(tag(`апрувов: ${radar.approvalsCount}`, radar.approvalsCount > 0 ? 'ok' : '', radar.approverNames?.length ? { title: radar.approverNames.join(', ') } : {}));
+    const approvers = radar.approverNames?.length ? { title: radar.approverNames.join(', ') } : {};
+    cell.append(tag(`апрувов: ${radar.approvalsCount}`, radar.approvalsCount > 0 ? 'ok' : '', approvers));
   }
   if (!cell.childNodes.length) cell.append(el('span', { className: 'muted', text: row.radar ? '—' : '' }));
   return cell;
@@ -260,13 +289,14 @@ function renderReviewCell(row) {
     cell.append(el('span', { className: 'muted', text: '—' }));
     return cell;
   }
-  const reviewLink = el('a', { attrs: { href: `/reviews/${watch.latest_review_id}` } }, [
-    el('span', { className: `badge status ${watch.latest_review_status}`, text: watch.latest_review_status }),
-  ]);
-  cell.append(reviewLink);
+  cell.append(
+    el('a', { attrs: { href: `/reviews/${Number(watch.latest_review_id)}` } }, [
+      el('span', { className: `badge status ${watch.latest_review_status}`, text: watch.latest_review_status }),
+    ]),
+  );
   if (watch.latest_done_review_id) {
     const findings = SEVERITIES.filter(([, field]) => watch[field]);
-    const done = el('a', { className: 'findings', attrs: { href: `/reviews/${watch.latest_done_review_id}` } });
+    const done = el('a', { className: 'findings', attrs: { href: `/reviews/${Number(watch.latest_done_review_id)}`, title: 'Находки последнего завершённого ревью' } });
     if (findings.length) findings.forEach(([name, field]) => done.append(el('span', { className: `sev ${name}`, text: String(watch[field]) })));
     else done.append(el('span', { className: 'sev clean', text: '✓' }));
     if (VERDICT_LABELS[watch.verdict]) done.append(el('span', { className: `verdict ${watch.verdict}`, text: VERDICT_LABELS[watch.verdict] }));
@@ -275,43 +305,60 @@ function renderReviewCell(row) {
   return cell;
 }
 
-function renderSnoozeControl(row) {
-  const section = rowSections(row)[0];
-  if (!row.radar || !section) return el('td', { className: 'actions' });
-  const isOpen = state.openSnoozeKey === row.key;
+function closeSnoozeMenu({ focusButton = false } = {}) {
+  const key = state.openSnoozeKey;
+  if (key === null) return;
+  state.openSnoozeKey = null;
+  render();
+  if (focusButton) document.querySelector(`[data-focus-id="${CSS.escape(`snooze:${key}`)}"]`)?.focus();
+}
+
+function snoozeControl(key, item, sectionId, title) {
+  const isOpen = state.openSnoozeKey === key;
   const button = el('button', {
     className: 'icon-btn',
     text: '⏰',
-    attrs: { type: 'button', title: 'Отложить', 'aria-expanded': String(isOpen), 'aria-label': 'Отложить MR' },
+    attrs: {
+      type: 'button',
+      title: 'Отложить',
+      'aria-haspopup': 'true',
+      'aria-expanded': String(isOpen),
+      'aria-label': `Отложить: ${title}`,
+      'data-focus-id': `snooze:${key}`,
+    },
   });
   button.addEventListener('click', () => {
-    state.openSnoozeKey = isOpen ? null : row.key;
+    state.openSnoozeKey = isOpen ? null : key;
     render();
+    if (!isOpen) document.querySelector('.snooze-menu button')?.focus();
   });
-  const children = [button];
+  const wrap = el('span', { className: 'snooze-wrap' }, [button]);
   if (isOpen) {
-    const menu = el('div', { className: 'snooze-menu', attrs: { role: 'group', 'aria-label': 'Отложить MR' } });
-    Object.entries(snoozeOptions(section)).forEach(([option, { label, title }]) => {
-      const item = el('button', { text: label, attrs: { type: 'button', ...(title && { title }) } });
-      item.addEventListener('click', () => {
+    const menu = el('div', { className: 'snooze-menu', attrs: { role: 'group', 'aria-label': `Отложить: ${title}` } });
+    Object.entries(snoozeOptions(sectionId)).forEach(([option, { label, title: hint }]) => {
+      const choice = el('button', { text: label, attrs: { type: 'button', ...(hint && { title: hint }) } });
+      choice.addEventListener('click', () => {
         state.openSnoozeKey = null;
-        updateSnoozed((snoozed) => ({ ...snoozed, [row.key]: createSnooze(option, row.radar) }));
+        updateSnoozed((snoozed) => ({ ...snoozed, [key]: createSnooze(option, item) }));
       });
-      menu.append(item);
+      menu.append(choice);
     });
-    children.push(menu);
+    wrap.append(menu);
   }
-  return el('td', { className: 'actions' }, children);
+  return wrap;
 }
 
 function renderRow(row) {
+  const section = rowSections(row)[0];
+  const title = row.radar?.title ?? row.watch?.title ?? row.key;
+  const actions = el('td', { className: 'actions' }, [row.radar && section ? snoozeControl(row.key, row.radar, section, title) : null]);
   const tr = el('tr', { attrs: { id: `mr-${row.key.replace('!', '-')}`, 'data-key': row.key } }, [
     renderMrCell(row),
     renderRoleCell(row),
     renderGitlabCell(row),
     renderReviewCell(row),
     el('td', { className: 'nowrap' }, [row.updatedAt ? ageNode(row.updatedAt) : null]),
-    renderSnoozeControl(row),
+    actions,
   ]);
   if (location.hash === `#mr=${row.key}`) tr.classList.add('highlight');
   return tr;
@@ -326,13 +373,18 @@ function renderChips(rows, actionable) {
     ...MR_SECTIONS.filter((id) => !hidden.has(id)).map((id) => [id, CHIP_LABELS[id]]),
     ['changes', 'Ревью: правки'],
     ['reviewRunning', 'Ревью идёт'],
+    ['reviewError', 'Ревью: ошибка'],
   ];
   $('chips').replaceChildren(
     ...chips.map(([id, label]) => {
-      const chip = el('button', {
-        className: `chip ${state.filter === id ? 'active' : ''}`.trim(),
-        attrs: { type: 'button', 'aria-pressed': String(state.filter === id), title: SECTION_TITLES[id] ?? label },
-      }, [el('span', { text: label }), el('span', { className: 'chip-count', text: String(counts[id] ?? 0) })]);
+      const chip = el(
+        'button',
+        {
+          className: `chip ${state.filter === id ? 'active' : ''}`.trim(),
+          attrs: { type: 'button', 'aria-pressed': String(state.filter === id), title: SECTION_TITLES[id] ?? label, 'data-focus-id': `chip:${id}` },
+        },
+        [el('span', { text: label }), el('span', { className: 'chip-count', text: String(counts[id] ?? 0) })],
+      );
       chip.addEventListener('click', () => {
         state.filter = id;
         saveFilter(id);
@@ -343,31 +395,13 @@ function renderChips(rows, actionable) {
   );
 }
 
-function renderExtraItem(item, sectionId, { unsnooze = false } = {}) {
-  const target = (sectionId === 'possibleMrs' && item.mrUrl) || (sectionId === 'mentioned' && item.mentionUrl) || item.webUrl;
-  const tags = [];
-  if (item.kind === 'issue') tags.push(tag('задача'));
-  if (sectionId === 'possibleMrs') {
-    if (item.mrState === 'merged' || (item.merged && !item.mrState)) tags.push(tag('смержена', 'warn'));
-    else if (item.mrState === 'closed') tags.push(tag('MR закрыт', 'warn'));
-    else tags.push(tag('создать MR', 'ok'));
-  }
-  if (sectionId === 'brokenBranches') tags.push(tag('CI упал', 'bad'));
-  if (item.snooze) tags.push(tag(formatSnooze(item.snooze)));
-  const row = el('li', { className: 'extra-item' }, [
-    link(target, [el('span', { className: 'mr-title', text: item.title })], { title: item.title }),
-    el('div', { className: 'sub' }, [el('span', { text: item.reference ?? '' }), item.updatedAt ? ageNode(item.updatedAt) : null, ...tags]),
-  ]);
-  if (unsnooze) {
-    const back = el('button', { className: 'icon-btn', text: '↩', attrs: { type: 'button', title: 'Вернуть' } });
-    back.addEventListener('click', () => updateSnoozed(({ [item.key]: _removed, ...rest }) => rest));
-    row.append(back);
-  } else if (sectionId === 'possibleMrs') {
-    const hide = el('button', { className: 'icon-btn', text: '⏰', attrs: { type: 'button', title: 'Скрыть навсегда' } });
-    hide.addEventListener('click', () => updateSnoozed((snoozed) => ({ ...snoozed, [item.key]: createSnooze('forever', item) })));
-    row.append(hide);
-  }
-  return row;
+function branchesUrl(item) {
+  const url = new URL(state.gitlabUrl);
+  url.pathname = `${url.pathname.replace(/\/+$/, '')}/${item.projectPath}/-/branches`;
+  url.searchParams.set('state', 'all');
+  url.searchParams.set('sort', 'updated_desc');
+  url.searchParams.set('search', item.title);
+  return url.href;
 }
 
 function formatSnooze(snooze) {
@@ -380,49 +414,89 @@ function formatSnooze(snooze) {
     : `до ${until.toLocaleDateString('ru-RU', { day: 'numeric', month: 'short' })} ${time}`;
 }
 
+function renderExtraItem(item, sectionId, { snoozedBlock = false } = {}) {
+  const target = (sectionId === 'possibleMrs' && item.mrUrl) || (sectionId === 'mentioned' && item.mentionUrl) || item.webUrl;
+  const tags = [];
+  if (item.kind === 'issue') tags.push(tag('задача'));
+  if (sectionId === 'possibleMrs') {
+    if (item.mrState === 'merged' || (item.merged && !item.mrState)) tags.push(tag('смержена', 'warn'));
+    else if (item.mrState === 'closed') tags.push(tag('MR закрыт', 'warn'));
+    else tags.push(tag('создать MR', 'ok'));
+  }
+  if (sectionId === 'brokenBranches') tags.push(tag('CI упал', 'bad'));
+  if (snoozedBlock) tags.push(tag(formatSnooze(item.snooze)));
+  const actions = el('span', { className: 'extra-actions' });
+  if (snoozedBlock) {
+    const back = el('button', { className: 'icon-btn', text: '↩', attrs: { type: 'button', title: 'Вернуть', 'aria-label': `Вернуть: ${item.title}`, 'data-focus-id': `unsnooze:${item.key}` } });
+    back.addEventListener('click', () => updateSnoozed(({ [item.key]: _removed, ...rest }) => rest));
+    actions.append(back);
+  } else {
+    actions.append(snoozeControl(item.key, item, sectionId, item.title));
+    if (sectionId === 'possibleMrs' && item.projectPath) {
+      actions.append(link(branchesUrl(item), [el('span', { text: '🗑' })], { className: 'icon-btn', title: 'Открыть ветки в GitLab, чтобы удалить ветку' }));
+    }
+  }
+  return el('li', { className: 'extra-item' }, [
+    el('div', {}, [
+      link(target, [el('span', { className: 'mr-title', text: item.title })], { title: item.title }),
+      el('div', { className: 'sub' }, [el('span', { text: item.reference ?? '' }), item.updatedAt ? ageNode(item.updatedAt) : null, ...tags]),
+    ]),
+    actions,
+  ]);
+}
+
 function renderExtras(view) {
   const hidden = new Set(state.radar?.hiddenSections ?? []);
   const blocks = [];
-  const add = (id, title, items, options) => {
+  const add = (id, title, items, sectionId, options) => {
     if (!items.length) return;
     const details = el('details', { className: 'extra', attrs: { 'data-block': id } }, [
       el('summary', {}, [el('span', { text: title }), el('span', { className: 'chip-count', text: String(items.length) })]),
-      el('ul', {}, items.map((item) => renderExtraItem(item, options?.section ?? id, options))),
+      el('ul', {}, items.map((item) => renderExtraItem(item, sectionId ?? item.sectionId, options))),
     ]);
-    if (openBlocks.has(id)) details.open = true;
-    details.addEventListener('toggle', () => (details.open ? openBlocks.add(id) : openBlocks.delete(id)));
+    if (state.openBlocks.has(id)) details.open = true;
+    details.addEventListener('toggle', () => (details.open ? state.openBlocks.add(id) : state.openBlocks.delete(id)));
     blocks.push(details);
   };
   if (view) {
-    if (!hidden.has('mentioned')) add('issues', 'Задачи с упоминанием', view.sections.mentioned.filter((item) => item.kind === 'issue'), { section: 'mentioned' });
-    if (!hidden.has('possibleMrs')) add('possibleMrs', SECTION_TITLES.possibleMrs, view.sections.possibleMrs);
-    if (!hidden.has('brokenBranches')) add('brokenBranches', SECTION_TITLES.brokenBranches, view.sections.brokenBranches);
-    add('snoozed', 'Отложено', view.snoozed, { section: 'snoozed', unsnooze: true });
+    if (!hidden.has('mentioned')) add('issues', 'Задачи с упоминанием', view.sections.mentioned.filter((item) => item.kind === 'issue'), 'mentioned');
+    if (!hidden.has('possibleMrs')) add('possibleMrs', SECTION_TITLES.possibleMrs, view.sections.possibleMrs, 'possibleMrs');
+    if (!hidden.has('brokenBranches')) add('brokenBranches', SECTION_TITLES.brokenBranches, view.sections.brokenBranches, 'brokenBranches');
+    add('snoozed', 'Отложено', view.snoozed, 'snoozed', { snoozedBlock: true });
   }
   $('extras').replaceChildren(...blocks);
 }
 
-const openBlocks = new Set();
+function partialSummary(dashboard) {
+  const parts = Object.entries(PARTIAL_FLAGS).filter(([flag]) => dashboard[flag]).map(([, label]) => label);
+  if (dashboard.skippedProjects) parts.push(`пропущено проектов: ${dashboard.skippedProjects}`);
+  if (dashboard.skippedMrs) parts.push(`пропущено MR: ${dashboard.skippedMrs}`);
+  return parts;
+}
 
-function renderStatus(view) {
+function renderStatus() {
   const radar = state.radar;
   const dashboard = radar?.dashboard;
   const notes = [];
   if (!radar?.enabled) notes.push(el('span', { text: 'Радар выключен в настройках' }));
   else if (!dashboard) notes.push(el('span', { text: radar?.error ? '' : 'Радар ещё не обновлялся…' }));
   else {
-    const fetched = ageNode(dashboard.fetchedAt);
-    fetched.textContent = `${fetched.textContent} назад`.replace('только что назад', 'только что');
-    notes.push(el('span', { text: `@${dashboard.username} · радар обновлён` }), fetched);
-    const partial = ['projectsUnavailable', 'pipelinesUnavailable', 'mentionsUnavailable', 'assignedUnavailable', 'defaultBranchesUnavailable', 'possibleMrsUnavailable']
-      .some((flag) => dashboard[flag]) || dashboard.skippedMrs || dashboard.skippedProjects;
-    if (partial) notes.push(tag('часть данных не загрузилась', 'warn'));
+    const stats = dashboard.stats ? `запросов: ${dashboard.stats.requests}, ${Math.round(dashboard.stats.durationMs / 100) / 10} с` : '';
+    const watched = typeof dashboard.watchedProjects === 'number' ? `проектов: ${dashboard.watchedProjects}` : '';
+    notes.push(
+      el('span', { text: `@${dashboard.username} · радар обновлён`, attrs: { title: [watched, stats].filter(Boolean).join(' · ') } }),
+      ageNode(dashboard.fetchedAt, ' назад'),
+    );
+    const partial = partialSummary(dashboard);
+    if (partial.length) notes.push(tag(`не загрузилось: ${partial.join(', ')}`, 'warn'));
   }
+  if (state.forceCheck) notes.push(el('span', { className: state.forceCheck.error ? 'tag bad' : 'muted', text: state.forceCheck.text }));
   $('radar-meta').replaceChildren(...notes);
   const banners = [];
-  if (radar?.error) banners.push(el('div', { className: 'flash err', text: `Радар: ${radar.error}` }));
-  if (dashboard?.warning) banners.push(el('div', { className: 'flash warn', text: dashboard.warning }));
-  tokenProblems(dashboard?.token, state.userState.dismissedTokenProblems ?? {}, Date.now(), ALLOWED_TOKEN_SCOPES).forEach((problem) => {
+  if (radar?.enabled && radar?.error) banners.push(el('div', { className: 'flash err', text: `Радар: ${radar.error}` }));
+  if (radar?.enabled && dashboard?.warning) banners.push(el('div', { className: 'flash warn', text: dashboard.warning }));
+  const problems = radar?.enabled ? tokenProblems(dashboard?.token, state.userState.dismissedTokenProblems ?? {}, Date.now(), ALLOWED_TOKEN_SCOPES) : [];
+  problems.forEach((problem) => {
     const banner = el('div', { className: 'flash warn', text: `${problem.text} ` });
     if (problem.dismissKey) {
       const dismiss = el('button', { text: 'Скрыть', attrs: { type: 'button' } });
@@ -437,23 +511,25 @@ function renderStatus(view) {
     banners.push(banner);
   });
   $('banners').replaceChildren(...banners);
-  return view;
 }
 
-function updateCounters(actionableCount) {
+function updateCounters(count) {
   const counter = $('nav-count-mr');
-  if (counter) counter.textContent = actionableCount ? String(actionableCount) : '';
-  document.title = `${actionableCount ? `(${actionableCount}) ` : ''}${BASE_TITLE}`;
+  if (counter) counter.textContent = count ? String(count) : '';
+  document.title = `${count ? `(${count}) ` : ''}${BASE_TITLE}`;
 }
 
-const BASE_TITLE = document.title;
+function focusedId() {
+  return document.activeElement?.closest?.('[data-focus-id]')?.getAttribute('data-focus-id') ?? null;
+}
 
 function render() {
+  state.pendingRender = false;
+  const focus = focusedId();
   const view = currentView();
   const rows = buildRows(view, state.mrs, state.radar?.hiddenSections ?? []);
-  const keys = view ? actionableKeys(view.sections) : { waiting: new Set(), failedCi: new Set() };
-  const actionable = new Set([...keys.waiting, ...keys.failedCi]);
-  renderStatus(view);
+  const actionable = visibleActionable(view, state.radar?.hiddenSections ?? [], actionableKeys);
+  renderStatus();
   renderChips(rows, actionable);
   const visible = rows.filter((row) => matchesFilter(row, state.filter, actionable) && matchesSearch(row, state.search));
   $('mr-body').replaceChildren(...visible.map(renderRow));
@@ -461,18 +537,29 @@ function render() {
   empty.hidden = visible.length > 0;
   empty.textContent = rows.length ? (state.filter === 'action' ? 'Ничего не требует действия' : 'Ничего не найдено') : 'Открытых MR нет';
   renderExtras(view);
-  updateCounters([...actionable].filter((key) => rows.some((row) => row.key === key)).length);
-  scheduleSnoozeExpiry(view);
+  updateCounters(rows.filter((row) => actionable.has(row.key)).length);
+  scheduleSnoozeExpiry();
+  if (focus) document.querySelector(`[data-focus-id="${CSS.escape(focus)}"]`)?.focus();
+}
+
+function hasSelection() {
+  return Boolean(window.getSelection()?.toString());
+}
+
+function renderWhenIdle() {
+  if (hasSelection() || state.openSnoozeKey !== null) {
+    state.pendingRender = true;
+    return;
+  }
+  render();
 }
 
 let snoozeTimer = null;
 
 function scheduleSnoozeExpiry() {
   clearTimeout(snoozeTimer);
-  const dashboard = state.radar?.dashboard;
-  if (!dashboard?.sections) return;
-  const next = nextSnoozeExpiry(state.userState.snoozed ?? {}, itemsByKey(dashboard), Date.now());
-  if (next) snoozeTimer = setTimeout(render, Math.max(1000, next - Date.now() + 500));
+  const next = nextSnoozeExpiry(state.userState.snoozed ?? {}, Date.now());
+  if (next) snoozeTimer = setTimeout(renderWhenIdle, Math.max(1000, next - Date.now() + 500));
 }
 
 const isCompleteDashboard = (dashboard) =>
@@ -485,20 +572,30 @@ const isCompleteDashboard = (dashboard) =>
   !dashboard.defaultBranchesUnavailable &&
   !dashboard.possibleMrsUnavailable;
 
+const normalizeUserState = (value) => ({ snoozed: {}, dismissedTokenProblems: {}, ...(value ?? {}) });
+
+async function fetchUserState() {
+  const response = await fetch('/api/ui-state/radar', { cache: 'no-store' });
+  if (!response.ok) throw new Error(`ui-state: ${response.status}`);
+  return normalizeUserState(await response.json());
+}
+
 let userStateWrite = Promise.resolve();
 
 function updateUserState(change) {
   state.userState = change(state.userState);
   render();
-  const snapshot = state.userState;
   userStateWrite = userStateWrite
-    .then(() =>
-      fetch('/api/ui-state/radar', {
+    .then(async () => {
+      const fresh = await fetchUserState().catch(() => state.userState);
+      state.userState = change(fresh);
+      await fetch('/api/ui-state/radar', {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'lpdev' },
-        body: JSON.stringify(snapshot),
-      }),
-    )
+        body: JSON.stringify(state.userState),
+      });
+      renderWhenIdle();
+    })
     .catch(() => {});
   return userStateWrite;
 }
@@ -513,35 +610,16 @@ function updateSnoozed(change) {
   });
 }
 
-const iconLink = document.querySelector('link[rel="icon"]');
-const ORIGINAL_ICON = iconLink?.getAttribute('href') ?? null;
-let finishedBaseline = null;
-let unseenFinished = 0;
-
 function trackFinishedReviews() {
-  const done = new Set(state.mrs.map((mr) => mr.latest_done_review_id).filter(Boolean).map(String));
-  if (!document.hidden) {
-    finishedBaseline = done;
+  const marks = finishedReviewMarks(state.mrs);
+  if (!document.hidden || !state.finishedBaseline) {
+    state.finishedBaseline = marks;
     return;
   }
-  if (!finishedBaseline) {
-    finishedBaseline = done;
-    return;
+  if ([...marks].some((mark) => !state.finishedBaseline.has(mark)) && iconLink) {
+    iconLink.setAttribute('href', '/static/favicon-dot.svg');
   }
-  const fresh = [...done].filter((id) => !finishedBaseline.has(id));
-  if (!fresh.length) return;
-  fresh.forEach((id) => finishedBaseline.add(id));
-  unseenFinished += fresh.length;
-  if (iconLink) iconLink.setAttribute('href', '/static/favicon-dot.svg');
 }
-
-document.addEventListener('visibilitychange', () => {
-  if (document.hidden) return;
-  unseenFinished = 0;
-  finishedBaseline = null;
-  if (iconLink && ORIGINAL_ICON !== null) iconLink.setAttribute('href', ORIGINAL_ICON);
-  refresh();
-});
 
 let refreshTimer = null;
 let inFlight = false;
@@ -550,14 +628,16 @@ async function refresh() {
   if (inFlight) return;
   inFlight = true;
   try {
-    const [mrsResponse, radarResponse] = await Promise.all([
+    const [mrsResponse, radarResponse, userState] = await Promise.all([
       fetch('/api/mrs', { cache: 'no-store' }),
       fetch('/api/radar', { cache: 'no-store' }),
+      fetchUserState().catch(() => null),
     ]);
     if (mrsResponse.ok) state.mrs = await mrsResponse.json();
     if (radarResponse.ok) state.radar = await radarResponse.json();
+    if (userState) state.userState = userState;
     trackFinishedReviews();
-    render();
+    renderWhenIdle();
   } catch {
   } finally {
     inFlight = false;
@@ -569,11 +649,22 @@ async function refresh() {
 
 async function forceCheck(button) {
   button.disabled = true;
+  state.forceCheck = { text: 'проверяю…' };
+  render();
   try {
     const response = await fetch('/force-check', { method: 'POST', headers: { 'X-Requested-With': 'lpdev' } });
-    if (!response.ok) $('banners').prepend(el('div', { className: 'flash err', text: await response.text() }));
+    state.forceCheck = response.ok
+      ? { text: 'запрошено, обновляю…' }
+      : { text: (await response.text()) || `ошибка ${response.status}`, error: true };
     [2000, 5000, 10000].forEach((delay) => setTimeout(refresh, delay));
+    setTimeout(() => {
+      state.forceCheck = null;
+      renderWhenIdle();
+    }, 12000);
+  } catch {
+    state.forceCheck = { text: 'сервис не отвечает', error: true };
   } finally {
+    render();
     setTimeout(() => (button.disabled = false), 2000);
   }
 }
@@ -583,22 +674,32 @@ function init() {
   state.gitlabUrl = initial.gitlabUrl;
   state.mrs = initial.mrs;
   state.radar = initial.radar;
-  state.userState = { snoozed: {}, dismissedTokenProblems: {}, ...(initial.userState ?? {}) };
+  state.userState = normalizeUserState(initial.userState);
+  state.finishedBaseline = finishedReviewMarks(state.mrs);
   $('search').addEventListener('input', (event) => {
     state.search = event.target.value;
     render();
   });
   $('force-check').addEventListener('click', (event) => forceCheck(event.currentTarget));
   document.addEventListener('click', (event) => {
-    if (state.openSnoozeKey && !event.target.closest('.actions')) {
-      state.openSnoozeKey = null;
-      render();
-    }
+    if (state.openSnoozeKey !== null && !event.target.closest('.snooze-wrap')) closeSnoozeMenu();
+  });
+  document.addEventListener('keydown', (event) => {
+    if (event.key === 'Escape' && state.openSnoozeKey !== null) closeSnoozeMenu({ focusButton: true });
+  });
+  document.addEventListener('selectionchange', () => {
+    if (state.pendingRender) renderWhenIdle();
+  });
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden) return;
+    state.finishedBaseline = finishedReviewMarks(state.mrs);
+    if (iconLink && ORIGINAL_ICON !== null) iconLink.setAttribute('href', ORIGINAL_ICON);
+    refresh();
   });
   render();
   if (location.hash.startsWith('#mr=')) document.querySelector('tr.highlight')?.scrollIntoView({ block: 'center' });
   refreshTimer = setTimeout(refresh, REFRESH_IDLE_MS);
-  setInterval(render, 60000);
+  setInterval(renderWhenIdle, 60000);
 }
 
 init();
