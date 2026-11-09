@@ -44,5 +44,5 @@ for _ in {1..30}; do
   fi
   sleep 1
 done
-echo "Сервис не перезапустился или не ответил на $HEALTH_URL за 30 с. Откат: git -C $PROJECT_DIR reset --keep $OLD_HEAD && launchctl kickstart -k $SERVICE"
+echo "Сервис не перезапустился или не ответил на $HEALTH_URL за 30 с. Откат: git -C $PROJECT_DIR reset --keep $OLD_HEAD && $PROJECT_DIR/.venv/bin/pip install -q -e $PROJECT_DIR && launchctl kickstart -k $SERVICE"
 exit 1

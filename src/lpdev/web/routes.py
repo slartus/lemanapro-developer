@@ -419,6 +419,7 @@ async def _resolve_projects(request: Request, projects: list[dict], gitlab_url: 
             detail = await api.get_project_by_path(str(pid))
             item["slug"] = str(detail.get("path_with_namespace") or "")
         if any(existing["gitlab_project_id"] == item["gitlab_project_id"] for existing in resolved):
+            logger.info("settings: project %s listed twice, keeping the first entry", item["gitlab_project_id"])
             continue
         resolved.append(item)
     return resolved
