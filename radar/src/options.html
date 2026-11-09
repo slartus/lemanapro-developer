@@ -1,0 +1,134 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <title>MR Radar — настройки</title>
+  <style>
+    :root { color-scheme: light dark; }
+    body { max-width: 560px; margin: 32px auto; padding: 0 16px; font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+    label.field { display: block; margin-top: 16px; font-weight: 600; }
+    label.checkbox { display: flex; gap: 8px; align-items: center; margin-top: 16px; }
+    textarea, input[type="url"], input[type="password"], input[type="number"], input[type="search"] { width: 100%; margin-top: 4px; padding: 6px 8px; font: inherit; box-sizing: border-box; }
+    .hint { color: GrayText; font-size: 13px; font-weight: 400; }
+    button { padding: 6px 16px; font: inherit; cursor: pointer; }
+    button[type="submit"] { margin-top: 20px; }
+    fieldset { margin-top: 20px; border: 1px solid GrayText; border-radius: 6px; padding: 8px 12px 12px; }
+    legend { font-weight: 600; padding: 0 4px; }
+    .modes label { display: block; margin: 4px 0; }
+    .toolbar { display: flex; gap: 8px; align-items: center; margin-top: 8px; }
+    .toolbar button { padding: 3px 10px; font-size: 13px; }
+    #projects { max-height: 320px; overflow-y: auto; margin-top: 8px; border-top: 1px solid GrayText; }
+    #projects label { display: flex; gap: 8px; padding: 3px 0; cursor: pointer; }
+    #projects label[hidden], #projects [hidden] { display: none; }
+    #projects.searching .children[hidden] { display: block; }
+    #projects.searching .toggle { visibility: hidden; }
+    .group-row { display: flex; align-items: center; gap: 2px; }
+    .group-row label { font-weight: 600; }
+    .toggle { width: 22px; padding: 0; border: none; background: none; color: inherit; font-size: 12px; }
+    .children { margin-left: 22px; }
+    .children > .project-row { margin-left: 24px; }
+    #status { margin-left: 10px; }
+    .field-title { margin-top: 16px; font-weight: 600; }
+    .types label.checkbox { margin-top: 6px; }
+    .quiet { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 6px 0 0 24px; }
+    .quiet label.checkbox.inline { margin-top: 0; }
+  </style>
+</head>
+<body>
+  <h1>MR Radar</h1>
+  <form id="form">
+    <label class="field">
+      GitLab URL
+      <div class="hint">Например, <code>https://gitlab.com</code> или адрес self-hosted инстанса. При сохранении браузер попросит доступ к этому хосту.</div>
+      <input id="base-url" type="url" placeholder="https://gitlab.example.com" required>
+    </label>
+    <label class="field">
+      Personal Access Token
+      <div class="hint">
+        Scope только <code>read_api</code>, со сроком действия. Создать:
+        <a id="token-link" target="_blank" rel="noopener"></a>
+      </div>
+      <input id="token" type="password" autocomplete="off" required>
+    </label>
+    <label class="field">
+      Интервал обновления, минут
+      <input id="interval" type="number" required>
+    </label>
+    <label class="field">
+      Проверки, которые не считаются падением CI
+      <div class="hint">Имена джоб или внешних проверок (например, Jenkins <code>approves</code>), через запятую или с новой строки. Если упали только они, MR не попадает в счётчик упавших.</div>
+      <textarea id="ignored-checks" rows="3" placeholder="approves"></textarea>
+    </label>
+    <label class="checkbox">
+      <input id="fast-refresh" type="checkbox">
+      Обновлять раз в минуту, пока в моих MR идёт CI или GitLab пересчитывает статус мёржа
+    </label>
+    <label class="checkbox">
+      <input id="check-updates" type="checkbox">
+      Проверять новые версии на GitHub (раз в сутки, нужен доступ к api.github.com)
+    </label>
+    <fieldset>
+      <legend>Уведомления</legend>
+      <label class="checkbox">
+        <input id="notifications" type="checkbox">
+        Уведомлять о новых MR на ревью, упоминаниях, тредах, упавшем CI и MR, которые можно мёржить
+      </label>
+      <label class="checkbox">
+        <input id="notification-details" type="checkbox">
+        Показывать названия MR и задач в уведомлениях
+      </label>
+      <div class="hint">Уведомления видны на заблокированном экране и при демонстрации экрана — без этой галки показываются только счётчики. Об отложенных MR уведомлений нет.</div>
+      <label class="checkbox">
+        <input id="quiet-enabled" type="checkbox">
+        Тихие часы: не показывать уведомления
+      </label>
+      <div class="quiet">
+        с <input id="quiet-from" type="time" aria-label="Тихие часы: с"> до <input id="quiet-to" type="time" aria-label="Тихие часы: до">
+        <label class="checkbox inline"><input id="quiet-weekends" type="checkbox"> и все выходные</label>
+      </div>
+      <div class="hint">События за тихие часы приходят одним уведомлением после их окончания — только те, что ещё актуальны.</div>
+      <div class="field-title">Уведомлять о событиях</div>
+      <div id="notification-types" class="types"></div>
+    </fieldset>
+    <fieldset>
+      <legend>Фильтры для «Ждут моего апрува»</legend>
+      <div class="hint">MR, где вы ревьюер или автор, показываются из всех проектов.</div>
+      <label class="field">
+        Не показывать MR, у которых апрувов не меньше
+        <div class="hint">0 — показывать все MR без моего апрува. Например, 2 — MR, которые уже апрувнули двое, в секцию и счётчик не попадают.</div>
+        <input id="approval-threshold" type="number" min="0" required>
+      </label>
+      <div class="modes">
+        <label><input type="radio" name="project-mode" value="all"> Все проекты, где я Maintainer+</label>
+        <label><input type="radio" name="project-mode" value="selected"> Только выбранные (новые проекты не добавляются автоматически)</label>
+      </div>
+      <div id="project-picker" hidden>
+        <input id="project-search" type="search" placeholder="Фильтр по пути проекта">
+        <div class="toolbar">
+          <button id="load-projects" type="button">Загрузить проекты</button>
+          <button id="select-visible" type="button">Выбрать видимые</button>
+          <button id="clear-visible" type="button">Снять видимые</button>
+          <span id="project-counter" class="hint"></span>
+        </div>
+        <div id="projects"></div>
+      </div>
+    </fieldset>
+    <fieldset>
+      <legend>Фильтр по проектам в popup</legend>
+      <div class="hint">Как показывать проект в чипе и выпадающем списке.</div>
+      <div class="modes">
+        <label><input type="radio" name="project-label-mode" value="name"> Только имя проекта (по умолчанию)</label>
+        <label><input type="radio" name="project-label-mode" value="fullPath"> Полный путь</label>
+      </div>
+    </fieldset>
+    <fieldset>
+      <legend>Секции в popup</legend>
+      <div class="hint">Снятые секции не показываются в списке и не попадают в счётчик на бейдже.</div>
+      <div id="section-visibility" class="types"></div>
+    </fieldset>
+    <button type="submit">Сохранить</button>
+    <span id="status"></span>
+  </form>
+  <script type="module" src="options.js"></script>
+</body>
+</html>
