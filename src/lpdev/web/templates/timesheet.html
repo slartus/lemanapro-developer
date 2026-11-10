@@ -1,0 +1,175 @@
+{% extends "base.html" %}
+{% set active = "timesheet" %}
+{% block title %}Таймшит — lemanapro-developer{% endblock %}
+{% block style %}
+  .ts-head { display: flex; flex-wrap: wrap; align-items: center; gap: 0.6rem 1rem; margin-bottom: 0.8rem; }
+  .ts-head h1 { margin: 0; }
+  .week-nav { display: flex; align-items: center; gap: 0.35rem; flex-wrap: wrap; }
+  .week-nav .nav-arrow { padding: 0.42rem 0.7rem; }
+  .week-label { font-weight: 600; min-width: 13em; text-align: center; }
+  .ts-tools { margin-left: auto; display: flex; gap: 0.5rem; align-items: center; flex-wrap: wrap; }
+  #banners .flash { margin-bottom: 0.6rem; }
+  .ts-wrap { position: relative; }
+  .ts th, .ts td { padding: 0.45rem 0.5rem; }
+  .ts th { text-transform: none; letter-spacing: 0; }
+  .ts td { vertical-align: middle; }
+  .ts .task { position: sticky; left: 0; z-index: 1; background: var(--surface); box-shadow: inset -1px 0 0 var(--border);
+              min-width: 240px; max-width: 340px; padding-left: 0.85rem; }
+  .ts thead .task, .ts tfoot .task { background: var(--surface-2); }
+  .ts tbody th.task { color: var(--text); font-weight: 400; font-size: 0.9rem; white-space: normal; }
+  .ts tbody tr.unkeyed th.task { color: var(--muted); }
+  .ts tfoot td { background: var(--surface-2); border-top: 1px solid var(--border); border-bottom: 0; font-weight: 600; }
+  .task-key { font-family: var(--mono); font-size: 0.85rem; font-weight: 600; }
+  .task-title { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; font-size: 0.88rem; overflow-wrap: anywhere; }
+  .sources { display: flex; flex-wrap: wrap; gap: 0.2rem; margin-top: 0.25rem; }
+  .src { display: inline-block; padding: 0 0.4rem; border-radius: 6px; font-size: 0.7rem; font-weight: 600; white-space: nowrap;
+         background: var(--neutral-bg); color: var(--neutral-fg); }
+  .src.in_progress { background: var(--info-bg); color: var(--info-fg); }
+  .ts th.day, .ts td.day, .ts td.sum, .ts th.sum { text-align: center; min-width: 92px; }
+  .ts th.day { vertical-align: top; color: var(--text); }
+  .day-head { display: flex; align-items: flex-start; justify-content: center; gap: 0.2rem; }
+  .day-name { display: block; font-size: 0.85rem; }
+  .day-norm { display: block; font-size: 0.72rem; font-weight: 500; color: var(--muted); }
+  .day-norm.holiday { color: var(--major-fg); }
+  .ts .today { box-shadow: inset 0 3px 0 var(--info-fg); }
+  .ts td.today { box-shadow: none; background: color-mix(in srgb, var(--info-bg) 35%, transparent); }
+  .day-menu-btn { padding: 0 0.35rem; border: 0; background: none; color: var(--muted); line-height: 1.4; font-weight: 700; }
+  .day-menu-btn:hover:not(:disabled) { color: var(--text); background: var(--surface); }
+  .menu { position: fixed; inset: auto; margin: 0; min-width: 180px; padding: 0.3rem; flex-direction: column;
+          background: var(--surface); color: var(--text); border: 1px solid var(--border); border-radius: var(--radius); box-shadow: 0 6px 18px rgba(0, 0, 0, 0.18); }
+  .menu:popover-open { display: flex; }
+  .menu button { border: 0; background: none; text-align: left; padding: 0.45rem 0.6rem; }
+  .menu button:hover:not(:disabled) { background: var(--surface-2); }
+  .menu button[hidden] { display: none; }
+  .cell { display: flex; flex-direction: column; align-items: center; gap: 0.1rem; }
+  .logged-line { font-size: 0.72rem; color: var(--ok-fg); font-weight: 600; white-space: nowrap; }
+  .cell-box { position: relative; display: inline-flex; align-items: center; gap: 0.15rem; }
+  .cell-input { width: 3.6em; text-align: center; padding: 0.3rem 0.25rem; font-variant-numeric: tabular-nums; }
+  .cell-input:disabled { opacity: 0.6; background: transparent; border-color: transparent; }
+  .st-suggested .cell-input { color: var(--muted); font-style: italic; background: var(--surface-2); }
+  .st-edited .cell-input { color: var(--text); }
+  .st-edited .cell-box::before { content: ""; position: absolute; left: -0.45rem; top: 50%; width: 6px; height: 6px; margin-top: -3px;
+                                 border-radius: 50%; background: var(--info-fg); }
+  .st-logged .cell-input { color: var(--muted); }
+  .ts td.st-error { background: var(--err-bg); }
+  .st-error .cell-input { color: var(--err-fg); border-color: var(--err-fg); }
+  .ts td.st-pending { background: var(--warn-bg); }
+  .st-pending .cell-input { color: var(--warn-fg); }
+  .flag { font-weight: 700; color: var(--err-fg); cursor: help; padding: 0 0.15rem; }
+  .st-pending .flag { color: var(--warn-fg); }
+  .reset-btn { padding: 0 0.3rem; border: 0; background: none; color: var(--muted); opacity: 0; line-height: 1.6; }
+  .ts td.day:hover .reset-btn, .cell-box:focus-within .reset-btn, .reset-btn:focus-visible { opacity: 1; }
+  .step-btn { display: none; }
+  .ts td.sum { font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .sum-sub { display: block; font-size: 0.72rem; font-weight: 500; color: var(--ok-fg); }
+  .total { white-space: nowrap; font-variant-numeric: tabular-nums; }
+  .over-tag { display: inline-block; margin-left: 0.3rem; padding: 0 0.4rem; border-radius: 6px; font-size: 0.75rem; background: var(--major-bg); color: var(--major-fg); }
+  .ts tfoot td.over { background: var(--major-bg); color: var(--major-fg); }
+  tr.unkeyed td { background: var(--surface-2); color: var(--muted); }
+  tr.unkeyed .task { background: var(--surface-2); }
+  tr.unkeyed summary { cursor: pointer; font-weight: 600; font-size: 0.88rem; }
+  tr.unkeyed ul { margin: 0.3rem 0 0; padding-left: 1.1rem; font-size: 0.82rem; }
+  tr.unkeyed li { overflow-wrap: anywhere; }
+  .unkeyed-value { font-style: italic; font-variant-numeric: tabular-nums; }
+  .empty { padding: 1.5rem; text-align: center; color: var(--muted); }
+  .ts-foot-tools { display: flex; flex-wrap: wrap; gap: 0.6rem 1rem; align-items: flex-start; margin-top: 0.8rem; }
+  .add-task { display: flex; gap: 0.5rem; flex-wrap: wrap; align-items: center; }
+  .add-task input { width: 14em; font-family: var(--mono); text-transform: uppercase; }
+  .add-error { color: var(--err-fg); font-size: 0.85rem; }
+  #ts-status { margin-left: auto; }
+  #ts-status.err { color: var(--err-fg); }
+  #ts-status.ok { color: var(--ok-fg); }
+  .legend { margin-top: 0.6rem; font-size: 0.8rem; display: flex; flex-wrap: wrap; gap: 0.3rem 1rem; }
+  .legend .st-suggested-sample { font-style: italic; background: var(--surface-2); padding: 0 0.35rem; border-radius: 4px; }
+  .legend .st-edited-sample::before { content: ""; display: inline-block; width: 6px; height: 6px; border-radius: 50%; background: var(--info-fg); margin-right: 0.3rem; vertical-align: middle; }
+  dialog.ts-dialog { width: min(640px, 94vw); max-height: 85vh; padding: 0; border: 1px solid var(--border); border-radius: var(--radius);
+                     background: var(--surface); color: var(--text); }
+  dialog.ts-dialog::backdrop { background: rgba(0, 0, 0, 0.35); }
+  .dlg-inner { display: flex; flex-direction: column; max-height: 85vh; }
+  .dlg-inner h2 { margin: 0; padding: 1rem 1.2rem 0.6rem; }
+  .dlg-body { overflow-y: auto; padding: 0 1.2rem 0.6rem; }
+  .dlg-body h3 { font-size: 0.95rem; margin: 0.9rem 0 0.3rem; }
+  .dlg-body ul { margin: 0; padding-left: 1.1rem; }
+  .dlg-body li { overflow-wrap: anywhere; }
+  .dlg-day-total { margin-top: 0.25rem; font-size: 0.88rem; }
+  .dlg-warn { display: inline-block; margin-left: 0.4rem; padding: 0 0.45rem; border-radius: 6px; font-size: 0.78rem; font-weight: 600;
+              background: var(--major-bg); color: var(--major-fg); }
+  .dlg-warn.under { background: var(--warn-bg); color: var(--warn-fg); }
+  .dlg-note { font-size: 0.85rem; color: var(--muted); margin: 0.3rem 0 0; }
+  .dlg-summary { font-weight: 600; margin: 0.4rem 0; }
+  .dlg-errors li { color: var(--err-fg); }
+  .dlg-actions { display: flex; justify-content: flex-end; gap: 0.5rem; flex-wrap: wrap; padding: 0.8rem 1.2rem; border-top: 1px solid var(--border); }
+  .visually-hidden { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+  @media (hover: none) {
+    .step-btn { display: inline-grid; place-items: center; min-width: 40px; min-height: 40px; padding: 0; }
+    .cell-input { min-height: 40px; }
+    .reset-btn { opacity: 1; min-width: 40px; min-height: 40px; }
+    .day-menu-btn { min-width: 40px; min-height: 40px; }
+    .menu button { min-height: 40px; }
+  }
+  @media (max-width: 760px) {
+    .ts-tools { margin-left: 0; width: 100%; }
+    .week-label { min-width: 0; }
+    .ts .task { min-width: 140px; max-width: 180px; padding-left: 0.6rem; }
+    .ts .sources { display: none; }
+    .ts-tools button, .week-nav button, .add-task button, .add-task input { min-height: 40px; }
+    dialog.ts-dialog { width: 100%; max-width: 100%; margin: auto 0 0; border-radius: var(--radius) var(--radius) 0 0; }
+    .dlg-actions button { flex: 1 1 auto; min-height: 44px; }
+    #ts-status { margin-left: 0; }
+  }
+{% endblock %}
+{% block content %}
+<div class="ts-head">
+  <h1>Таймшит</h1>
+  <div class="week-nav" role="group" aria-label="Неделя">
+    <button type="button" class="nav-arrow" id="prev-week" title="Предыдущая неделя" aria-label="Предыдущая неделя">←</button>
+    <span class="week-label" id="week-label" aria-live="polite">…</span>
+    <button type="button" class="nav-arrow" id="next-week" title="Следующая неделя" aria-label="Следующая неделя">→</button>
+    <button type="button" id="current-week">Текущая</button>
+  </div>
+  <div class="ts-tools">
+    <button type="button" id="weekend-toggle" aria-pressed="false" hidden>Сб/Вс</button>
+    <button type="button" id="reset-week" class="danger" title="Удалить ручные правки за неделю и вернуть предложения">Сбросить всё</button>
+    <button type="button" id="submit-week" class="primary">Списать неделю</button>
+  </div>
+</div>
+<div id="banners"></div>
+<div class="table-wrap ts-wrap">
+  <table class="ts" aria-describedby="ts-legend">
+    <thead id="ts-head"></thead>
+    <tbody id="ts-body"></tbody>
+    <tfoot id="ts-foot"></tfoot>
+  </table>
+  <div class="empty" id="ts-empty" hidden>За неделю активности не найдено — добавьте задачу вручную</div>
+</div>
+<div class="legend muted" id="ts-legend">
+  <span>В ячейке — сколько часов ещё списать:</span>
+  <span><span class="st-suggested-sample">1.5</span> предложение</span>
+  <span class="st-edited-sample">ручная правка</span>
+  <span><span class="logged-line">✓ 1</span> уже списано</span>
+  <span>Ввод: часы с шагом 0.5, ↑/↓ — ±0.5, Enter — вниз, Esc — откат</span>
+</div>
+<div class="ts-foot-tools">
+  <form id="add-task" class="add-task" novalidate>
+    <label class="visually-hidden" for="add-key">Ключ задачи Tracker</label>
+    <input type="text" id="add-key" placeholder="LMWORK-123" autocomplete="off" spellcheck="false" aria-describedby="add-error">
+    <button type="submit">Добавить задачу</button>
+    <span class="add-error" id="add-error" role="alert"></span>
+  </form>
+  <span id="ts-status" class="small muted" role="status" aria-live="polite"></span>
+</div>
+<div id="day-menu" class="menu" popover role="menu" aria-label="Действия дня">
+  <button type="button" role="menuitem" data-action="submit-day">Списать день</button>
+  <button type="button" role="menuitem" data-action="reset-day">Сбросить день</button>
+</div>
+<dialog id="submit-dialog" class="ts-dialog" aria-labelledby="dlg-title">
+  <div class="dlg-inner">
+    <h2 id="dlg-title">Списание в Tracker</h2>
+    <div class="dlg-body" id="dlg-body" aria-live="polite"></div>
+    <div class="dlg-actions" id="dlg-actions"></div>
+  </div>
+</dialog>
+{% endblock %}
+{% block scripts %}
+<script type="module" src="/static/timesheet.js"></script>
+{% endblock %}

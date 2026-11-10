@@ -1,0 +1,839 @@
+import {
+  buildSubmitEntries,
+  cellState,
+  cellValue,
+  dayTotals,
+  formatHours,
+  groupEntriesByDay,
+  hiddenDays,
+  isEditableDay,
+  isSafeUrl,
+  isValidIssueKey,
+  parseHours,
+  retryEntries,
+  rowTotals,
+  stepMinutes,
+  summarizeResults,
+  visibleDays,
+} from '/static/timesheet-model.js';
+
+const WEEKDAYS = ['Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб', 'Вс'];
+const SOURCE_LABELS = {
+  push: 'push',
+  mr: 'MR',
+  review: 'ревью',
+  comment: 'комментарий',
+  in_progress: 'в работе',
+  manual: 'вручную',
+};
+const SOURCE_TITLES = {
+  push: 'Были push в ветки задачи',
+  mr: 'Работа с MR задачи',
+  review: 'Ревью MR задачи',
+  comment: 'Комментарии в задаче',
+  in_progress: 'Задача в статусе «в работе»',
+  manual: 'Добавлена вручную',
+};
+const KIND_LABELS = { holiday: 'праздник', weekend: 'выходной' };
+const SUBMISSION_TITLES = {
+  failed: 'Прошлое списание не удалось — можно повторить',
+  unknown: 'Статус прошлого списания неизвестен — проверьте в Tracker, прежде чем списывать снова',
+  pending: 'Списание выполняется',
+};
+const SUBMIT_DISABLED_TITLE = 'Запись в Tracker выключена (tracker.submit_enabled)';
+const JSON_HEADERS = { 'Content-Type': 'application/json', 'X-Requested-With': 'lpdev' };
+
+const $ = (id) => document.getElementById(id);
+const state = {
+  data: null,
+  week: new URLSearchParams(location.search).get('week'),
+  showWeekend: false,
+  loadSeq: 0,
+  loadError: null,
+  inputs: new Map(),
+  saving: 0,
+  saveChain: Promise.resolve(),
+  menuDate: null,
+  menuAnchor: null,
+  menuClosedAt: 0,
+  rendering: false,
+  dialog: { sending: false, changed: false },
+};
+
+function el(tag, { className, text, attrs } = {}, children = []) {
+  const node = document.createElement(tag);
+  if (className) node.className = className;
+  if (text !== undefined) node.textContent = text;
+  Object.entries(attrs ?? {}).forEach(([key, value]) => {
+    if (value !== undefined && value !== null && value !== false) node.setAttribute(key, value === true ? '' : value);
+  });
+  node.append(...children.filter(Boolean));
+  return node;
+}
+
+function button(text, { className, title, attrs, onClick } = {}) {
+  const node = el('button', { className, text, attrs: { type: 'button', title, ...attrs } });
+  if (onClick) node.addEventListener('click', onClick);
+  return node;
+}
+
+function setStatus(text, kind) {
+  const status = $('ts-status');
+  status.textContent = text;
+  status.className = `small ${kind || 'muted'}`;
+}
+
+function plural(count, forms) {
+  const mod10 = count % 10;
+  const mod100 = count % 100;
+  if (mod10 === 1 && mod100 !== 11) return forms[0];
+  if (mod10 >= 2 && mod10 <= 4 && (mod100 < 12 || mod100 > 14)) return forms[1];
+  return forms[2];
+}
+
+function parseDate(iso) {
+  const [year, month, day] = iso.split('-').map(Number);
+  return new Date(Date.UTC(year, month - 1, day));
+}
+
+const shortDateFormat = new Intl.DateTimeFormat('ru-RU', { day: '2-digit', month: '2-digit', timeZone: 'UTC' });
+const longDateFormat = new Intl.DateTimeFormat('ru-RU', { day: 'numeric', month: 'long', timeZone: 'UTC' });
+
+const shortDate = (iso) => shortDateFormat.format(parseDate(iso));
+const dayIndex = (date) => state.data.days.findIndex((day) => day.date === date);
+const dayLabel = (date) => `${WEEKDAYS[dayIndex(date)] ?? ''} ${shortDate(date)}`.trim();
+
+function weekLabel(data) {
+  const number = String(data.week).split('-W')[1] ?? data.week;
+  const first = data.days[0]?.date;
+  const last = data.days.at(-1)?.date;
+  if (!first || !last) return `Неделя ${number}`;
+  const year = last.slice(0, 4);
+  return `Неделя ${Number(number)} · ${longDateFormat.format(parseDate(first))} – ${longDateFormat.format(parseDate(last))} ${year}`;
+}
+
+function errorDetail(body, status) {
+  const detail = body?.detail;
+  if (typeof detail === 'string') return detail;
+  if (Array.isArray(detail)) return detail.map((item) => item?.msg ?? String(item)).join('; ');
+  return `HTTP ${status}`;
+}
+
+async function api(method, url, payload) {
+  const options = { method, cache: 'no-store' };
+  if (method !== 'GET') {
+    options.headers = JSON_HEADERS;
+    if (payload !== undefined) options.body = JSON.stringify(payload);
+  }
+  const response = await fetch(url, options);
+  let body = null;
+  try {
+    body = await response.json();
+  } catch (error) {
+    body = null;
+  }
+  if (!response.ok) {
+    const failure = new Error(errorDetail(body, response.status));
+    failure.status = response.status;
+    throw failure;
+  }
+  return body;
+}
+
+async function load(week = state.week) {
+  const seq = ++state.loadSeq;
+  const query = week ? `?week=${encodeURIComponent(week)}` : '';
+  try {
+    const data = await api('GET', `/api/timesheet${query}`);
+    if (seq !== state.loadSeq) return;
+    if (data.week !== state.data?.week) state.showWeekend = false;
+    state.data = data;
+    state.week = data.week;
+    state.loadError = null;
+    const url = new URL(location.href);
+    url.searchParams.set('week', data.week);
+    history.replaceState(null, '', url);
+  } catch (error) {
+    if (seq !== state.loadSeq) return;
+    state.loadError = error.message || String(error);
+  }
+  render();
+}
+
+function trackerState() {
+  const tracker = state.data?.tracker ?? {};
+  return { enabled: Boolean(tracker.enabled), submitEnabled: Boolean(tracker.enabled && tracker.submit_enabled) };
+}
+
+function applySubmitAvailability(node, entriesCount) {
+  const tracker = trackerState();
+  node.hidden = !tracker.enabled;
+  if (!tracker.submitEnabled) {
+    node.disabled = true;
+    node.title = SUBMIT_DISABLED_TITLE;
+  } else if (entriesCount === 0) {
+    node.disabled = true;
+    node.title = 'Нечего списывать';
+  } else {
+    node.disabled = false;
+    node.title = '';
+  }
+}
+
+function renderBanners() {
+  const banners = [];
+  if (state.loadError) {
+    banners.push(
+      el('div', { className: 'flash err', attrs: { role: 'alert' } }, [
+        el('span', { text: `Не удалось загрузить таймшит: ${state.loadError} ` }),
+        button('Повторить', { onClick: () => load() }),
+      ]),
+    );
+  }
+  const data = state.data;
+  if (data) {
+    if (data.calendar_ok === false) {
+      banners.push(
+        el('div', { className: 'flash warn', text: 'Производственный календарь на год не загружен, нормы — 8 ч Пн–Пт' }),
+      );
+    }
+    if (!data.tracker?.enabled) {
+      banners.push(el('div', { className: 'flash warn', text: 'Tracker не настроен — см. README, раздел «Таймшит»' }));
+    }
+    if (data.tracker?.error) {
+      banners.push(el('div', { className: 'flash err', attrs: { role: 'alert' }, text: `Tracker: ${data.tracker.error}` }));
+    }
+  }
+  $('banners').replaceChildren(...banners);
+}
+
+function renderToolbar() {
+  const data = state.data;
+  $('week-label').textContent = data ? weekLabel(data) : '…';
+  $('prev-week').disabled = !data?.prev_week;
+  $('next-week').disabled = !data?.next_week;
+  $('current-week').disabled = !data;
+  const toggle = $('weekend-toggle');
+  const hidden = data ? hiddenDays(data, { showWeekend: false }) : [];
+  toggle.hidden = hidden.length === 0;
+  toggle.setAttribute('aria-pressed', String(state.showWeekend));
+  toggle.textContent = state.showWeekend ? 'Скрыть Сб/Вс' : `Показать ${hidden.map((day) => WEEKDAYS[dayIndex(day.date)]).join('/')}`;
+  $('reset-week').disabled = !data;
+  applySubmitAvailability($('submit-week'), data ? buildSubmitEntries(data, { type: 'week' }).length : 0);
+}
+
+function normText(day) {
+  if (day.kind === 'holiday' || day.kind === 'weekend') {
+    return day.norm > 0 ? `${formatHours(day.norm)} ч` : KIND_LABELS[day.kind];
+  }
+  return day.kind === 'short' ? `${formatHours(day.norm)} ч · сокр.` : `${formatHours(day.norm)} ч`;
+}
+
+function renderHead(days) {
+  const cells = days.map((day) => {
+    const index = dayIndex(day.date);
+    const isToday = day.date === state.data.today;
+    const menuButton = button('⋯', {
+      className: 'day-menu-btn',
+      title: `Действия: ${dayLabel(day.date)}`,
+      attrs: { 'aria-haspopup': 'menu', 'aria-expanded': 'false', 'aria-label': `Действия: ${dayLabel(day.date)}` },
+      onClick: (event) => openDayMenu(event.currentTarget, day.date),
+    });
+    return el('th', { className: `day${isToday ? ' today' : ''}`, attrs: { scope: 'col', 'aria-current': isToday ? 'date' : null } }, [
+      el('div', { className: 'day-head' }, [
+        el('div', {}, [
+          el('span', { className: 'day-name', text: `${WEEKDAYS[index]} ${shortDate(day.date)}` }),
+          el('span', { className: `day-norm ${day.kind}`, text: normText(day) }),
+        ]),
+        menuButton,
+      ]),
+    ]);
+  });
+  $('ts-head').replaceChildren(
+    el('tr', {}, [
+      el('th', { className: 'task', text: 'Задача', attrs: { scope: 'col' } }),
+      ...cells,
+      el('th', { className: 'sum', text: 'Итого', attrs: { scope: 'col' } }),
+    ]),
+  );
+}
+
+function taskCell(row) {
+  const key = isSafeUrl(row.url)
+    ? el('a', { className: 'task-key', text: row.key, attrs: { href: row.url, target: '_blank', rel: 'noopener noreferrer' } })
+    : el('span', { className: 'task-key', text: row.key });
+  const sources = (row.sources ?? []).map((source) =>
+    el('span', { className: `src ${source}`, text: SOURCE_LABELS[source] ?? source, attrs: { title: SOURCE_TITLES[source] } }),
+  );
+  return el('th', { className: 'task', attrs: { scope: 'row' } }, [
+    key,
+    row.title ? el('div', { className: 'task-title', text: row.title, attrs: { title: row.title } }) : null,
+    sources.length ? el('div', { className: 'sources' }, sources) : null,
+  ]);
+}
+
+function inputText(cell) {
+  if (cell?.edited != null) return formatHours(cell.edited);
+  const value = cellValue(cell);
+  return value ? formatHours(value) : '';
+}
+
+function dataCell(row, day) {
+  const cell = row.cells?.[day.date];
+  const stateName = cellState(cell, day, state.data.today);
+  const editable = isEditableDay(day, state.data.today);
+  const isToday = day.date === state.data.today;
+  const label = `${row.key}, ${dayLabel(day.date)}: часов к списанию`;
+  const input = el('input', {
+    className: 'cell-input',
+    attrs: {
+      type: 'text',
+      inputmode: 'decimal',
+      autocomplete: 'off',
+      'aria-label': label,
+      placeholder: '·',
+      disabled: !editable,
+      title: editable ? null : 'День недоступен для списания',
+    },
+  });
+  input.value = inputText(cell);
+  input.dataset.key = row.key;
+  input.dataset.date = day.date;
+  input.dataset.original = input.value;
+  if (editable) {
+    bindInput(input);
+    state.inputs.set(`${row.key}|${day.date}`, input);
+  }
+
+  const box = el('div', { className: 'cell-box' });
+  if (editable) {
+    box.append(
+      button('−', {
+        className: 'step-btn',
+        attrs: { 'aria-label': `${label}: −0.5`, tabindex: '-1' },
+        onClick: () => stepAndSave(input, -1),
+      }),
+    );
+  }
+  box.append(input);
+  if (editable) {
+    box.append(
+      button('+', {
+        className: 'step-btn',
+        attrs: { 'aria-label': `${label}: +0.5`, tabindex: '-1' },
+        onClick: () => stepAndSave(input, 1),
+      }),
+    );
+  }
+  if (editable && cell?.edited != null) {
+    box.append(
+      button('↺', {
+        className: 'reset-btn',
+        title: `Вернуть предложение (${formatHours(cell.suggested ?? 0)} ч)`,
+        attrs: { 'aria-label': `${row.key}, ${dayLabel(day.date)}: вернуть предложение` },
+        onClick: () => save({ key: row.key, date: day.date, minutes: null }),
+      }),
+    );
+  }
+  if (cell?.submission && SUBMISSION_TITLES[cell.submission]) {
+    box.append(
+      el('span', {
+        className: 'flag',
+        text: cell.submission === 'pending' ? '…' : '!',
+        attrs: { title: SUBMISSION_TITLES[cell.submission], 'aria-label': SUBMISSION_TITLES[cell.submission], role: 'img' },
+      }),
+    );
+  }
+  const logged = cell?.logged ?? 0;
+  return el('td', { className: `day st-${stateName}${isToday ? ' today' : ''}` }, [
+    el('div', { className: 'cell' }, [
+      logged > 0 ? el('span', { className: 'logged-line', text: `✓ ${formatHours(logged)}`, attrs: { title: 'Уже списано в Tracker' } }) : null,
+      box,
+    ]),
+  ]);
+}
+
+function sumCell(totals) {
+  return el('td', { className: 'sum' }, [
+    el('span', { text: formatHours(totals.total) }),
+    totals.logged > 0 ? el('span', { className: 'sum-sub', text: `✓ ${formatHours(totals.logged)}` }) : null,
+  ]);
+}
+
+function unkeyedRow(days) {
+  const unkeyed = state.data.unkeyed;
+  if (!unkeyed) return null;
+  const items = (unkeyed.items ?? []).map((item) =>
+    el('li', {}, [
+      isSafeUrl(item.url)
+        ? el('a', { text: item.title || item.url, attrs: { href: item.url, target: '_blank', rel: 'noopener noreferrer' } })
+        : el('span', { text: item.title ?? '' }),
+    ]),
+  );
+  let total = 0;
+  const cells = days.map((day) => {
+    const minutes = unkeyed.cells?.[day.date]?.suggested ?? 0;
+    total += minutes;
+    return el('td', { className: `day${day.date === state.data.today ? ' today' : ''}` }, [
+      el('span', { className: 'unkeyed-value', text: minutes ? formatHours(minutes) : '' }),
+    ]);
+  });
+  return el('tr', { className: 'unkeyed', attrs: { title: 'Активность без ключа задачи — не списывается и не входит в итог' } }, [
+    el('th', { className: 'task', attrs: { scope: 'row' } }, [
+      el('details', {}, [
+        el('summary', { text: `Без задачи${items.length ? ` (${items.length})` : ''}` }),
+        items.length ? el('ul', {}, items) : el('div', { className: 'small', text: 'Нет деталей' }),
+      ]),
+    ]),
+    ...cells,
+    el('td', { className: 'sum' }, [el('span', { className: 'unkeyed-value', text: total ? formatHours(total) : '' })]),
+  ]);
+}
+
+function totalText(day, total) {
+  if (day.norm > 0) return `${formatHours(total.total)} / ${formatHours(day.norm)}`;
+  const label = KIND_LABELS[day.kind] ?? '';
+  return label ? `${formatHours(total.total)} · ${label}` : formatHours(total.total);
+}
+
+function renderFoot(days) {
+  const totals = new Map(dayTotals(state.data).map((total) => [total.date, total]));
+  let weekTotal = 0;
+  let weekNorm = 0;
+  const cells = days.map((day) => {
+    const total = totals.get(day.date);
+    weekTotal += total.total;
+    weekNorm += total.norm;
+    const over = total.over > 0;
+    return el(
+      'td',
+      {
+        className: `sum${over ? ' over' : ''}${day.date === state.data.today ? ' today' : ''}`,
+        attrs: { title: `Списано ${formatHours(total.logged)} ч + к списанию ${formatHours(total.planned)} ч` },
+      },
+      [
+        el('span', { className: 'total', text: totalText(day, total) }),
+        over ? el('span', { className: 'over-tag', text: `+${formatHours(total.over)}`, attrs: { 'aria-label': `перебор ${formatHours(total.over)} ч` } }) : null,
+        total.logged > 0 ? el('span', { className: 'sum-sub', text: `✓ ${formatHours(total.logged)}` }) : null,
+      ],
+    );
+  });
+  hiddenDays(state.data, { showWeekend: state.showWeekend }).forEach((day) => {
+    const total = totals.get(day.date);
+    weekTotal += total.total;
+    weekNorm += total.norm;
+  });
+  $('ts-foot').replaceChildren(
+    el('tr', {}, [
+      el('th', { className: 'task', text: 'Итого за день', attrs: { scope: 'row' } }),
+      ...cells,
+      el('td', { className: `sum${weekTotal > weekNorm ? ' over' : ''}` }, [
+        el('span', { className: 'total', text: `${formatHours(weekTotal)} / ${formatHours(weekNorm)}` }),
+      ]),
+    ]),
+  );
+}
+
+function captureFocus() {
+  const active = document.activeElement;
+  if (!active?.classList?.contains('cell-input')) return null;
+  return {
+    key: active.dataset.key,
+    date: active.dataset.date,
+    value: active.value,
+    dirty: active.value !== active.dataset.original,
+    invalid: active.classList.contains('invalid'),
+    selectionStart: active.selectionStart,
+    selectionEnd: active.selectionEnd,
+  };
+}
+
+function restoreFocus(snapshot) {
+  if (!snapshot) return;
+  const input = state.inputs.get(`${snapshot.key}|${snapshot.date}`);
+  if (!input) return;
+  if (snapshot.dirty) {
+    input.value = snapshot.value;
+    input.classList.toggle('invalid', snapshot.invalid);
+  }
+  input.focus({ preventScroll: true });
+  try {
+    input.setSelectionRange(snapshot.selectionStart, snapshot.selectionEnd);
+  } catch (error) {
+    input.select();
+  }
+}
+
+function renderTable() {
+  const data = state.data;
+  if (!data) return;
+  const snapshot = captureFocus();
+  state.rendering = true;
+  state.inputs = new Map();
+  const days = visibleDays(data, { showWeekend: state.showWeekend });
+  renderHead(days);
+  const rows = (data.rows ?? []).map((row) =>
+    el('tr', {}, [taskCell(row), ...days.map((day) => dataCell(row, day)), sumCell(rowTotals(row))]),
+  );
+  $('ts-body').replaceChildren(...rows, unkeyedRow(days) ?? '');
+  $('ts-empty').hidden = rows.length > 0 || Boolean(data.unkeyed);
+  renderFoot(days);
+  state.rendering = false;
+  restoreFocus(snapshot);
+}
+
+function render() {
+  renderBanners();
+  renderToolbar();
+  renderTable();
+}
+
+function save(payload) {
+  state.saving += 1;
+  setStatus('Сохраняю…');
+  state.saveChain = state.saveChain
+    .then(() => api('PUT', '/api/timesheet/cell', payload))
+    .then(
+      () => setStatus('Сохранено', 'ok'),
+      (error) => setStatus(`Не сохранилось (${payload.key}, ${shortDate(payload.date)}): ${error.message}`, 'err'),
+    )
+    .finally(() => {
+      state.saving -= 1;
+      if (state.saving === 0) load();
+    });
+  return state.saveChain;
+}
+
+function commitInput(input) {
+  const minutes = parseHours(input.value);
+  if (minutes === null) {
+    input.classList.add('invalid');
+    input.setAttribute('aria-invalid', 'true');
+    setStatus(`Не понял «${input.value}» — введите часы, например 1.5 (Esc — откат)`, 'err');
+    return;
+  }
+  input.classList.remove('invalid');
+  input.removeAttribute('aria-invalid');
+  const original = input.dataset.original;
+  const normalized = minutes === 0 && original === '' ? '' : formatHours(minutes);
+  input.value = normalized;
+  if (normalized === original) return;
+  input.dataset.original = normalized;
+  save({ key: input.dataset.key, date: input.dataset.date, minutes });
+}
+
+function columnNeighbour(input, direction) {
+  const keys = (state.data?.rows ?? []).map((row) => row.key);
+  let index = keys.indexOf(input.dataset.key) + direction;
+  while (index >= 0 && index < keys.length) {
+    const next = state.inputs.get(`${keys[index]}|${input.dataset.date}`);
+    if (next) return next;
+    index += direction;
+  }
+  return null;
+}
+
+function stepAndSave(input, direction) {
+  const base = parseHours(input.value) ?? parseHours(input.dataset.original) ?? 0;
+  input.value = formatHours(stepMinutes(base, direction));
+  commitInput(input);
+}
+
+function bindInput(input) {
+  input.addEventListener('focus', () => input.select());
+  input.addEventListener('blur', () => {
+    if (!state.rendering) commitInput(input);
+  });
+  input.addEventListener('keydown', (event) => {
+    if (event.key === 'Enter') {
+      event.preventDefault();
+      const next = columnNeighbour(input, event.shiftKey ? -1 : 1);
+      if (next) next.focus();
+      else commitInput(input);
+    } else if (event.key === 'Escape') {
+      event.preventDefault();
+      input.value = input.dataset.original;
+      input.classList.remove('invalid');
+      input.removeAttribute('aria-invalid');
+      setStatus('');
+      input.select();
+    } else if (event.key === 'ArrowUp' || event.key === 'ArrowDown') {
+      event.preventDefault();
+      const base = parseHours(input.value) ?? parseHours(input.dataset.original) ?? 0;
+      input.value = formatHours(stepMinutes(base, event.key === 'ArrowUp' ? 1 : -1));
+      input.classList.remove('invalid');
+    }
+  });
+}
+
+function openDayMenu(anchor, date) {
+  const menu = $('day-menu');
+  if (state.menuDate === date && (menu.matches(':popover-open') || performance.now() - state.menuClosedAt < 250)) {
+    if (menu.matches(':popover-open')) menu.hidePopover();
+    return;
+  }
+  state.menuDate = date;
+  state.menuAnchor = anchor;
+  const day = state.data.days.find((item) => item.date === date);
+  const submitItem = menu.querySelector('[data-action="submit-day"]');
+  const entries = buildSubmitEntries(state.data, { type: 'day', date });
+  applySubmitAvailability(submitItem, entries.length);
+  if (!isEditableDay(day, state.data.today)) {
+    submitItem.disabled = true;
+    submitItem.title = 'День недоступен для списания';
+  }
+  menu.setAttribute('aria-label', `Действия: ${dayLabel(date)}`);
+  menu.showPopover();
+  const rect = anchor.getBoundingClientRect();
+  const width = menu.offsetWidth;
+  menu.style.top = `${Math.min(rect.bottom + 4, window.innerHeight - menu.offsetHeight - 8)}px`;
+  menu.style.left = `${Math.max(8, Math.min(rect.right - width, window.innerWidth - width - 8))}px`;
+  anchor.setAttribute('aria-expanded', 'true');
+  menu.querySelector('button:not([hidden]):not(:disabled)')?.focus();
+}
+
+async function resetCells(date) {
+  const question = date
+    ? `Сбросить ручные правки за ${dayLabel(date)} и вернуть предложения?`
+    : 'Сбросить все ручные правки за неделю и вернуть предложения?';
+  if (!window.confirm(question)) return;
+  const params = new URLSearchParams({ week: state.data.week });
+  if (date) params.set('date', date);
+  setStatus('Сбрасываю…');
+  try {
+    await api('DELETE', `/api/timesheet/cells?${params}`);
+    setStatus('Правки сброшены', 'ok');
+  } catch (error) {
+    setStatus(`Не удалось сбросить: ${error.message}`, 'err');
+  }
+  await load();
+}
+
+async function addTask(event) {
+  event.preventDefault();
+  const input = $('add-key');
+  const errorBox = $('add-error');
+  const key = input.value.trim().toUpperCase();
+  input.value = key;
+  if (!isValidIssueKey(key)) {
+    input.classList.add('invalid');
+    input.setAttribute('aria-invalid', 'true');
+    errorBox.textContent = 'Ключ вида LMWORK-123';
+    input.focus();
+    return;
+  }
+  if (state.data?.rows?.some((row) => row.key === key)) {
+    errorBox.textContent = `${key} уже в таблице`;
+    return;
+  }
+  input.classList.remove('invalid');
+  input.removeAttribute('aria-invalid');
+  errorBox.textContent = '';
+  const submit = event.target.querySelector('button[type="submit"]');
+  submit.disabled = true;
+  try {
+    await api('POST', '/api/timesheet/tasks', { key, week: state.data.week });
+    input.value = '';
+    setStatus(`${key} добавлена`, 'ok');
+    await load();
+  } catch (error) {
+    errorBox.textContent = error.status === 422 ? error.message : `Не удалось добавить: ${error.message}`;
+  } finally {
+    submit.disabled = false;
+  }
+}
+
+function dialogTitle(scope) {
+  if (scope.type === 'day') return `Списать ${dayLabel(scope.date)}`;
+  return `Списать: ${weekLabel(state.data)}`;
+}
+
+function setDialog(title, bodyNodes, actions) {
+  $('dlg-title').textContent = title;
+  $('dlg-body').replaceChildren(...bodyNodes);
+  $('dlg-actions').replaceChildren(...actions);
+}
+
+function closeDialog() {
+  const dialog = $('submit-dialog');
+  if (state.dialog.sending) return;
+  dialog.close();
+}
+
+function dayWarning(group) {
+  if (group.over > 0) return el('span', { className: 'dlg-warn', text: `перебор +${formatHours(group.over)} ч` });
+  if (group.under > 0) return el('span', { className: 'dlg-warn under', text: `недобор ${formatHours(group.under)} ч` });
+  return null;
+}
+
+function confirmView(scope) {
+  const entries = buildSubmitEntries(state.data, scope);
+  const title = dialogTitle(scope);
+  if (entries.length === 0) {
+    setDialog(title, [el('p', { text: 'Нечего списывать: в доступных днях нет часов к списанию.' })], [
+      button('Закрыть', { onClick: closeDialog }),
+    ]);
+    return;
+  }
+  const groups = groupEntriesByDay(state.data, entries);
+  const body = [
+    el('p', { className: 'dlg-note', text: 'Часы будут добавлены к уже списанному в Tracker, а не заменят его.' }),
+    ...groups.flatMap((group) => {
+      const day = state.data.days.find((item) => item.date === group.date);
+      const totalLine = day.norm > 0
+        ? `Итог дня: ${formatHours(group.total)} из ${formatHours(group.norm)} ч`
+        : `Итог дня: ${formatHours(group.total)} ч · ${KIND_LABELS[day.kind] ?? 'норма 0'}`;
+      return [
+        el('h3', { text: `${dayLabel(group.date)} — ${formatHours(group.minutes)} ч` }),
+        el(
+          'ul',
+          {},
+          group.entries.map((entry) =>
+            el('li', { text: `${entry.key}${entry.title ? ` · ${entry.title}` : ''} — ${formatHours(entry.minutes)} ч` }),
+          ),
+        ),
+        el('div', { className: 'dlg-day-total' }, [el('span', { text: totalLine }), dayWarning(group)]),
+        group.logged > 0
+          ? el('p', { className: 'dlg-note', text: `Уже списано ${formatHours(group.logged)} ч — новые часы будут добавлены к ним` })
+          : null,
+      ].filter(Boolean);
+    }),
+  ];
+  const confirmButton = button(`Списать ${entries.length} ${plural(entries.length, ['запись', 'записи', 'записей'])}`, {
+    className: 'primary',
+    onClick: () => send(title, entries),
+  });
+  setDialog(title, body, [button('Отмена', { onClick: closeDialog }), confirmButton]);
+  return confirmButton;
+}
+
+async function send(title, entries) {
+  state.dialog.sending = true;
+  setDialog(title, [el('p', { text: `Отправляю ${entries.length} ${plural(entries.length, ['запись', 'записи', 'записей'])} в Tracker…` })], [
+    button('Отмена', { attrs: { disabled: true } }),
+    button('Отправка…', { className: 'primary', attrs: { disabled: true } }),
+  ]);
+  let results = null;
+  let failure = null;
+  try {
+    const body = await api('POST', '/api/timesheet/submit', { entries });
+    results = body?.results ?? [];
+  } catch (error) {
+    failure = error;
+  }
+  state.dialog.sending = false;
+  state.dialog.changed = true;
+  if (failure) {
+    setDialog(title, [el('p', { className: 'dlg-errors', text: `Не удалось отправить: ${failure.message}` })], [
+      button('Закрыть', { onClick: closeDialog }),
+      button('Повторить', { className: 'primary', onClick: () => send(title, entries) }),
+    ]);
+  } else {
+    resultView(title, results);
+  }
+  const actions = $('dlg-actions');
+  (actions.querySelector('button.primary') ?? actions.querySelector('button'))?.focus();
+  load();
+}
+
+function resultView(title, results) {
+  const summary = summarizeResults(results);
+  const errorsCount = summary.failed + summary.unknown;
+  const body = [
+    el('p', {
+      className: 'dlg-summary',
+      text: `Успешно ${summary.done}, пропущено ${summary.skipped}, ошибок ${errorsCount}`,
+    }),
+  ];
+  if (summary.errors.length) {
+    body.push(
+      el(
+        'ul',
+        { className: 'dlg-errors' },
+        summary.errors.map((result) =>
+          el('li', {
+            text: `${result.key} · ${dayLabel(result.date)} · ${formatHours(result.minutes)} ч — ${
+              result.status === 'unknown' ? 'статус неизвестен, проверьте в Tracker' : 'ошибка'
+            }${result.error ? `: ${result.error}` : ''}`,
+          }),
+        ),
+      ),
+    );
+  }
+  if (summary.unknown > 0) {
+    body.push(
+      el('p', {
+        className: 'dlg-note',
+        text: 'Записи со статусом «неизвестен» не повторяются автоматически, чтобы не списать дважды.',
+      }),
+    );
+  }
+  const retry = retryEntries(results);
+  const actions = [button('Закрыть', { onClick: closeDialog })];
+  if (retry.length) {
+    actions.push(button(`Повторить ошибочные (${retry.length})`, { className: 'primary', onClick: () => send(title, retry) }));
+  }
+  setDialog(title, body, actions);
+}
+
+function openSubmitDialog(scope) {
+  if (!state.data || !trackerState().submitEnabled) return;
+  const menu = $('day-menu');
+  if (menu.matches(':popover-open')) menu.hidePopover();
+  const dialog = $('submit-dialog');
+  state.dialog = { sending: false, changed: false };
+  const confirmButton = confirmView(scope);
+  dialog.showModal();
+  (confirmButton ?? $('dlg-actions').querySelector('button'))?.focus();
+}
+
+function init() {
+  $('prev-week').addEventListener('click', () => state.data?.prev_week && load(state.data.prev_week));
+  $('next-week').addEventListener('click', () => state.data?.next_week && load(state.data.next_week));
+  $('current-week').addEventListener('click', () => load(null));
+  $('weekend-toggle').addEventListener('click', () => {
+    state.showWeekend = !state.showWeekend;
+    render();
+  });
+  $('reset-week').addEventListener('click', () => state.data && resetCells(null));
+  $('submit-week').addEventListener('click', () => openSubmitDialog({ type: 'week' }));
+  $('add-task').addEventListener('submit', addTask);
+  $('add-key').addEventListener('input', () => {
+    $('add-key').classList.remove('invalid');
+    $('add-key').removeAttribute('aria-invalid');
+    $('add-error').textContent = '';
+  });
+
+  const menu = $('day-menu');
+  menu.addEventListener('toggle', (event) => {
+    if (event.newState === 'closed') {
+      state.menuClosedAt = performance.now();
+      state.menuAnchor?.setAttribute('aria-expanded', 'false');
+    }
+  });
+  menu.addEventListener('click', (event) => {
+    const action = event.target.closest('button')?.dataset.action;
+    const date = state.menuDate;
+    if (!action || !date) return;
+    if (menu.matches(':popover-open')) menu.hidePopover();
+    if (action === 'submit-day') openSubmitDialog({ type: 'day', date });
+    if (action === 'reset-day') resetCells(date);
+  });
+  window.addEventListener('resize', () => menu.matches(':popover-open') && menu.hidePopover());
+
+  const dialog = $('submit-dialog');
+  dialog.addEventListener('cancel', (event) => {
+    if (state.dialog.sending) event.preventDefault();
+  });
+  dialog.addEventListener('close', () => {
+    if (state.dialog.changed) load();
+  });
+
+  window.addEventListener('beforeunload', (event) => {
+    if (state.saving > 0 || state.dialog.sending) event.preventDefault();
+  });
+
+  load();
+}
+
+init();
