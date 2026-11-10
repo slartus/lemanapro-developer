@@ -418,6 +418,39 @@ def allocate(
     return result
 
 
+def suggest_day(
+    norm: int,
+    weights: Mapping[str | None, float],
+    in_progress: Iterable[str],
+    logged: Mapping[str, int],
+    fixed: Mapping[str, int],
+    step: int,
+) -> dict[str | None, int]:
+    result: dict[str | None, int] = {key: minutes for key, minutes in fixed.items()}
+    budget = max(0, norm - sum(logged.values()) - sum(fixed.values())) // step * step
+    if budget == 0:
+        return result
+    targets = allocate(norm, weights, in_progress, {}, step)
+    deficits = {
+        key: target - logged.get(key, 0)
+        for key, target in targets.items()
+        if key not in fixed and target > logged.get(key, 0)
+    }
+    total = sum(deficits.values())
+    if total == 0:
+        return result
+    units = {key: deficit * min(1.0, budget / total) / step for key, deficit in deficits.items()}
+    floors = {key: math.floor(value + 1e-9) for key, value in units.items()}
+    left = min(budget, total) // step - sum(floors.values())
+    order = sorted(units, key=lambda key: (-(units[key] - floors[key]), _sort_key(key)))
+    for key in order[:max(0, left)]:
+        floors[key] += 1
+    for key, count in floors.items():
+        if count:
+            result[key] = count * step
+    return result
+
+
 @dataclass(frozen=True)
 class WeekInputs:
     week_start: date
@@ -460,8 +493,9 @@ def build_week(inputs: WeekInputs, norm_for: Callable[[date, int], int] = day_no
         fixed = {key: minutes for (key, edit_day), minutes in inputs.edits.items() if edit_day == day}
         weights = {key: weight for (key, weight_day), weight in inputs.activity.weights.items() if weight_day == day}
         idle = [key for key in inputs.in_progress if not weights.get(key)]
-        remaining = max(0, norm - logged_total) if norm and day <= inputs.today else 0
-        suggestions[day] = allocate(remaining, weights, idle, fixed, inputs.step)
+        logged_by_key = {key: minutes for (key, logged_day), minutes in inputs.logged.items() if logged_day == day}
+        open_norm = norm if day <= inputs.today else 0
+        suggestions[day] = suggest_day(open_norm, weights, idle, logged_by_key, fixed, inputs.step)
         day_payload.append({
             "date": day.isoformat(),
             "kind": day_kind(day),

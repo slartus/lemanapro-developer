@@ -51,6 +51,8 @@
   .cell { display: flex; flex-direction: column; align-items: center; gap: 0.1rem; }
   .logged-line { font-size: 0.72rem; color: var(--ok-fg); font-weight: 600; white-space: nowrap; }
   .cell-box { position: relative; display: inline-flex; align-items: center; gap: 0.15rem; }
+  .cell-actions { display: inline-flex; align-items: center; gap: 0.15rem; min-width: 2.9em; }
+  .logged-line.none { visibility: hidden; }
   .cell-input { width: 3.6em; text-align: center; padding: 0.3rem 0.25rem; font-variant-numeric: tabular-nums; }
   .cell-input:disabled { opacity: 0.6; background: transparent; border-color: transparent; }
   .st-suggested .cell-input { color: var(--muted); font-style: italic; background: var(--surface-2); }

@@ -391,8 +391,9 @@ function dataCell(row, day) {
       }),
     );
   }
+  const actions = el('span', { className: 'cell-actions' });
   if (editable && cell?.edited != null) {
-    box.append(
+    actions.append(
       button('↺', {
         className: 'reset-btn',
         title: `Вернуть предложение (${formatHours(cell.suggested ?? 0)} ч)`,
@@ -403,7 +404,7 @@ function dataCell(row, day) {
   }
   const tracker = trackerState();
   if (editable && tracker.enabled && cellValue(cell) > 0 && !isUncertain(cell)) {
-    box.append(
+    actions.append(
       button('✓', {
         className: 'submit-cell-btn',
         title: tracker.submitEnabled ? `Списать ${formatHours(cellValue(cell))} ч` : SUBMIT_DISABLED_TITLE,
@@ -413,7 +414,7 @@ function dataCell(row, day) {
     );
   }
   if (cell?.submission && SUBMISSION_TITLES[cell.submission]) {
-    box.append(
+    actions.append(
       el('span', {
         className: 'flag',
         text: cell.submission === 'pending' ? '…' : '!',
@@ -421,11 +422,14 @@ function dataCell(row, day) {
       }),
     );
   }
+  box.append(actions);
   const logged = cell?.logged ?? 0;
   const uncertain = isUncertain(cell);
   return el('td', { className: `day st-${stateName}${isToday ? ' today' : ''}` }, [
     el('div', { className: 'cell' }, [
-      logged > 0 ? el('span', { className: 'logged-line', text: `✓ ${formatHours(logged)}`, attrs: { title: 'Уже списано в Tracker' } }) : null,
+      logged > 0
+        ? el('span', { className: 'logged-line', text: `✓ ${formatHours(logged)}`, attrs: { title: 'Уже списано в Tracker' } })
+        : el('span', { className: 'logged-line none', text: '✓ 0', attrs: { 'aria-hidden': 'true' } }),
       box,
       uncertain
         ? button('Обновить', {

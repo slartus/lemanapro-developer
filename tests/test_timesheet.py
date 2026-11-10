@@ -6,6 +6,7 @@ from zoneinfo import ZoneInfo
 import pytest
 
 from lpdev.timesheet import (
+    suggest_day,
     Activity,
     EventContext,
     WeekInputs,
@@ -383,8 +384,8 @@ def test_build_week_contract_shape_and_calendar():
     assert rows["OTHER-1"]["sources"] == []
     assert len(rows["SUPERAPP-1"]["cells"]) == 7
     monday = "2026-11-02"
-    assert rows["SUPERAPP-1"]["cells"][monday] == {"suggested": 180, "edited": None, "logged": 60, "submission": "unknown"}
-    assert rows["SUPERAPP-5"]["cells"][monday]["suggested"] == 0
+    assert rows["SUPERAPP-1"]["cells"][monday] == {"suggested": 150, "edited": None, "logged": 60, "submission": "unknown"}
+    assert rows["SUPERAPP-5"]["cells"][monday]["suggested"] == 30
     assert week["unkeyed"]["cells"][monday] == {"suggested": 180}
     assert week["unkeyed"]["items"] == [{"title": "task/chore", "url": None}]
     tuesday = "2026-11-03"
@@ -644,3 +645,36 @@ def test_status_intervals_mark_only_the_current_status_open():
     ]
     result = status_intervals(history, STATUSES, MSK, date(2026, 11, 10))
     assert [(item["status"], item["open"]) for item in result] == [("development", False), ("codereview", True)]
+
+
+def test_logged_task_does_not_get_a_second_share():
+    weights = {"A-1": 2, "A-2": 4, "A-3": 1, "A-4": 1}
+    before = suggest_day(480, weights, [], {}, {}, 30)
+    assert before == {"A-1": 120, "A-2": 240, "A-3": 60, "A-4": 60}
+    after = suggest_day(480, weights, [], {"A-1": 150}, {}, 30)
+    assert after.get("A-1", 0) == 0
+    assert sum(after.values()) == 330
+    assert all(after[key] <= before[key] for key in after)
+
+
+def test_partly_logged_task_gets_only_the_rest_of_its_share():
+    assert suggest_day(480, {"A-1": 1, "A-2": 1}, [], {"A-1": 60}, {}, 30) == {"A-1": 180, "A-2": 240}
+
+
+def test_time_logged_outside_the_activity_shrinks_every_share():
+    result = suggest_day(480, {"A-1": 1, "A-2": 1}, [], {"B-9": 240}, {}, 30)
+    assert result == {"A-1": 120, "A-2": 120}
+
+
+def test_full_day_logged_suggests_nothing_and_edits_stay_fixed():
+    assert suggest_day(480, {"A-1": 1}, [], {"A-1": 480}, {}, 30) == {}
+    assert suggest_day(480, {"A-1": 1, "A-2": 1}, [], {}, {"A-1": 60}, 30) == {"A-1": 60, "A-2": 240}
+    assert suggest_day(0, {"A-1": 1}, [], {}, {"A-1": 60}, 30) == {"A-1": 60}
+
+
+@pytest.mark.parametrize("logged", [{}, {"A-1": 90}, {"A-2": 45}, {"A-1": 30, "A-3": 200}, {"Z-1": 470}])
+def test_suggestions_fill_exactly_the_open_part_of_the_day(logged):
+    result = suggest_day(480, {"A-1": 3, "A-2": 2, None: 1}, ["A-3"], logged, {}, 30)
+    open_part = max(0, 480 - sum(logged.values())) // 30 * 30
+    assert sum(result.values()) == open_part
+    assert all(minutes % 30 == 0 for minutes in result.values())
