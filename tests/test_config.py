@@ -164,3 +164,37 @@ def test_push_debounce_default_and_validation():
     assert Config.model_validate(raw | {"review": {"push_debounce_sec": 0}}).review.push_debounce_sec == 0
     with pytest.raises(ValidationError):
         Config.model_validate(raw | {"review": {"push_debounce_sec": -1}})
+
+
+def test_timesheet_only_config_needs_no_projects(tmp_path):
+    path = tmp_path / "config.yaml"
+    path.write_text("gitlab:\n  url: https://gitlab.example.com\n", encoding="utf-8")
+    path.chmod(0o600)
+    assert load_config(path, timesheet_only=True).projects == []
+    with pytest.raises(ConfigError):
+        load_config(path)
+
+
+def test_timesheet_only_bootstrap_keeps_review_projects(tmp_path, monkeypatch):
+    from lpdev.db import connect, init_schema, sync_projects
+    from lpdev.main import bootstrap
+
+    db = tmp_path / "lpdev.db"
+    conn = connect(db)
+    init_schema(conn)
+    sync_projects(conn, [(10, "g/p", "agent-a", False, True)])
+    conn.close()
+    path = tmp_path / "config.yaml"
+    path.write_text(
+        "gitlab:\n  url: https://gitlab.example.com\n  pat_command: printf tok\n"
+        f"paths:\n  db: {db}\n  workspaces: {tmp_path / 'ws'}\n  logs: {tmp_path / 'logs'}\n",
+        encoding="utf-8",
+    )
+    path.chmod(0o600)
+    monkeypatch.setenv("LPDEV_CONFIG", str(path))
+    ctx, _ = bootstrap(timesheet_only=True)
+    try:
+        assert ctx.project_ids == {}
+        assert [row["enabled"] for row in ctx.conn.execute("SELECT enabled FROM project")] == [1]
+    finally:
+        ctx.conn.close()

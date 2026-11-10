@@ -17,6 +17,11 @@ TRACKER_WEB_URL = "https://tracker.yandex.ru"
 WEEK_RE = re.compile(r"(\d{4})-W(\d{2})")
 IN_PROGRESS_WEIGHT = 0.5
 IN_PROGRESS_MAX_SHARE = 0.25
+MAX_IN_PROGRESS_PER_DAY = 5
+QA_OWNED_WEIGHT = 3
+STATUS_CHANGE_WEIGHT = 2
+COMMENT_WEIGHT = 1
+PASS_THROUGH = timedelta(minutes=1)
 PUSH_WEIGHT = 3
 PUSH_MAX_WEIGHT = 6
 MR_WEIGHT = 2
@@ -466,6 +471,8 @@ class WeekInputs:
     titles: Mapping[str, str]
     tracker: Mapping[str, Any]
     calendar_ok: bool
+    owned_days: Mapping[str, frozenset[date] | None] = field(default_factory=dict)
+    owned_weight: float = 0
 
 
 def _row_order(inputs: WeekInputs, keys: set[str]) -> list[str]:
@@ -492,7 +499,11 @@ def build_week(inputs: WeekInputs, norm_for: Callable[[date, int], int] = day_no
         logged_total = sum(minutes for (_, logged_day), minutes in inputs.logged.items() if logged_day == day)
         fixed = {key: minutes for (key, edit_day), minutes in inputs.edits.items() if edit_day == day}
         weights = {key: weight for (key, weight_day), weight in inputs.activity.weights.items() if weight_day == day}
-        idle = [key for key in inputs.in_progress if not weights.get(key)]
+        mine = [key for key in inputs.in_progress if inputs.owned_days.get(key) is None or day in inputs.owned_days[key]]
+        if inputs.owned_weight:
+            for key in mine:
+                weights[key] = weights.get(key, 0) + inputs.owned_weight
+        idle = [key for key in mine if not weights.get(key)][:MAX_IN_PROGRESS_PER_DAY]
         logged_by_key = {key: minutes for (key, logged_day), minutes in inputs.logged.items() if logged_day == day}
         open_norm = norm if day <= inputs.today else 0
         suggestions[day] = suggest_day(open_norm, weights, idle, logged_by_key, fixed, inputs.step)
@@ -540,20 +551,53 @@ def build_week(inputs: WeekInputs, norm_for: Callable[[date, int], int] = day_no
     }
 
 
+def owned_history(
+    status_changes: Iterable[tuple[Any, ...]],
+    assignee_changes: Iterable[tuple[datetime, frozenset[str], frozenset[str]]] | None,
+    identities: Iterable[str],
+) -> list[tuple[datetime, str | None, str | None]]:
+    me = set(identities)
+    assignees = sorted(assignee_changes or [], key=lambda item: item[0])
+    mine = bool(assignees[0][1] & me) if assignees else True
+    events: list[tuple[datetime, int, Any]] = [(change[0], 0, change[2]) for change in status_changes]
+    events += [(moment, 1, bool(to_ids & me)) for moment, _, to_ids in assignees]
+    status: str | None = None
+    effective: str | None = None
+    result: list[tuple[datetime, str | None, str | None]] = []
+    for moment, kind, value in sorted(events, key=lambda item: (item[0], item[1])):
+        if kind == 0:
+            status = value
+        else:
+            mine = value
+        current = status if mine else None
+        if current != effective:
+            result.append((moment, effective, current))
+            effective = current
+    return result
+
+
+def interval_days(intervals: Iterable[Mapping[str, Any]], statuses: Iterable[str], days: Iterable[date]) -> frozenset[date]:
+    tracked = set(statuses)
+    spans = [(item["from"], item["to"]) for item in intervals if item["status"] in tracked]
+    return frozenset(day for day in days if any(start <= day.isoformat() <= end for start, end in spans))
+
+
 def status_intervals(
-    history: Iterable[tuple[datetime, str | None, str | None]],
+    history: Iterable[tuple[Any, ...]],
     statuses: Iterable[str],
     tz: ZoneInfo,
     today: date,
+    min_duration: timedelta = timedelta(0),
 ) -> list[dict[str, str]]:
     tracked = set(statuses)
     raw: list[tuple[str, date, date, datetime, bool]] = []
     current: str | None = None
     since: date | None = None
     entered: datetime | None = None
-    for moment, _, to_status in sorted(history, key=lambda item: item[0]):
+    for change in sorted(history, key=lambda item: item[0]):
+        moment, to_status = change[0], change[2]
         day = moment.astimezone(tz).date()
-        if current in tracked and since is not None and entered is not None:
+        if current in tracked and since is not None and entered is not None and moment - entered >= min_duration:
             raw.append((current, since, day, entered, False))
         current, since, entered = to_status, day, moment
     if current in tracked and since is not None and entered is not None:

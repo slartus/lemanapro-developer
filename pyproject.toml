@@ -16,6 +16,9 @@ dependencies = [
     "pydantic>=2",
 ]
 
+[project.scripts]
+lpdev = "lpdev.cli:main"
+
 [tool.setuptools.packages.find]
 where = ["src"]
 

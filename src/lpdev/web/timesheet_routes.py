@@ -27,6 +27,10 @@ from lpdev.db import (
 )
 from lpdev.gitlab_client import GitlabApiError
 from lpdev.timesheet import (
+    COMMENT_WEIGHT,
+    PASS_THROUGH,
+    QA_OWNED_WEIGHT,
+    STATUS_CHANGE_WEIGHT,
     WeekInputs,
     EventContext,
     PrLink,
@@ -34,8 +38,10 @@ from lpdev.timesheet import (
     build_week,
     event_day,
     event_keys,
+    interval_days,
     is_ignored_push,
     mr_ref,
+    owned_history,
     parse_mr_links,
     push_ref,
     parse_week,
@@ -72,7 +78,7 @@ RECONCILE_MIN_AGE = timedelta(minutes=2)
 MAX_RECONCILE_ON_READ = 20
 RECONCILE_ON_READ_TIMEOUT_SEC = 10.0
 PERMANENT_RECONCILE_STATUSES = frozenset({403, 404})
-MAX_IN_PROGRESS = 5
+MAX_WORK_CANDIDATES = 20
 WORKLOG_START = dt_time(9, 0)
 OPEN_SUBMISSION_STATUSES = ("pending", "unknown")
 MAX_GITLAB_LOOKUPS = 50
@@ -298,6 +304,8 @@ class TimesheetState:
     links: dict[date, tuple[float, dict[tuple[str, int], str]]] = field(default_factory=dict)
     histories: dict[str, tuple[float, list[tuple[datetime, str | None, str | None]] | None]] = field(default_factory=dict)
     issue_links: dict[str, tuple[str, list[tuple[str, int, bool]]]] = field(default_factory=dict)
+    assignees: dict[str, tuple[float, list[tuple[datetime, frozenset[str], frozenset[str]]] | None]] = field(default_factory=dict)
+    comment_moments: dict[str, tuple[str, list[datetime]]] = field(default_factory=dict)
 
     async def aclose(self) -> None:
         if self.tracker is not None:
@@ -318,6 +326,8 @@ class TimesheetState:
                 self.links.clear()
                 self.histories.clear()
                 self.issue_links.clear()
+                self.assignees.clear()
+                self.comment_moments.clear()
             return self.tracker
 
     async def pr_links(
@@ -369,35 +379,81 @@ class TimesheetState:
             self.links.pop(min(self.links, key=lambda item: self.links[item][0]))
         return links
 
-    async def status_history(self, tracker: TrackerClient, key: str) -> list[tuple[datetime, str | None, str | None]] | None:
-        cached = self.histories.get(key)
+    async def _history(self, cache: dict[str, tuple[float, Any]], key: str, fetch: Callable[[str], Awaitable[Any]], label: str) -> Any:
+        cached = cache.get(key)
         if cached is not None:
             ttl = HISTORY_TTL_SEC if cached[1] is not None else LOOKUP_FAILURE_TTL_SEC
             if time.monotonic() - cached[0] < ttl:
                 return cached[1]
         try:
-            history = await tracker.status_history(key)
+            history = await fetch(key)
         except TrackerApiError as exc:
-            logger.warning("timesheet: status history of %s skipped: %s", key, exc.message)
+            logger.warning("timesheet: %s history of %s skipped: %s", label, key, exc.message)
             history = None
-        if len(self.histories) > LOOKUP_CACHE_SIZE:
-            self.histories.clear()
-        self.histories[key] = (time.monotonic(), history)
+        if len(cache) > LOOKUP_CACHE_SIZE:
+            cache.clear()
+        cache[key] = (time.monotonic(), history)
         return history
 
+    async def status_history(self, tracker: TrackerClient, key: str) -> list[tuple[Any, ...]] | None:
+        return await self._history(self.histories, key, tracker.status_history, "status")
+
+    async def assignee_history(self, tracker: TrackerClient, key: str) -> list[tuple[datetime, frozenset[str], frozenset[str]]] | None:
+        return await self._history(self.assignees, key, tracker.assignee_history, "assignee")
+
+    async def owned_history(
+        self, tracker: TrackerClient, key: str, identities: set[str] | None
+    ) -> list[tuple[Any, ...]] | None:
+        if identities is None:
+            return await self.status_history(tracker, key)
+        statuses, assignees = await asyncio.gather(self.status_history(tracker, key), self.assignee_history(tracker, key))
+        if statuses is None:
+            return None
+        return owned_history(statuses, assignees, identities)
+
+    async def my_comment_moments(self, tracker: TrackerClient, issue: dict[str, Any], identities: set[str]) -> list[datetime]:
+        key = str(issue.get("key"))
+        updated = str(issue.get("updatedAt") or "")
+        cached = self.comment_moments.get(key)
+        if cached is not None and updated and cached[0] == updated:
+            return cached[1]
+        try:
+            comments = await tracker.issue_comments(key)
+        except TrackerApiError as exc:
+            logger.warning("timesheet: comments of %s skipped: %s", key, exc.message)
+            return []
+        moments = []
+        for comment in comments:
+            author = comment.get("createdBy") if isinstance(comment.get("createdBy"), dict) else {}
+            if not identities & {str(author.get(name)) for name in ("id", "login", "uid", "passportUid") if author.get(name)}:
+                continue
+            try:
+                moment = datetime.fromisoformat(str(comment.get("createdAt")))
+            except ValueError:
+                continue
+            if moment.tzinfo is not None:
+                moments.append(moment)
+        if updated:
+            if len(self.comment_moments) > LOOKUP_CACHE_SIZE:
+                self.comment_moments.clear()
+            self.comment_moments[key] = (updated, moments)
+        return moments
+
     async def row_activity(
-        self, tracker: TrackerClient | None, cfg: TrackerConfig, keys: list[str], days: list[date], today: date
+        self, tracker: TrackerClient | None, cfg: TrackerConfig, keys: list[str], days: list[date], today: date,
+        identities: set[str] | None = None, owned_keys: Iterable[str] = (),
     ) -> dict[str, list[dict[str, str]] | None]:
+        owned = set(owned_keys)
         if tracker is None or not cfg.activity_statuses:
             return {}
         semaphore = asyncio.Semaphore(MAX_HISTORY_PARALLEL)
 
         async def one(key: str) -> tuple[str, list[dict[str, str]] | None]:
             async with semaphore:
-                history = await self.status_history(tracker, key)
+                history = await self.owned_history(tracker, key, identities if key in owned else None)
             if history is None:
                 return key, None
-            intervals = status_intervals(history, cfg.activity_statuses, _tz(cfg), today)
+            intervals = status_intervals(history, cfg.activity_statuses, _tz(cfg), today, PASS_THROUGH)
             return key, [
                 {**interval, "letter": cfg.activity_statuses[interval["status"]]}
                 for interval in intervals
@@ -520,18 +576,6 @@ def _project_paths(conn) -> dict[int, str]:
     return {row["gitlab_project_id"]: row["path_with_namespace"].lower() for row in rows if row["path_with_namespace"]}
 
 
-def _in_progress(issues: list[dict[str, Any]], cfg: TrackerConfig) -> dict[str, str]:
-    result: dict[str, str] = {}
-    for issue in issues:
-        key = issue.get("key")
-        if not valid_issue_key(key) or (cfg.queues and queue_of(key) not in cfg.queues):
-            continue
-        result[key] = str(issue.get("summary") or "")
-        if len(result) >= MAX_IN_PROGRESS:
-            break
-    return result
-
-
 def _issue_status(issue: dict[str, Any]) -> dict[str, str] | None:
     status = issue.get("status")
     if not isinstance(status, dict) or not status.get("key"):
@@ -563,21 +607,74 @@ def _unseen_done(rows, worklogs: list[Worklog], now: datetime) -> list[tuple[str
 @dataclass
 class TrackerData:
     in_progress: dict[str, str] = field(default_factory=dict)
+    owned_days: dict[str, frozenset[date] | None] = field(default_factory=dict)
+    signals: dict[tuple[str, date], dict[str, float]] = field(default_factory=dict)
+    identities: set[str] | None = None
     worklogs: list[Worklog] = field(default_factory=list)
     titles: dict[str, str] = field(default_factory=dict)
     statuses: dict[str, dict[str, str]] = field(default_factory=dict)
     error: str | None = None
 
 
-async def _tracker_data(state: TimesheetState, tracker: TrackerClient, cfg: TrackerConfig, days: list[date], keys: set[str]) -> TrackerData:
+async def _my_work(
+    state: TimesheetState, tracker: TrackerClient, cfg: TrackerConfig, issues: list[dict[str, Any]],
+    days: list[date], today: date, identities: set[str], data: TrackerData,
+) -> None:
+    tz = _tz(cfg)
+    semaphore = asyncio.Semaphore(MAX_HISTORY_PARALLEL)
+    candidates = [
+        issue for issue in issues
+        if valid_issue_key(issue.get("key")) and not (cfg.queues and queue_of(issue["key"]) not in cfg.queues)
+    ]
+
+    async def one(issue: dict[str, Any]) -> tuple[frozenset[date] | None, bool, list[tuple[Any, ...]], list[datetime]]:
+        key = issue["key"]
+        async with semaphore:
+            raw = await state.status_history(tracker, key) if cfg.in_progress_statuses else None
+            history = await state.owned_history(tracker, key, identities) if raw else None
+        if not history:
+            status = _issue_status(issue)
+            assignee = issue.get("assignee") if isinstance(issue.get("assignee"), dict) else {}
+            assigned = bool(identities & {str(assignee.get(name)) for name in ("id", "login", "uid", "passportUid") if assignee.get(name)})
+            current = assigned and (not cfg.in_progress_statuses or (status is not None and status["key"] in cfg.in_progress_statuses))
+            return None, current, [], []
+        intervals = status_intervals(history, cfg.in_progress_statuses, tz, today, PASS_THROUGH)
+        owned = interval_days(intervals, cfg.in_progress_statuses, days)
+        comments: list[datetime] = []
+        if owned and cfg.role == "qa":
+            async with semaphore:
+                comments = await state.my_comment_moments(tracker, issue, identities)
+        return owned, bool(owned), raw or [], comments
+
+    for issue, (owned, kept, raw, comments) in zip(candidates, await asyncio.gather(*(one(issue) for issue in candidates))):
+        if not kept:
+            continue
+        key = issue["key"]
+        data.in_progress[key] = str(issue.get("summary") or "")
+        data.owned_days[key] = owned
+        if cfg.role != "qa":
+            continue
+        moments = [(change[0], "status", STATUS_CHANGE_WEIGHT) for change in raw if len(change) > 3 and change[3] & identities]
+        moments += [(moment, "comment", COMMENT_WEIGHT) for moment in comments]
+        for moment, source, weight in moments:
+            day = moment.astimezone(tz).date()
+            if day in days and (owned is None or day in owned):
+                bucket = data.signals.setdefault((key, day), {})
+                bucket[source] = bucket.get(source, 0) + weight
+
+
+async def _tracker_data(
+    state: TimesheetState, tracker: TrackerClient, cfg: TrackerConfig, days: list[date], keys: set[str], today: date
+) -> TrackerData:
     data = TrackerData()
     try:
         me = await state.myself(tracker)
+        data.identities = user_identities(me)
         issues, data.worklogs = await asyncio.gather(
-            tracker.search_my_issues(cfg.in_progress_statuses, cfg.queues, MAX_IN_PROGRESS),
+            tracker.search_my_issues(cfg.in_progress_statuses, cfg.queues, MAX_WORK_CANDIDATES, since=days[0]),
             tracker.search_worklogs(worklog_author(me), days[0], days[-1]),
         )
-        data.in_progress = _in_progress(issues, cfg)
+        await _my_work(state, tracker, cfg, issues, days, today, data.identities, data)
         data.statuses = {key: status for issue in issues if (key := issue.get("key")) and (status := _issue_status(issue))}
         wanted = (keys | {worklog.key for worklog in data.worklogs}) - set(data.in_progress)
         issues = await tracker.get_issues(sorted(wanted)) if wanted else {}
@@ -591,7 +688,8 @@ async def _tracker_data(state: TimesheetState, tracker: TrackerClient, cfg: Trac
 
 @router.get("/timesheet", response_class=HTMLResponse)
 async def timesheet_page(request: Request):
-    return templates.TemplateResponse(request, "timesheet.html", {"active": "timesheet"})
+    timesheet_only = bool(getattr(request.app.state, "timesheet_only", False))
+    return templates.TemplateResponse(request, "timesheet.html", {"active": "timesheet", "timesheet_only": timesheet_only})
 
 
 @router.get("/api/timesheet")
@@ -640,7 +738,10 @@ async def api_timesheet(request: Request):
     data = TrackerData()
     if tracker is not None:
         keys = {key for key, _ in activity.weights if key is not None} | set(manual) | {key for key, _ in edits}
-        data = await _tracker_data(state, tracker, cfg, days, keys)
+        data = await _tracker_data(state, tracker, cfg, days, keys, today)
+        for (key, day), by_source in data.signals.items():
+            activity.weights[(key, day)] = activity.weights.get((key, day), 0) + sum(by_source.values())
+            activity.sources.setdefault(key, set()).update(by_source)
     logged: dict[tuple[str, date], int] = {}
     extra = _unseen_done(journal, data.worklogs, datetime.now(UTC)) if tracker is not None and data.error is None else []
     for key, day, minutes in [(w.key, w.day, w.minutes) for w in data.worklogs] + extra:
@@ -655,9 +756,11 @@ async def api_timesheet(request: Request):
             "error": data.error,
         },
         calendar_ok=all(has_year(day.year) for day in days),
+        owned_days=data.owned_days,
+        owned_weight=QA_OWNED_WEIGHT if cfg.role == "qa" else 0,
     )
     payload = build_week(inputs)
-    activity_by_key = await state.row_activity(tracker, cfg, [row["key"] for row in payload["rows"]], days, today)
+    activity_by_key = await state.row_activity(tracker, cfg, [row["key"] for row in payload["rows"]], days, today, data.identities, data.in_progress)
     for row in payload["rows"]:
         row["activity"] = activity_by_key.get(row["key"])
         row["status"] = data.statuses.get(row["key"])

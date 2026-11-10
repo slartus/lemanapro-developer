@@ -28,6 +28,7 @@ const SOURCE_LABELS = {
   mr: 'MR',
   review: 'ревью',
   comment: 'комментарий',
+  status: 'статус',
   in_progress: 'в работе',
   manual: 'вручную',
 };
@@ -36,7 +37,8 @@ const SOURCE_TITLES = {
   mr: 'Работа с MR задачи',
   review: 'Ревью MR задачи',
   comment: 'Комментарии в задаче',
-  in_progress: 'Задача в статусе «в работе»',
+  status: 'Вы меняли статус задачи',
+  in_progress: 'Задача была у вас в работе на этой неделе',
   manual: 'Добавлена вручную',
 };
 const KIND_LABELS = { holiday: 'праздник', weekend: 'выходной' };
@@ -830,7 +832,7 @@ function dayWarning(group) {
 function statusWarning(row, date) {
   if (workedOn(row.activity, date) !== false) return null;
   const now = row.status?.display ? ` Сейчас: «${row.status.display}».` : '';
-  return el('p', { className: 'dlg-status-warn', text: `В этот день задача не была в разработке или ревью.${now} Проверьте, что списываете на нужную задачу.` });
+  return el('p', { className: 'dlg-status-warn', text: `В этот день задача не была у вас в работе.${now} Проверьте, что списываете на нужную задачу.` });
 }
 
 function cellConfirmView(scope) {

@@ -104,14 +104,26 @@ def worklog_author(user: dict[str, Any]) -> str:
     raise TrackerApiError("Tracker не вернул uid текущего пользователя")
 
 
-def my_issues_query(statuses: list[str], queues: list[str]) -> str:
+def _user_ids(value: object) -> frozenset[str]:
+    if not isinstance(value, dict):
+        return frozenset()
+    return frozenset(str(value[name]) for name in ("id", "login", "uid", "passportUid") if value.get(name) not in (None, ""))
+
+
+def my_issues_query(statuses: list[str], queues: list[str], since: date | None = None) -> str:
     for value in (*statuses, *queues):
         if not STATUS_KEY_RE.fullmatch(value):
             raise ValueError(f"invalid Tracker key: {value!r}")
-    parts = ["Assignee: me()"]
+    historic = since is not None and bool(statuses)
+    moment = f'date: >= "{since.isoformat()}"' if since is not None else ""
+    parts = [f"(Assignee: me() OR Assignee: changed(from: me() {moment}))" if historic else "Assignee: me()"]
     if queues:
         parts.append("Queue: " + ", ".join(queues))
-    parts.append("Status: " + ", ".join(statuses) if statuses else '"Status Type": inProgress')
+    if historic:
+        left = " OR ".join(f'Status: changed(from: "{status}" {moment})' for status in statuses)
+        parts.append(f"(Status: {', '.join(statuses)} OR {left})")
+    else:
+        parts.append("Status: " + ", ".join(statuses) if statuses else '"Status Type": inProgress')
     parts.append('"Sort by": Updated DESC')
     return " ".join(parts)
 
@@ -271,8 +283,10 @@ class TrackerClient:
             raise TrackerApiError("Tracker: неожиданный ответ")
         return payload
 
-    async def search_my_issues(self, statuses: list[str], queues: list[str], limit: int) -> list[dict[str, Any]]:
-        return await self._read_pages("/issues/_search", {"query": my_issues_query(statuses, queues)}, limit=limit)
+    async def search_my_issues(
+        self, statuses: list[str], queues: list[str], limit: int, since: date | None = None
+    ) -> list[dict[str, Any]]:
+        return await self._read_pages("/issues/_search", {"query": my_issues_query(statuses, queues, since)}, limit=limit)
 
     async def _read_linked(
         self, path: str, params: dict[str, Any] | None = None, max_pages: int = _MAX_PAGES
@@ -296,19 +310,31 @@ class TrackerClient:
         logger.warning("tracker pagination capped at %s pages for %s", max_pages, path)
         return items
 
-    async def status_history(self, key: str) -> list[tuple[datetime, str | None, str | None]]:
-        entries = await self._read_linked(self._issue_path(key, "/changelog"), {"field": "status"}, _HISTORY_MAX_PAGES)
-        history = []
+    async def _field_changes(self, key: str, field_id: str) -> list[tuple[datetime, dict[str, Any], dict[str, Any]]]:
+        entries = await self._read_linked(self._issue_path(key, "/changelog"), {"field": field_id}, _HISTORY_MAX_PAGES)
+        found = []
         for entry in entries:
             moment = _parse_moment(entry.get("updatedAt"))
             fields = entry.get("fields") if isinstance(entry.get("fields"), list) else []
             for change in fields:
                 if not isinstance(change, dict) or not isinstance(change.get("field"), dict):
                     continue
-                if change["field"].get("id") != "status" or moment is None:
+                if change["field"].get("id") != field_id or moment is None:
                     continue
-                history.append((moment, _status_key(change.get("from")), _status_key(change.get("to"))))
-        return sorted(history, key=lambda item: item[0])
+                found.append((moment, entry, change))
+        return sorted(found, key=lambda item: item[0])
+
+    async def status_history(self, key: str) -> list[tuple[datetime, str | None, str | None, frozenset[str]]]:
+        return [
+            (moment, _status_key(change.get("from")), _status_key(change.get("to")), _user_ids(entry.get("updatedBy")))
+            for moment, entry, change in await self._field_changes(key, "status")
+        ]
+
+    async def assignee_history(self, key: str) -> list[tuple[datetime, frozenset[str], frozenset[str]]]:
+        return [
+            (moment, _user_ids(change.get("from")), _user_ids(change.get("to")))
+            for moment, _, change in await self._field_changes(key, "assignee")
+        ]
 
     async def search_issues(self, query: str, limit: int) -> list[dict[str, Any]]:
         return await self._read_pages("/issues/_search", {"query": query}, limit=limit)

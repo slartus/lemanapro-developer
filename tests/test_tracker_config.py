@@ -143,7 +143,7 @@ def test_pr_link_bots_default_and_validation():
 
 
 def test_in_progress_statuses_default_and_validation():
-    assert TrackerConfig().in_progress_statuses == ["development", "codereview"]
+    assert TrackerConfig().in_progress_statuses == ["development", "codereview", "rework"]
     assert TrackerConfig(in_progress_statuses=[]).in_progress_statuses == []
     for bad in (["dev ops"], ['x" OR "y'], ["1dev"], [""]):
         with pytest.raises(ValidationError):
@@ -151,9 +151,20 @@ def test_in_progress_statuses_default_and_validation():
 
 
 def test_activity_statuses_default_and_validation():
-    assert TrackerConfig().activity_statuses == {"development": "d", "codereview": "r"}
+    assert TrackerConfig().activity_statuses == {"development": "d", "codereview": "r", "rework": "w"}
     assert TrackerConfig(activity_statuses={}).activity_statuses == {}
     assert TrackerConfig(activity_statuses={"rc": "RC"}).activity_statuses == {"rc": "RC"}
     for bad in ({"dev ops": "d"}, {"development": ""}, {"development": "abc"}, {"development": "д"}, {"development": "1"}):
         with pytest.raises(ValidationError):
             TrackerConfig(activity_statuses=bad)
+
+
+def test_qa_role_changes_only_the_default_statuses():
+    qa = TrackerConfig(role="qa")
+    assert qa.in_progress_statuses == ["testing"]
+    assert qa.activity_statuses == {"testing": "t"}
+    custom = TrackerConfig(role="qa", in_progress_statuses=["inTest"], activity_statuses={"inTest": "t"})
+    assert custom.in_progress_statuses == ["inTest"]
+    assert custom.activity_statuses == {"inTest": "t"}
+    with pytest.raises(ValidationError):
+        TrackerConfig(role="analyst")

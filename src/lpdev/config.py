@@ -13,7 +13,7 @@ from urllib.parse import urlsplit
 import yaml
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from pydantic import BaseModel, Field, ValidationError, field_validator, model_validator
+from pydantic import BaseModel, Field, ValidationError, ValidationInfo, field_validator, model_validator
 
 DEFAULT_PAT_COMMAND = "security find-generic-password -s mr-watch -a gitlab -w"
 
@@ -159,8 +159,16 @@ class TrackerConfig(BaseModel):
     timezone: str = "Europe/Moscow"
     ignored_push_branches: list[str] = ["develop", "main", "master", "release/*", "rc/*"]
     pr_link_bots: list[str] = ["ya360-pr-check"]
-    in_progress_statuses: list[str] = ["development", "codereview"]
-    activity_statuses: dict[str, str] = {"development": "d", "codereview": "r"}
+    role: Literal["developer", "qa"] = "developer"
+    in_progress_statuses: list[str] = ["development", "codereview", "rework"]
+    activity_statuses: dict[str, str] = {"development": "d", "codereview": "r", "rework": "w"}
+
+    @model_validator(mode="before")
+    @classmethod
+    def role_defaults(cls, value: object) -> object:
+        if isinstance(value, dict) and value.get("role") == "qa":
+            return {"in_progress_statuses": ["testing"], "activity_statuses": {"testing": "t"}, **value}
+        return value
 
     @field_validator("url")
     @classmethod
@@ -246,7 +254,7 @@ class Config(BaseModel):
     model_config = {"extra": "forbid"}
 
     gitlab: GitlabConfig
-    projects: list[ProjectConfig]
+    projects: list[ProjectConfig] = Field(default=[], validate_default=True)
     review: ReviewConfig = ReviewConfig()
     opencode: OpenCodeConfig = OpenCodeConfig()
     radar: RadarConfig = RadarConfig()
@@ -255,8 +263,8 @@ class Config(BaseModel):
 
     @field_validator("projects")
     @classmethod
-    def at_least_one_project(cls, value: list[ProjectConfig]) -> list[ProjectConfig]:
-        if not value:
+    def at_least_one_project(cls, value: list[ProjectConfig], info: ValidationInfo) -> list[ProjectConfig]:
+        if not value and not (info.context or {}).get("timesheet_only"):
             raise ValueError("projects must contain at least one entry")
         return value
 
@@ -291,7 +299,7 @@ def check_config_permissions(path: Path) -> None:
         )
 
 
-def load_config(path: Path) -> Config:
+def load_config(path: Path, timesheet_only: bool = False) -> Config:
     if not path.is_file():
         raise ConfigError(f"config file not found: {path}")
     check_config_permissions(path)
@@ -302,7 +310,7 @@ def load_config(path: Path) -> Config:
     if not isinstance(raw, dict):
         raise ConfigError(f"config root must be a mapping, got: {type(raw).__name__}")
     try:
-        config = Config.model_validate(raw)
+        config = Config.model_validate(raw, context={"timesheet_only": timesheet_only})
     except ValidationError as exc:
         raise ConfigError(f"invalid config {path}: {exc}") from exc
     return config

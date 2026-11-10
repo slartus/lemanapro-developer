@@ -654,7 +654,7 @@ async def test_status_history_reads_the_real_changelog_shape_with_link_pages(mon
         history = await client.status_history("SUPERAPP-10397")
     finally:
         await client.aclose()
-    assert [(moment.isoformat(), src, dst) for moment, src, dst in history] == [
+    assert [(moment.isoformat(), src, dst) for moment, src, dst, _ in history] == [
         ("2026-11-09T06:48:21.060000+00:00", None, "backlog"),
         ("2026-11-09T06:48:48.525000+00:00", "backlog", "todo"),
         ("2026-11-09T06:48:51.745000+00:00", "todo", "development"),
@@ -676,3 +676,40 @@ async def test_status_history_is_capped_at_ten_pages(monkeypatch):
         assert len(await client.status_history("SUPERAPP-1")) == 10
     finally:
         await client.aclose()
+
+
+def test_my_issues_query_with_history():
+    assert my_issues_query(["development", "rework"], ["SUPERAPP"], date(2026, 11, 2)) == (
+        '(Assignee: me() OR Assignee: changed(from: me() date: >= "2026-11-02")) Queue: SUPERAPP '
+        '(Status: development, rework OR Status: changed(from: "development" date: >= "2026-11-02") '
+        'OR Status: changed(from: "rework" date: >= "2026-11-02")) "Sort by": Updated DESC'
+    )
+    assert my_issues_query([], [], date(2026, 11, 2)) == 'Assignee: me() "Status Type": inProgress "Sort by": Updated DESC'
+
+
+async def test_status_and_assignee_history_carry_users():
+    def user(ident):
+        return None if ident is None else {"id": ident, "display": "x", "cloudUid": "c", "passportUid": 1130000000000000 + int(ident)}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.params["field"] == "status":
+            entry = _status_change("2026-11-09T06:48:21.060+0000", "todo", "testing")
+            return httpx.Response(200, json=[{**entry, "updatedBy": user("7")}])
+        return httpx.Response(200, json=[
+            {"updatedAt": "2026-11-09T09:48:08.935+0000", "updatedBy": user("7"),
+             "fields": [{"field": {"id": "assignee"}, "from": user("3"), "to": user("7")}]},
+            {"updatedAt": "2026-11-08T09:00:00.000+0000", "updatedBy": user("3"),
+             "fields": [{"field": {"id": "assignee"}, "from": None, "to": user("3")}]},
+        ])
+
+    client = _client(handler)
+    try:
+        statuses = await client.status_history("SUPERAPP-1")
+        assignees = await client.assignee_history("SUPERAPP-1")
+    finally:
+        await client.aclose()
+    assert statuses[0][1:] == ("todo", "testing", frozenset({"7", "1130000000000007"}))
+    assert [(src, dst) for _, src, dst in assignees] == [
+        (frozenset(), frozenset({"3", "1130000000000003"})),
+        (frozenset({"3", "1130000000000003"}), frozenset({"7", "1130000000000007"})),
+    ]

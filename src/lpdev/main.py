@@ -12,7 +12,7 @@ from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import JSONResponse, PlainTextResponse
+from fastapi.responses import JSONResponse, PlainTextResponse, RedirectResponse
 
 from lpdev.config import Config, ResolvedPaths, default_config_path, get_pat, load_config, resolve_paths
 from lpdev.db import backup, connect, init_schema, poll_state_get, requeue_incomplete, sync_projects
@@ -23,6 +23,7 @@ from lpdev.radar_scheduler import RUNNER_PATH, RadarScheduler
 from lpdev.web.gitlab_proxy import PROXY_PREFIX
 from lpdev.web.gitlab_proxy import router as gitlab_proxy_router
 from lpdev.web.radar_routes import router as radar_router
+from lpdev.web.routes import favicon
 from lpdev.web.routes import router as web_router
 from lpdev.web.timesheet_routes import TimesheetState
 from lpdev.web.timesheet_routes import router as timesheet_router
@@ -189,7 +190,21 @@ def _supervise(task: asyncio.Task) -> asyncio.Task:
     return task
 
 
-def create_app(ctx: AppContext, port: int = DEFAULT_PORT) -> FastAPI:
+def create_app(ctx: AppContext, port: int = DEFAULT_PORT, timesheet_only: bool = False) -> FastAPI:
+    @asynccontextmanager
+    async def timesheet_lifespan(app: FastAPI):
+        tasks = [_supervise(asyncio.create_task(_backup_loop(ctx), name="lpdev-backup"))]
+        app.state.tasks = tasks
+        logger.info("started: timesheet only")
+        yield
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        await app.state.timesheet.aclose()
+        await ctx.api.aclose()
+        ctx.conn.close()
+        logger.info("stopped")
+
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         requeue_incomplete(ctx.conn)
@@ -246,21 +261,27 @@ def create_app(ctx: AppContext, port: int = DEFAULT_PORT) -> FastAPI:
         ctx.conn.close()
         logger.info("stopped")
 
-    app = FastAPI(title="lemanapro-developer", lifespan=lifespan)
+    app = FastAPI(title="lemanapro-developer", lifespan=timesheet_lifespan if timesheet_only else lifespan)
     app.state.ctx = ctx
     app.state.proxy_secret = secrets.token_urlsafe(32)
     app.state.timesheet = TimesheetState()
-    app.include_router(web_router)
-    app.include_router(gitlab_proxy_router)
-    app.include_router(radar_router)
+    app.state.timesheet_only = timesheet_only
+    if timesheet_only:
+        app.add_api_route("/favicon.svg", favicon, include_in_schema=False)
+        app.add_api_route("/favicon.ico", favicon, include_in_schema=False)
+        app.add_api_route("/", lambda: RedirectResponse("/timesheet"), include_in_schema=False)
+    else:
+        app.include_router(web_router)
+        app.include_router(gitlab_proxy_router)
+        app.include_router(radar_router)
+        app.mount("/static/radar", StaticFiles(directory=RUNNER_PATH.parent), name="radar-static")
     app.include_router(timesheet_router)
-    app.mount("/static/radar", StaticFiles(directory=RUNNER_PATH.parent), name="radar-static")
     app.mount("/static", StaticFiles(directory=Path(__file__).parent / "web" / "static"), name="static")
 
     @app.get("/healthz")
     async def healthz() -> JSONResponse:
-        last_ok = poll_state_get(ctx.conn, "poll_last_ok")
-        last_error = poll_state_get(ctx.conn, "poll_last_error")
+        last_ok = None if timesheet_only else poll_state_get(ctx.conn, "poll_last_ok")
+        last_error = None if timesheet_only else poll_state_get(ctx.conn, "poll_last_error")
         dead_tasks = [
             task.get_name() for task in getattr(app.state, "tasks", []) if task.done()
         ]
@@ -283,15 +304,15 @@ def create_app(ctx: AppContext, port: int = DEFAULT_PORT) -> FastAPI:
     return app
 
 
-def bootstrap() -> tuple[AppContext, int]:
-    config = load_config(default_config_path())
+def bootstrap(timesheet_only: bool = False) -> tuple[AppContext, int]:
+    config = load_config(default_config_path(), timesheet_only=timesheet_only)
     paths = resolve_paths(config)
     setup_logging(paths.logs)
     conn = connect(paths.db)
     init_schema(conn)
     pat = get_pat(config.gitlab)
     api = GitLabClient(config.gitlab.url, pat)
-    project_ids = sync_projects(conn, [
+    project_ids = {} if timesheet_only else sync_projects(conn, [
         (p.gitlab_project_id, p.slug, p.agent, p.re_review_on_push, True)
         for p in config.projects
     ])

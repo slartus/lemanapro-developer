@@ -1,11 +1,14 @@
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
 import pytest
 
 from lpdev.timesheet import (
+    PASS_THROUGH,
+    interval_days,
+    owned_history,
     suggest_day,
     Activity,
     EventContext,
@@ -678,3 +681,73 @@ def test_suggestions_fill_exactly_the_open_part_of_the_day(logged):
     open_part = max(0, 480 - sum(logged.values())) // 30 * 30
     assert sum(result.values()) == open_part
     assert all(minutes % 30 == 0 for minutes in result.values())
+
+
+def _at(value):
+    return datetime.fromisoformat(value)
+
+
+def test_owned_history_follows_status_only_while_assigned_to_me():
+    me, qa = frozenset({"5"}), frozenset({"77"})
+    statuses = [
+        (_at("2026-11-02T10:00:00+03:00"), "todo", "development"),
+        (_at("2026-11-04T10:00:00+03:00"), "development", "testing"),
+        (_at("2026-11-06T10:00:00+03:00"), "testing", "rework"),
+    ]
+    assignees = [
+        (_at("2026-11-04T10:00:05+03:00"), me, qa),
+        (_at("2026-11-06T10:00:05+03:00"), qa, me),
+    ]
+    mine = owned_history(statuses, assignees, {"5"})
+    assert [(moment.isoformat(), dst) for moment, _, dst in mine] == [
+        ("2026-11-02T10:00:00+03:00", "development"),
+        ("2026-11-04T10:00:00+03:00", "testing"),
+        ("2026-11-04T10:00:05+03:00", None),
+        ("2026-11-06T10:00:05+03:00", "rework"),
+    ]
+    theirs = owned_history(statuses, assignees, {"77"})
+    assert [dst for _, _, dst in theirs] == ["testing", "rework", None]
+    assert [dst for _, _, dst in owned_history(statuses, None, {"5"})] == ["development", "testing", "rework"]
+    assert [dst for _, _, dst in owned_history(statuses, [], {"5"})] == ["development", "testing", "rework"]
+
+
+def test_pass_through_statuses_are_not_intervals_and_owned_days_follow_intervals():
+    me, qa = frozenset({"5"}), frozenset({"77"})
+    statuses = [
+        (_at("2026-11-02T10:00:00+03:00"), "todo", "development"),
+        (_at("2026-11-04T10:00:00+03:00"), "development", "testing"),
+        (_at("2026-11-06T10:00:00+03:00"), "testing", "rework"),
+    ]
+    assignees = [(_at("2026-11-04T10:00:05+03:00"), me, qa), (_at("2026-11-06T10:00:05+03:00"), qa, me)]
+    days = [date(2026, 11, 2) + timedelta(days=offset) for offset in range(7)]
+    today = date(2026, 11, 10)
+    qa_intervals = status_intervals(owned_history(statuses, assignees, {"77"}), ["testing", "rework"], MSK, today, PASS_THROUGH)
+    assert [(item["status"], item["from"], item["to"]) for item in qa_intervals] == [("testing", "2026-11-04", "2026-11-06")]
+    assert interval_days(qa_intervals, ["testing"], days) == {date(2026, 11, 4), date(2026, 11, 5), date(2026, 11, 6)}
+    dev_intervals = status_intervals(owned_history(statuses, assignees, {"5"}), ["development", "rework"], MSK, today, PASS_THROUGH)
+    assert interval_days(dev_intervals, ["development"], days) == {date(2026, 11, 2), date(2026, 11, 3), date(2026, 11, 4)}
+    assert date(2026, 11, 5) not in interval_days(dev_intervals, ["development", "rework"], days)
+    assert date(2026, 11, 6) in interval_days(dev_intervals, ["development", "rework"], days)
+
+
+def test_build_week_suggests_in_progress_only_on_owned_days():
+    week = build_week(_inputs(
+        in_progress={"SUPERAPP-5": "Mine early", "SUPERAPP-6": "Unknown history"},
+        owned_days={"SUPERAPP-5": frozenset({date(2026, 11, 2)}), "SUPERAPP-6": None},
+    ))
+    cells = {row["key"]: {day: cell["suggested"] for day, cell in row["cells"].items() if cell["suggested"]} for row in week["rows"]}
+    assert cells["SUPERAPP-5"] == {"2026-11-02": 240}
+    assert cells["SUPERAPP-6"]["2026-11-02"] == 240 and cells["SUPERAPP-6"]["2026-11-03"] == 420
+
+
+def test_build_week_owned_weight_makes_owned_days_the_main_signal():
+    activity = bucket_events([_push("feature/SUPERAPP-1", at="2026-11-02T08:00:00Z")], MSK, _context())
+    inputs = dict(activity=activity, in_progress={"SUPERAPP-5": "Testing"}, owned_days={"SUPERAPP-5": frozenset({date(2026, 11, 2)})})
+    idle = build_week(_inputs(**inputs))
+    weighed = build_week(_inputs(**inputs, owned_weight=3))
+
+    def monday(week):
+        return {row["key"]: row["cells"]["2026-11-02"]["suggested"] for row in week["rows"]}
+
+    assert monday(idle)["SUPERAPP-1"] > monday(idle)["SUPERAPP-5"]
+    assert monday(weighed) == {"SUPERAPP-1": 240, "SUPERAPP-5": 240}

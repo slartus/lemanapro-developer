@@ -24,9 +24,11 @@ class FakeTracker:
     def __init__(self) -> None:
         self.worklogs: list[Worklog] = []
         self.issues = [
-            {"key": "SUPERAPP-5", "summary": "Doing it", "status": {"key": "development"}, "statusType": {"key": "inProgress"}},
+            {"key": "SUPERAPP-5", "summary": "Doing it", "status": {"key": "development"}, "statusType": {"key": "inProgress"},
+             "assignee": {"id": "5"}},
             {"key": "SUPERAPP-6", "summary": "Backlog", "status": {"key": "open"}, "statusType": {"key": "new"}},
-            {"key": "OTHER-1", "summary": "Other queue", "status": {"key": "codereview"}, "statusType": {"key": "paused"}},
+            {"key": "OTHER-1", "summary": "Other queue", "status": {"key": "codereview"}, "statusType": {"key": "paused"},
+             "assignee": {"id": "5"}},
         ]
         self.titles = {"SUPERAPP-1": "Login screen"}
         self.created: list[tuple[str, datetime, int]] = []
@@ -39,6 +41,10 @@ class FakeTracker:
         self.linked_issues: list[dict] = []
         self.my_issue_queries: list[tuple] = []
         self.histories: dict[str, list] = {}
+        self.assignee_histories: dict[str, list] = {}
+        self.assignee_calls: list[str] = []
+        self.failing_assignees: set[str] = set()
+        self.my_issue_since: list = []
         self.history_calls: list[str] = []
         self.failing_histories: set[str] = set()
         self.history_active = 0
@@ -59,9 +65,10 @@ class FakeTracker:
         self._read()
         return {"login": "60121337", "uid": 5, "trackerUid": 5, "passportUid": 1130000066073403}
 
-    async def search_my_issues(self, statuses, queues, limit):
+    async def search_my_issues(self, statuses, queues, limit, since=None):
         self._read()
         self.my_issue_queries.append((tuple(statuses), tuple(queues), limit))
+        self.my_issue_since.append(since)
         return [
             issue for issue in self.issues
             if issue["status"]["key"] in statuses and (not queues or issue["key"].rsplit("-", 1)[0] in queues)
@@ -78,6 +85,12 @@ class FakeTracker:
             return self.histories.get(key, [])
         finally:
             self.history_active -= 1
+
+    async def assignee_history(self, key):
+        self.assignee_calls.append(key)
+        if key in self.failing_assignees:
+            raise TrackerApiError("Tracker: ошибка 500", 500)
+        return self.assignee_histories.get(key, [])
 
     async def search_issues(self, query, limit):
         self._read()
@@ -1126,11 +1139,12 @@ async def test_failed_branch_lookups_are_cached_and_do_not_spend_the_budget(env,
 
 async def test_in_progress_issues_are_requested_by_configured_statuses(env):
     await _get(env)
-    assert env["tracker"].my_issue_queries == [(("development", "codereview"), ("SUPERAPP",), 5)]
+    assert env["tracker"].my_issue_queries == [(("development", "codereview", "rework"), ("SUPERAPP",), 20)]
+    assert env["tracker"].my_issue_since == [date(2026, 11, 9)]
     tracker = TRACKER.model_copy(update={"in_progress_statuses": ["codereview"], "queues": []})
     env["ctx"].config = env["ctx"].config.model_copy(update={"tracker": tracker})
     payload = await _get(env)
-    assert env["tracker"].my_issue_queries[-1] == (("codereview",), (), 5)
+    assert env["tracker"].my_issue_queries[-1] == (("codereview",), (), 20)
     assert "in_progress" in _rows(payload)["OTHER-1"]["sources"]
     assert "SUPERAPP-5" not in _rows(payload) or "in_progress" not in _rows(payload)["SUPERAPP-5"]["sources"]
 
@@ -1197,4 +1211,176 @@ async def test_activity_disabled_by_empty_status_map(env):
     env["ctx"].config = env["ctx"].config.model_copy(update={"tracker": tracker})
     payload = await _get(env)
     assert all(row["activity"] is None for row in payload["rows"])
-    assert env["tracker"].history_calls == []
+
+
+ME = frozenset({"5"})
+QA = frozenset({"77"})
+
+
+def _assignees(*changes):
+    return [(datetime.fromisoformat(at), src, dst) for at, src, dst in changes]
+
+
+def _suggested(payload, key):
+    return {day: cell["suggested"] for day, cell in _rows(payload)[key]["cells"].items() if cell["suggested"]}
+
+
+def _all_issues(tracker):
+    async def search(statuses, queues, limit, since=None):
+        return tracker.issues[:limit]
+
+    return search
+
+
+async def test_in_progress_counts_only_the_days_the_issue_was_mine(env):
+    env["gitlab"].events = []
+    env["tracker"].issues = [{"key": "SUPERAPP-5", "summary": "Doing it", "status": {"key": "testing"}}]
+    env["tracker"].search_my_issues = _all_issues(env["tracker"])
+    env["tracker"].histories["SUPERAPP-5"] = _history(
+        ("2026-11-05T10:00:00+03:00", "todo", "development"),
+        ("2026-11-09T18:00:00+03:00", "development", "testing"),
+    )
+    env["tracker"].assignee_histories["SUPERAPP-5"] = _assignees(
+        ("2026-11-05T09:00:00+03:00", frozenset(), ME),
+        ("2026-11-09T18:00:05+03:00", ME, QA),
+    )
+    payload = await _get(env)
+    assert _suggested(payload, "SUPERAPP-5") == {"2026-11-09": 480}
+    assert _rows(payload)["SUPERAPP-5"]["activity"] == [
+        {"status": "development", "letter": "d", "from": "2026-11-05", "to": "2026-11-09", "open": False},
+    ]
+
+
+async def test_issue_returned_from_testing_is_mine_again_only_after_the_return(env):
+    env["gitlab"].events = []
+    env["tracker"].issues = [{"key": "SUPERAPP-5", "summary": "Doing it", "status": {"key": "rework"}}]
+    env["tracker"].histories["SUPERAPP-5"] = _history(
+        ("2026-10-20T10:00:00+03:00", "todo", "development"),
+        ("2026-10-22T10:00:00+03:00", "development", "testing"),
+        ("2026-11-10T11:00:00+03:00", "testing", "rework"),
+    )
+    env["tracker"].assignee_histories["SUPERAPP-5"] = _assignees(
+        ("2026-10-22T10:00:05+03:00", ME, QA),
+        ("2026-11-10T11:00:05+03:00", QA, ME),
+    )
+    payload = await _get(env)
+    assert _suggested(payload, "SUPERAPP-5") == {"2026-11-10": 480}
+
+
+async def test_candidate_that_was_not_mine_this_week_is_not_a_row(env):
+    env["gitlab"].events = []
+    env["tracker"].issues = [{"key": "SUPERAPP-5", "summary": "Doing it", "status": {"key": "rc"}}]
+    env["tracker"].search_my_issues = _all_issues(env["tracker"])
+    env["tracker"].histories["SUPERAPP-5"] = _history(
+        ("2026-10-20T10:00:00+03:00", "todo", "development"),
+        ("2026-10-22T10:00:00+03:00", "development", "rc"),
+    )
+    assert "SUPERAPP-5" not in _rows(await _get(env))
+
+
+async def test_failed_assignee_history_falls_back_to_statuses(env):
+    env["gitlab"].events = []
+    env["tracker"].failing_assignees.add("SUPERAPP-5")
+    env["tracker"].histories["SUPERAPP-5"] = _history(("2026-11-10T10:00:00+03:00", "todo", "development"))
+    payload = await _get(env)
+    assert _suggested(payload, "SUPERAPP-5") == {"2026-11-10": 480}
+
+
+async def test_qa_role_weighs_testing_days_transitions_and_comments(env):
+    env["gitlab"].events = [EVENTS[0]]
+    tracker = TrackerConfig(**{**TRACKER.model_dump(exclude={"in_progress_statuses", "activity_statuses"}), "role": "qa"})
+    env["ctx"].config = env["ctx"].config.model_copy(update={"tracker": tracker})
+    env["tracker"].issues = [
+        {"key": "SUPERAPP-7", "summary": "Tested", "status": {"key": "rework"}, "updatedAt": "u1"},
+        {"key": "SUPERAPP-8", "summary": "Testing", "status": {"key": "testing"}, "updatedAt": "u2"},
+    ]
+    env["tracker"].search_my_issues = _all_issues(env["tracker"])
+    env["tracker"].histories["SUPERAPP-7"] = [
+        (datetime.fromisoformat("2026-11-09T10:00:00+03:00"), "readyForTest", "testing", ME),
+        (datetime.fromisoformat("2026-11-09T16:00:00+03:00"), "testing", "rework", ME),
+    ]
+    env["tracker"].assignee_histories["SUPERAPP-7"] = _assignees(
+        ("2026-11-09T10:00:05+03:00", QA, ME),
+        ("2026-11-09T16:00:05+03:00", ME, QA),
+    )
+    env["tracker"].histories["SUPERAPP-8"] = [
+        (datetime.fromisoformat("2026-11-09T12:00:00+03:00"), "readyForTest", "testing", QA),
+    ]
+    env["tracker"].comments["SUPERAPP-7"] = [
+        {"createdAt": "2026-11-09T15:00:00.000+00:00", "createdBy": {"id": "5"}, "text": "bug"},
+        {"createdAt": "2026-11-09T15:10:00.000+00:00", "createdBy": {"id": "77"}, "text": "not mine"},
+    ]
+    payload = await _get(env)
+    rows = _rows(payload)
+    assert set(rows["SUPERAPP-7"]["sources"]) == {"status", "comment", "in_progress"}
+    monday = {key: rows[key]["cells"]["2026-11-09"]["suggested"] for key in rows}
+    assert monday["SUPERAPP-7"] > monday["SUPERAPP-8"] > 0
+    assert monday["SUPERAPP-1"] > 0
+    assert _suggested(payload, "SUPERAPP-8")["2026-11-10"] == 480
+    assert rows["SUPERAPP-8"]["activity"] == [
+        {"status": "testing", "letter": "t", "from": "2026-11-09", "to": "2026-11-10", "open": True},
+    ]
+
+
+async def test_timesheet_only_app_serves_just_the_timesheet(ctx):
+    ctx_obj, _ = ctx
+    app = create_app(ctx_obj, timesheet_only=True)
+    try:
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://127.0.0.1:8123") as client:
+            root = await client.get("/")
+            assert root.status_code == 307 and root.headers["location"] == "/timesheet"
+            page = await client.get("/timesheet")
+            assert page.status_code == 200
+            assert 'href="/settings"' not in page.text and 'href="/"' not in page.text
+            assert (await client.get("/settings")).status_code == 404
+            assert (await client.get("/api/mrs")).status_code == 404
+            assert (await client.get("/favicon.svg")).status_code == 200
+            assert (await client.get("/static/timesheet.js")).status_code == 200
+            assert (await client.get("/timesheet", headers={"Host": "evil.example"})).status_code in (400, 403, 421)
+            put = await client.put("/api/timesheet/cell", json={})
+            assert put.status_code in (400, 403)
+    finally:
+        pass
+    normal = create_app(ctx_obj)
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=normal), base_url="http://127.0.0.1:8123") as client:
+        page = await client.get("/timesheet")
+        assert 'href="/settings"' in page.text
+
+
+async def test_qa_signals_outside_owned_days_are_ignored(env):
+    env["gitlab"].events = []
+    tracker = TrackerConfig(**{**TRACKER.model_dump(exclude={"in_progress_statuses", "activity_statuses"}), "role": "qa"})
+    env["ctx"].config = env["ctx"].config.model_copy(update={"tracker": tracker})
+    env["tracker"].issues = [{"key": "SUPERAPP-7", "summary": "Tested", "status": {"key": "rc"}, "updatedAt": "u1"}]
+    env["tracker"].search_my_issues = _all_issues(env["tracker"])
+    env["tracker"].histories["SUPERAPP-7"] = [
+        (datetime.fromisoformat("2026-11-09T10:00:00+03:00"), "readyForTest", "testing", ME),
+        (datetime.fromisoformat("2026-11-09T16:00:00+03:00"), "testing", "rc", ME),
+    ]
+    env["tracker"].comments["SUPERAPP-7"] = [
+        {"createdAt": "2026-11-10T09:00:00.000+00:00", "createdBy": {"id": "5"}, "text": "late"},
+    ]
+    payload = await _get(env)
+    assert _suggested(payload, "SUPERAPP-7") == {"2026-11-09": 480}
+    assert "comment" not in _rows(payload)["SUPERAPP-7"]["sources"]
+
+
+async def test_failed_status_history_keeps_only_issues_assigned_to_me_now(env):
+    env["gitlab"].events = []
+    env["tracker"].issues = [
+        {"key": "SUPERAPP-5", "summary": "Mine", "status": {"key": "development"}, "assignee": {"id": "5"}},
+        {"key": "SUPERAPP-6", "summary": "Given away", "status": {"key": "development"}, "assignee": {"id": "77"}},
+    ]
+    env["tracker"].search_my_issues = _all_issues(env["tracker"])
+    env["tracker"].failing_histories |= {"SUPERAPP-5", "SUPERAPP-6"}
+    rows = _rows(await _get(env))
+    assert "SUPERAPP-5" in rows and "SUPERAPP-6" not in rows
+
+
+async def test_rows_outside_candidates_show_activity_regardless_of_assignee(env):
+    env["tracker"].histories["SUPERAPP-1"] = _history(("2026-11-09T10:00:00+03:00", "development", "codereview"))
+    env["tracker"].assignee_histories["SUPERAPP-1"] = _assignees(("2026-11-01T10:00:00+03:00", ME, QA))
+    payload = await _get(env)
+    assert _rows(payload)["SUPERAPP-1"]["activity"] == [
+        {"status": "codereview", "letter": "r", "from": "2026-11-09", "to": "2026-11-10", "open": True},
+    ]
