@@ -157,6 +157,7 @@ async def test_api_timesheet_current_week(env):
         "2026-W46", "2026-W45", "2026-W47", "2026-11-10"
     )
     assert payload["calendar_ok"] is True
+    assert payload["step"] == 30
     assert payload["tracker"] == {"enabled": True, "submit_enabled": True, "error": None}
     assert [day["date"] for day in payload["days"]][0] == "2026-11-09"
     assert payload["days"][0]["logged"] == 60

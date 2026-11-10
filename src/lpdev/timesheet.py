@@ -82,6 +82,11 @@ def extract_issue_keys(text: object, queues: Iterable[str]) -> list[str]:
     return list(dict.fromkeys(found))
 
 
+def strip_issue_key_prefix(title: str, key: str) -> str:
+    stripped = re.sub(rf"^\s*{re.escape(key)}[:\s\-–—]+", "", title, flags=re.IGNORECASE)
+    return stripped or title
+
+
 def _mr_iid(event: Mapping[str, Any]) -> int | None:
     if event.get("target_type") in NOTE_TARGETS:
         note = event.get("note") if isinstance(event.get("note"), Mapping) else {}
@@ -289,7 +294,7 @@ def build_week(inputs: WeekInputs, norm_for: Callable[[date, int], int] = day_no
         fixed = {key: minutes for (key, edit_day), minutes in inputs.edits.items() if edit_day == day}
         weights = {key: weight for (key, weight_day), weight in inputs.activity.weights.items() if weight_day == day}
         idle = [key for key in inputs.in_progress if not weights.get(key)]
-        remaining = max(0, norm - logged_total) if norm else 0
+        remaining = max(0, norm - logged_total) if norm and day <= inputs.today else 0
         suggestions[day] = allocate(remaining, weights, idle, fixed, inputs.step)
         day_payload.append({
             "date": day.isoformat(),
@@ -314,7 +319,7 @@ def build_week(inputs: WeekInputs, norm_for: Callable[[date, int], int] = day_no
                 "submission": inputs.submissions.get((key, day)),
             }
         title = inputs.titles.get(key) or inputs.in_progress.get(key) or inputs.activity.titles.get(key) or ""
-        row_payload.append({"key": key, "title": title, "url": issue_url(key), "sources": sources, "cells": cells})
+        row_payload.append({"key": key, "title": strip_issue_key_prefix(title, key), "url": issue_url(key), "sources": sources, "cells": cells})
     unkeyed = None
     if inputs.activity.unkeyed:
         unkeyed = {
@@ -327,6 +332,7 @@ def build_week(inputs: WeekInputs, norm_for: Callable[[date, int], int] = day_no
         "next_week": format_week(inputs.week_start + timedelta(days=7)),
         "today": inputs.today.isoformat(),
         "calendar_ok": inputs.calendar_ok,
+        "step": inputs.step,
         "tracker": dict(inputs.tracker),
         "days": day_payload,
         "rows": row_payload,

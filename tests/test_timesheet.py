@@ -15,6 +15,7 @@ from lpdev.timesheet import (
     event_weight,
     extract_issue_keys,
     format_week,
+    strip_issue_key_prefix,
     parse_week,
     submit_window,
     week_start_of,
@@ -292,3 +293,34 @@ def test_build_week_old_weeks_are_not_submittable():
     assert not any(day["submittable"] for day in week["days"])
     current = build_week(_inputs(week_start=date(2026, 11, 9)))
     assert [day["submittable"] for day in current["days"]] == [True, True, False, False, False, False, False]
+
+
+@pytest.mark.parametrize(
+    ("title", "expected"),
+    [
+        ("SUPERAPP-10264: [an][ios] Диз-демо", "[an][ios] Диз-демо"),
+        ("superapp-10264 — Диз-демо", "Диз-демо"),
+        ("SUPERAPP-10264 - fix", "fix"),
+        ("  SUPERAPP-10264:fix", "fix"),
+        ("SUPERAPP-102645: other", "SUPERAPP-102645: other"),
+        ("Fix SUPERAPP-10264", "Fix SUPERAPP-10264"),
+        ("SUPERAPP-10264", "SUPERAPP-10264"),
+        ("SUPERAPP-10264: ", "SUPERAPP-10264: "),
+    ],
+)
+def test_strip_issue_key_prefix(title, expected):
+    assert strip_issue_key_prefix(title, "SUPERAPP-10264") == expected
+
+
+def test_build_week_strips_key_from_titles_and_exposes_step():
+    activity = bucket_events([_mr_event("opened", "SUPERAPP-77: Login", at="2026-11-02T08:00:00Z")], MSK, {}, ["SUPERAPP"])
+    week = build_week(_inputs(activity=activity))
+    assert week["rows"][0]["title"] == "Login"
+    assert week["step"] == 30
+
+
+def test_build_week_does_not_suggest_into_the_future():
+    week = build_week(_inputs(week_start=date(2026, 11, 9), in_progress={"SUPERAPP-5": ""}))
+    cells = week["rows"][0]["cells"]
+    assert cells["2026-11-10"]["suggested"] == 480
+    assert all(cells[day]["suggested"] == 0 for day in ("2026-11-11", "2026-11-12", "2026-11-13"))
