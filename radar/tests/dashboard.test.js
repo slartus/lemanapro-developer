@@ -78,6 +78,13 @@ describe('collectMentions', () => {
     assert.equal(items[0].updatedAt, target.updated_at);
   });
 
+  it('carries the MR author display name alongside the username', () => {
+    const target = mr({ iid: 6, state: 'opened', author: { id: 4, username: '60262979', name: 'Иван Петров' } });
+    const [item] = collectMentions([todo(target, ALICE, '2026-01-01T00:00:00Z')], new Set());
+    assert.equal(item.author, '60262979');
+    assert.equal(item.authorName, 'Иван Петров');
+  });
+
   it('skips closed MRs, other actions and excluded keys', () => {
     const items = collectMentions(
       [

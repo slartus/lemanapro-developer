@@ -192,10 +192,8 @@ function renderMrCell(row) {
   const watch = row.watch ?? {};
   const title = radar.title ?? watch.title ?? `!${watch.iid}`;
   const reference = radar.reference ?? (watch.path_with_namespace ? `${watch.path_with_namespace}!${watch.iid}` : row.key);
-  const author = radar.author ?? watch.author_username;
   const sub = el('div', { className: 'sub' }, [
     el('span', { text: reference }),
-    author ? el('span', { text: `@${author}` }) : null,
     watch.source_branch ? el('span', { className: 'branch', text: watch.source_branch, attrs: { title: watch.source_branch } }) : null,
     radar.draft || watch.is_draft ? tag('draft') : null,
     radar.hasConflicts ? tag('конфликт', 'bad') : null,
@@ -204,6 +202,13 @@ function renderMrCell(row) {
     link(radar.webUrl ?? watch.web_url, [el('span', { className: 'mr-title', text: title })], { title }),
     sub,
   ]);
+}
+
+function renderAuthorCell(row) {
+  const username = row.radar?.author ?? row.watch?.author_username;
+  const name = row.radar?.authorName ?? row.watch?.author_name;
+  const label = name ?? (username ? `@${username}` : '—');
+  return el('td', { className: 'author', text: label, attrs: username ? { title: `@${username}` } : {} });
 }
 
 function renderRoleCell(row) {
@@ -430,6 +435,7 @@ function renderRow(row) {
   const actions = el('td', { className: 'actions' }, [row.radar && section ? snoozeControl(row.key, row.radar, section, title) : null]);
   const tr = el('tr', { attrs: { id: `mr-${row.key.replace('!', '-')}`, 'data-key': row.key } }, [
     renderMrCell(row),
+    renderAuthorCell(row),
     renderRoleCell(row),
     renderGitlabCell(row),
     renderReviewCell(row),

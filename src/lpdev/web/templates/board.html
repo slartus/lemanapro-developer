@@ -17,6 +17,7 @@
   .sub { display: flex; flex-wrap: wrap; align-items: center; gap: 0.15rem 0.6rem; margin-top: 0.2rem; font-size: 0.8rem; color: var(--muted); }
   .sub .branch { font-family: var(--mono); max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   td.tags { display: table-cell; }
+  td.author { min-width: 120px; max-width: 200px; }
   td.tags > * { margin: 0 0.25rem 0.25rem 0; }
   .tag { display: inline-block; padding: 0.05rem 0.5rem; border-radius: 6px; font-size: 0.78rem; font-weight: 600; white-space: nowrap;
          background: var(--neutral-bg); color: var(--neutral-fg); border: 0; }
@@ -75,7 +76,7 @@
 <div class="table-wrap">
   <table class="board">
     <thead>
-      <tr><th>MR</th><th>Мне</th><th>GitLab</th><th>Авторевью</th><th>Обновлён</th><th><span class="visually-hidden">Действия</span></th></tr>
+      <tr><th>MR</th><th>Автор</th><th>Мне</th><th>GitLab</th><th>Авторевью</th><th>Обновлён</th><th><span class="visually-hidden">Действия</span></th></tr>
     </thead>
     <tbody id="mr-body"></tbody>
   </table>

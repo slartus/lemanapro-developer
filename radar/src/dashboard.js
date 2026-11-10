@@ -291,6 +291,7 @@ function toItem(mr, extra) {
     webUrl: mr.web_url,
     reference: mrReference(mr),
     author: mr.author.username,
+    authorName: mr.author.name ?? null,
     draft: isDraft(mr),
     status: mr.detailed_merge_status ?? mr.merge_status,
     hasConflicts: Boolean(mr.has_conflicts),

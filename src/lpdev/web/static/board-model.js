@@ -74,7 +74,7 @@ export function matchesSearch(row, search) {
     row.radar?.reference,
     row.watch?.path_with_namespace,
     row.radar?.author ?? row.watch?.author_username,
-    row.watch?.author_name,
+    row.radar?.authorName ?? row.watch?.author_name,
     row.watch?.source_branch,
   ]
     .filter(Boolean)
