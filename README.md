@@ -164,6 +164,19 @@ paths:
   logs: ~/lpdev/logs
 ```
 
+**Готовая сборка для QA** (`deploy/qa/`): `build.sh` собирает PyInstaller-бинарь
+(one-dir, arm64, ad-hoc codesign) и складывает в `dist/lpdev-qa-<arch>-<commit>.zip`
+бинарь, `Lemanapro Timesheet.command` (двойной клик) и `INSTALL.md` с инструкцией
+для тестировщиков; печатает commit и sha256 для публикации. Бинарь `lpdev-qa`
+(`lpdev.qa_main`) при первом запуске проводит мастер настройки (GitLab URL, PAT
+`read_api`, org_id, очереди, «Списать?», OAuth-токен `y0_…`, порт; токены — в
+Keychain `lpdev-qa`, конфиг `~/.config/lpdev-qa/config.yaml` 0600, роль `qa`,
+данные в `~/lemanapro-timesheet/`), затем запускает только `/timesheet` на
+127.0.0.1:8124 и открывает браузер. Повторный запуск гасит предыдущий экземпляр
+по pidfile (рядом с БД) и открывает свежую вкладку; Ctrl+C останавливает сервис
+и best-effort закрывает вкладку браузера (osascript, при отказе — вручную);
+`--setup` — перезапуск мастера, `--port` — порт.
+
 **Источники:**
 - GitLab: мои события (`GET /api/v4/events`, кэш 5 минут) за неделю.
   - Push: ключ из ветки, затем из заголовка коммита, затем из MR этой ветки.

@@ -10,3 +10,6 @@ __pycache__/
 .coverage
 .coverage.*
 htmlcov/
+build-qa/
+dist-qa/
+dist/
