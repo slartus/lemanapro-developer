@@ -36,6 +36,11 @@ class FakeTracker:
         self.issue_worklogs_error: TrackerApiError | None = None
         self.issue_worklogs_delay = 0.0
         self.issue_worklogs_calls: list[str] = []
+        self.linked_issues: list[dict] = []
+        self.comments: dict[str, list[dict]] = {}
+        self.failing_comments: set[str] = set()
+        self.fail_link_search = False
+        self.link_queries: list[tuple[str, int]] = []
         self.closed = False
         self.next_id = 100
 
@@ -50,6 +55,19 @@ class FakeTracker:
     async def search_my_issues(self):
         self._read()
         return self.issues
+
+    async def search_issues(self, query, limit):
+        self._read()
+        self.link_queries.append((query, limit))
+        if self.fail_link_search:
+            raise TrackerApiError("Tracker: ошибка 500", 500)
+        return self.linked_issues[:limit]
+
+    async def issue_comments(self, key):
+        self._read()
+        if key in self.failing_comments:
+            raise TrackerApiError("Tracker: не найдено", 404)
+        return self.comments.get(key, [])
 
     async def get_issues(self, keys):
         self._read()
@@ -133,7 +151,8 @@ class FakeGitlab:
     async def get_project_by_path(self, path):
         self.calls.append(("project", path))
         self._maybe_fail("project")
-        return {"id": int(path), "default_branch": self.default_branches.get(int(path), "main")}
+        return {"id": int(path), "default_branch": self.default_branches.get(int(path), "main"),
+                "path_with_namespace": getattr(self, "paths", {}).get(int(path), "g/p")}
 
 
 EVENTS = [
@@ -858,3 +877,121 @@ async def test_gitlab_lookups_are_capped_per_request(env, monkeypatch):
     env["gitlab"].events = [_ev_push(f"task/b{n}", "x") for n in range(10)]
     await _get(env)
     assert len([call for call in env["fake_gitlab"].calls if call[0] != "user"]) == 3
+
+
+def _comment(text, login=None, display="Someone"):
+    author = {"display": display}
+    if login:
+        author["login"] = login
+    return {"id": 1, "text": text, "createdBy": author}
+
+
+MR_URL = "https://gitlab.example.com/g/p/-/merge_requests/{}"
+
+
+def _linked(env, key, *comments, assignee="me"):
+    env["tracker"].linked_issues.append({"key": key, "assignee": {"login": assignee, "id": "5"}})
+    env["tracker"].comments[key] = list(comments)
+
+
+async def test_bot_comment_links_unkeyed_branch_push_and_merge_request(env):
+    fake = env["fake_gitlab"]
+    fake.branch_mrs[(10, "task/snackbar")] = [{**_gl_mr(5175, "Remove snackbar", "task/snackbar", "me"), "description": ""}]
+    fake.mrs[(10, 5176)] = _gl_mr(5176, "Gesture", "task/gesture", "me")
+    _linked(env, "SUPERAPP-10397", _comment(f"PR:   {MR_URL.format(5175)}", login="ya360-pr-check"))
+    _linked(env, "SUPERAPP-10398", _comment(f"PR: {MR_URL.format(5176)}", login="ya360-pr-check"))
+    env["gitlab"].events = [_ev_push("task/snackbar", "ktlint"), _ev_mr("opened", 5176, "Gesture")]
+    payload = await _get(env)
+    rows = _rows(payload)
+    assert rows["SUPERAPP-10397"]["sources"] == ["push"]
+    assert rows["SUPERAPP-10398"]["sources"] == ["mr"]
+    assert payload["unkeyed"] is None
+    query, limit = env["tracker"].link_queries[0]
+    assert query == 'Assignee: me() Updated: >= "2026-11-02" "Sort by": Updated DESC'
+    assert limit == 49
+
+
+async def test_human_comments_with_several_links(env):
+    fake = env["fake_gitlab"]
+    for iid in (1, 2, 3):
+        fake.mrs[(10, 100 + iid)] = _gl_mr(100 + iid, f"Part {iid}", f"task/part{iid}", "me")
+    _linked(
+        env, "SUPERAPP-20",
+        _comment(f"Сделал {MR_URL.format(101)}/diffs и {MR_URL.format(102)}#note_7", login="dev"),
+        _comment(f"Ещё [MR]({MR_URL.format(103)}?tab=pipelines)", display="Dev Person"),
+    )
+    env["gitlab"].events = [_ev_mr("opened", 100 + iid, f"Part {iid}") for iid in (1, 2, 3)]
+    payload = await _get(env)
+    assert set(_rows(payload)) == {"SUPERAPP-20", "SUPERAPP-5"}
+    assert payload["unkeyed"] is None
+
+
+async def test_conflicting_links_prefer_the_bot_or_are_dropped(env):
+    fake = env["fake_gitlab"]
+    fake.mrs[(10, 201)] = _gl_mr(201, "Bot wins", "task/bot", "me")
+    fake.mrs[(10, 202)] = _gl_mr(202, "Ambiguous", "task/ambiguous", "me")
+    _linked(env, "SUPERAPP-31", _comment(MR_URL.format(201), login="dev"), _comment(MR_URL.format(202), login="dev"))
+    _linked(env, "SUPERAPP-32", _comment(MR_URL.format(201), login="ya360-pr-check"), _comment(MR_URL.format(202), login="dev2"))
+    env["gitlab"].events = [_ev_mr("opened", 201, "Bot wins"), _ev_mr("opened", 202, "Ambiguous")]
+    payload = await _get(env)
+    assert set(_rows(payload)) == {"SUPERAPP-32", "SUPERAPP-5"}
+    assert payload["unkeyed"]["items"] == [{"title": "Ambiguous", "url": MR_URL.format(202)}]
+
+
+async def test_links_from_foreign_hosts_and_other_queues_are_ignored(env):
+    env["fake_gitlab"].mrs[(10, 301)] = _gl_mr(301, "Elsewhere", "task/elsewhere", "me")
+    _linked(env, "SUPERAPP-40", _comment("https://evil.example.com/g/p/-/merge_requests/301", login="ya360-pr-check"))
+    _linked(env, "OTHER-41", _comment(MR_URL.format(301), login="ya360-pr-check"))
+    env["gitlab"].events = [_ev_mr("opened", 301, "Elsewhere")]
+    payload = await _get(env)
+    assert "SUPERAPP-40" not in _rows(payload)
+    assert payload["unkeyed"]["items"] == [{"title": "Elsewhere", "url": MR_URL.format(301)}]
+
+
+async def test_description_closing_keyword_links_merge_request(env):
+    fake = env["fake_gitlab"]
+    fake.mrs[(10, 401)] = {**_gl_mr(401, "No key", "task/nokey", "me"), "description": "Closes SUPERAPP-50, see SUPERAPP-51"}
+    env["gitlab"].events = [_ev_mr("opened", 401, "No key")]
+    rows = _rows(await _get(env))
+    assert "SUPERAPP-50" in rows
+    assert "SUPERAPP-51" not in rows
+
+
+async def test_links_are_not_used_when_tracker_is_disabled(env):
+    env["fake_gitlab"].mrs[(10, 501)] = _gl_mr(501, "No key", "task/nokey", "me")
+    _linked(env, "SUPERAPP-60", _comment(MR_URL.format(501), login="ya360-pr-check"))
+    env["ctx"].config = env["ctx"].config.model_copy(update={"tracker": TrackerConfig(queues=["SUPERAPP"])})
+    env["gitlab"].events = [_ev_mr("opened", 501, "No key")]
+    payload = await _get(env)
+    assert payload["rows"] == []
+    assert env["tracker"].link_queries == []
+
+
+async def test_link_read_failures_skip_the_source(env, caplog):
+    env["fake_gitlab"].mrs[(10, 601)] = _gl_mr(601, "No key", "task/nokey", "me")
+    _linked(env, "SUPERAPP-70", _comment(MR_URL.format(601), login="ya360-pr-check"))
+    _linked(env, "SUPERAPP-71", _comment(MR_URL.format(601), login="dev"))
+    env["tracker"].failing_comments.add("SUPERAPP-71")
+    env["gitlab"].events = [_ev_mr("opened", 601, "No key")]
+    assert "SUPERAPP-70" in _rows(await _get(env))
+    assert "comments of SUPERAPP-71 skipped" in caplog.text
+    env["app"].state.timesheet.links.clear()
+    env["tracker"].fail_link_search = True
+    payload = await _get(env)
+    assert "SUPERAPP-70" not in _rows(payload)
+    assert "tracker merge request links skipped" in caplog.text
+
+
+async def test_links_are_cached(env):
+    await _get(env)
+    await _get(env)
+    assert len(env["tracker"].link_queries) == 1
+
+
+async def test_link_to_a_project_outside_the_local_database_uses_the_project_path(env):
+    fake = env["fake_gitlab"]
+    fake.mrs[(77, 9)] = _gl_mr(9, "Other repo", "task/other", "me", project=77)
+    fake.paths = {77: "Other/Repo"}
+    _linked(env, "SUPERAPP-80", _comment("https://gitlab.example.com/other/repo/-/merge_requests/9", login="dev"))
+    env["gitlab"].events = [_ev_mr("opened", 9, "Other repo", project=77)]
+    assert "SUPERAPP-80" in _rows(await _get(env))

@@ -422,3 +422,44 @@ async def test_create_worklog_without_id_in_response():
         assert await client.create_worklog("SUPERAPP-1", datetime(2026, 11, 9, 10, tzinfo=MSK), 30) == ""
     finally:
         await client.aclose()
+
+
+async def test_search_issues_stops_at_the_limit():
+    pages = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        pages.append((request.url.params["page"], request.url.params["perPage"]))
+        assert json.loads(request.content) == {"query": "Q"}
+        page = int(request.url.params["page"])
+        return httpx.Response(200, json=[{"key": f"SUPERAPP-{page}{n}"} for n in range(3)], headers={"X-Total-Pages": "5"})
+
+    client = _client(handler)
+    try:
+        issues = await client.search_issues("Q", 3)
+    finally:
+        await client.aclose()
+    assert len(issues) == 3
+    assert pages == [("1", "3")]
+
+
+async def test_issue_comments():
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.raw_path == b"/v3/issues/SUPERAPP-1/comments?perPage=100"
+        return httpx.Response(200, json=[{"id": 1, "text": "PR: x"}, "junk"])
+
+    client = _client(handler)
+    try:
+        assert await client.issue_comments("SUPERAPP-1") == [{"id": 1, "text": "PR: x"}]
+        with pytest.raises(TrackerApiError):
+            await client.issue_comments("bad key")
+    finally:
+        await client.aclose()
+
+
+async def test_issue_comments_rejects_non_list():
+    client = _client(lambda request: httpx.Response(200, json={"x": 1}))
+    try:
+        with pytest.raises(TrackerApiError):
+            await client.issue_comments("SUPERAPP-1")
+    finally:
+        await client.aclose()

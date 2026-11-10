@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import fnmatch
+import logging
 import math
 import re
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from typing import Any
+from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo
 
 from lpdev.workcalendar import day_kind, day_norm_minutes
@@ -24,6 +26,16 @@ _UPPER_KEY_RE = re.compile(r"(?<![A-Za-z0-9_])[A-Z][A-Z0-9_]+-\d+(?!\d)")
 MR_ACTIONS = frozenset({"opened", "accepted", "merged"})
 NOTE_TARGETS = frozenset({"Note", "DiffNote", "DiscussionNote"})
 MERGE_COMMIT_PREFIXES = ("Merge branch ", "Merge remote-tracking branch ")
+
+_KEY_TOKEN = r"[A-Za-z][A-Za-z0-9_]+-\d+"
+_CLOSING_KEY_RE = re.compile(
+    rf"(?<![A-Za-z])(?:closes|fixes|resolves|closed|fixed|resolved)\s*:?\s*(?P<closing>{_KEY_TOKEN})(?!\d)"
+    rf"|\((?P<paren>{_KEY_TOKEN})\)",
+    re.IGNORECASE,
+)
+_URL_RE = re.compile(r"https?://[^\s<>\"'()\[\]]+")
+_MR_PATH_RE = re.compile(r"/(?P<project>[^?#]+?)/-/merge_requests/(?P<iid>\d+)(?:/[^?#]*)?")
+logger = logging.getLogger(__name__)
 
 MrLookup = Mapping[tuple[int, int], Mapping[str, Any]]
 
@@ -84,6 +96,73 @@ def extract_issue_keys(text: object, queues: Iterable[str]) -> list[str]:
     return list(dict.fromkeys(found))
 
 
+def extract_closing_keys(text: object, queues: Iterable[str]) -> list[str]:
+    if not isinstance(text, str) or not text:
+        return []
+    allowed = list(queues)
+    found: list[str] = []
+    for match in _CLOSING_KEY_RE.finditer(text):
+        token = match["closing"] or match["paren"]
+        found.extend(extract_issue_keys(token, allowed))
+    return list(dict.fromkeys(found))
+
+
+def parse_mr_links(text: object, gitlab_url: str) -> list[tuple[str, int]]:
+    if not isinstance(text, str) or not text:
+        return []
+    base = urlsplit(gitlab_url)
+    base_path = base.path.rstrip("/")
+    links = []
+    for raw in _URL_RE.findall(text):
+        parts = urlsplit(raw)
+        try:
+            same_origin = _origin(parts) == _origin(base)
+        except ValueError:
+            continue
+        if not same_origin or not parts.path.startswith(base_path + "/"):
+            continue
+        match = _MR_PATH_RE.fullmatch(parts.path[len(base_path):])
+        if match is not None:
+            links.append((match["project"].lower(), int(match["iid"])))
+    return list(dict.fromkeys(links))
+
+
+@dataclass(frozen=True)
+class PrLink:
+    project_path: str
+    iid: int
+    key: str
+    from_bot: bool
+    assigned_to_me: bool
+
+
+def resolve_pr_links(links: Iterable[PrLink]) -> dict[tuple[str, int], str]:
+    grouped: dict[tuple[str, int], list[PrLink]] = {}
+    for link in links:
+        grouped.setdefault((link.project_path, link.iid), []).append(link)
+    resolved: dict[tuple[str, int], str] = {}
+    for mr, candidates in grouped.items():
+        keys = {link.key for link in candidates}
+        if len(keys) == 1:
+            resolved[mr] = keys.pop()
+            continue
+        for preferred in ({link.key for link in candidates if link.from_bot},
+                          {link.key for link in candidates if link.assigned_to_me}):
+            if len(preferred) == 1:
+                resolved[mr] = preferred.pop()
+                break
+            if preferred:
+                break
+        if mr not in resolved:
+            logger.debug("timesheet: %s!%s is linked to several issues %s, link ignored", mr[0], mr[1], sorted(keys))
+    return resolved
+
+
+def _origin(parts) -> tuple[str, str, int | None]:
+    scheme = parts.scheme.lower()
+    return scheme, (parts.hostname or "").lower(), parts.port or {"http": 80, "https": 443}.get(scheme)
+
+
 def strip_issue_key_prefix(title: str, key: str) -> str:
     stripped = re.sub(rf"^\s*{re.escape(key)}[:\s\-–—]+", "", title, flags=re.IGNORECASE)
     return stripped or title
@@ -126,6 +205,7 @@ class EventContext:
     ignored_push_branches: tuple[str, ...] = ()
     default_branches: Mapping[int, str] = field(default_factory=dict)
     queues: tuple[str, ...] = ()
+    tracker_links: Mapping[tuple[int, int], str] = field(default_factory=dict)
 
 
 def event_source(event: Mapping[str, Any]) -> str | None:
@@ -192,18 +272,29 @@ def is_counted(event: Mapping[str, Any], context: EventContext) -> bool:
     return context.me is not None and author == context.me
 
 
+def mr_keys(info: Mapping[str, Any], project_id: object, context: EventContext) -> list[str]:
+    iid = info.get("iid")
+    linked = context.tracker_links.get((project_id, iid)) if isinstance(project_id, int) and isinstance(iid, int) else None
+    for text in (info.get("title"), info.get("source_branch")):
+        keys = extract_issue_keys(text, context.queues)
+        if keys:
+            if linked is not None and linked not in keys:
+                logger.debug("timesheet: %s!%s is linked to %s in Tracker but named %s", project_id, iid, linked, keys)
+            return keys
+    if linked is not None:
+        return [linked]
+    return extract_closing_keys(info.get("description"), context.queues)
+
+
 def event_keys(event: Mapping[str, Any], context: EventContext) -> list[str]:
     info = event_mr(event, context)
     push = event.get("push_data")
-    if isinstance(push, Mapping):
-        candidates = [push.get("ref"), push.get("commit_title"), info.get("title"), info.get("source_branch")]
-    else:
-        candidates = [event.get("target_title"), info.get("title"), info.get("source_branch")]
-    for text in candidates:
+    own = [push.get("ref"), push.get("commit_title")] if isinstance(push, Mapping) else [event.get("target_title")]
+    for text in own:
         keys = extract_issue_keys(text, context.queues)
         if keys:
             return keys
-    return []
+    return mr_keys(info, event.get("project_id"), context) if info else []
 
 
 def event_title(event: Mapping[str, Any], context: EventContext) -> str:

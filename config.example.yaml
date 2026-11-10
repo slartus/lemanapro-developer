@@ -96,6 +96,9 @@ tracker:
   timezone: Europe/Moscow
   # Push в эти ветки (fnmatch) и в default-ветку проекта не считается работой.
   ignored_push_branches: [develop, main, master, "release/*", "rc/*"]
+  # Ссылки на MR в комментариях задач Tracker связывают MR с задачей; при конфликте
+  # (один MR в нескольких задачах) побеждает комментарий этих авторов (логин или имя).
+  pr_link_bots: [ya360-pr-check]
 
 paths:
   # Файл базы SQLite (каталог создаётся автоматически).

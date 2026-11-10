@@ -157,6 +157,7 @@ class TrackerConfig(BaseModel):
     step_minutes: int = Field(default=30, ge=5, le=240)
     timezone: str = "Europe/Moscow"
     ignored_push_branches: list[str] = ["develop", "main", "master", "release/*", "rc/*"]
+    pr_link_bots: list[str] = ["ya360-pr-check"]
 
     @field_validator("url")
     @classmethod
@@ -169,6 +170,14 @@ class TrackerConfig(BaseModel):
         for pattern in value:
             if not pattern.strip() or any(c.isspace() or not c.isprintable() for c in pattern):
                 raise ValueError(f"invalid branch pattern: {pattern!r}")
+        return list(dict.fromkeys(value))
+
+    @field_validator("pr_link_bots")
+    @classmethod
+    def valid_bot_logins(cls, value: list[str]) -> list[str]:
+        for login in value:
+            if not login.strip() or not login.isprintable():
+                raise ValueError(f"invalid bot login: {login!r}")
         return list(dict.fromkeys(value))
 
     @field_validator("org_id")

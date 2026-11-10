@@ -212,15 +212,18 @@ class TrackerClient:
             return self._check(response)
         raise TrackerApiError("unreachable retry loop")
 
-    async def _read_pages(self, path: str, body: dict[str, Any]) -> list[dict[str, Any]]:
+    async def _read_pages(self, path: str, body: dict[str, Any], limit: int | None = None) -> list[dict[str, Any]]:
         items: list[dict[str, Any]] = []
         page = 1
+        per_page = min(_PER_PAGE, limit) if limit else _PER_PAGE
         while True:
-            response = await self._read("POST", path, json=body, params={"perPage": _PER_PAGE, "page": page})
+            response = await self._read("POST", path, json=body, params={"perPage": per_page, "page": page})
             payload = response.json()
             if not isinstance(payload, list):
                 raise TrackerApiError("Tracker: неожиданный ответ")
             items.extend(item for item in payload if isinstance(item, dict))
+            if limit is not None and len(items) >= limit:
+                return items[:limit]
             if page >= _total_pages(response):
                 return items
             if page >= _MAX_PAGES:
@@ -236,6 +239,16 @@ class TrackerClient:
 
     async def search_my_issues(self) -> list[dict[str, Any]]:
         return await self._read_pages("/issues/_search", {"query": MY_ISSUES_QUERY})
+
+    async def search_issues(self, query: str, limit: int) -> list[dict[str, Any]]:
+        return await self._read_pages("/issues/_search", {"query": query}, limit=limit)
+
+    async def issue_comments(self, key: str) -> list[dict[str, Any]]:
+        response = await self._read("GET", self._issue_path(key, "/comments"), params={"perPage": _PER_PAGE})
+        payload = response.json()
+        if not isinstance(payload, list):
+            raise TrackerApiError("Tracker: неожиданный ответ")
+        return [item for item in payload if isinstance(item, dict)]
 
     async def get_issues(self, keys: list[str]) -> dict[str, dict[str, Any]]:
         valid = sorted({key for key in keys if valid_issue_key(key)})

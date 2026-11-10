@@ -29,15 +29,18 @@ from lpdev.gitlab_client import GitlabApiError
 from lpdev.timesheet import (
     WeekInputs,
     EventContext,
+    PrLink,
     bucket_events,
     build_week,
     event_day,
     event_keys,
     is_ignored_push,
     mr_ref,
+    parse_mr_links,
     push_ref,
     parse_week,
     queue_of,
+    resolve_pr_links,
     submit_window,
     week_days,
     week_start_of,
@@ -74,6 +77,9 @@ OPEN_SUBMISSION_STATUSES = ("pending", "unknown")
 MAX_GITLAB_LOOKUPS = 50
 LOOKUP_CACHE_SIZE = 5000
 BRANCH_LOOKUP_TTL_SEC = 600.0
+PR_LINKS_TTL_SEC = 600.0
+PR_LINK_LOOKBACK = timedelta(days=7)
+MAX_PR_LINK_ISSUES = 49
 
 TrackerFactory = Callable[[TrackerConfig], TrackerClient]
 
@@ -97,6 +103,7 @@ def _mr_info(mr: dict[str, Any]) -> dict[str, Any]:
     return {
         "title": mr.get("title"), "source_branch": mr.get("source_branch"),
         "web_url": mr.get("web_url"), "author_username": author.get("username"),
+        "iid": mr.get("iid"), "description": mr.get("description"),
     }
 
 
@@ -105,10 +112,10 @@ class GitlabLookups:
     username: str | None = None
     mrs: dict[tuple[int, int], dict[str, Any]] = field(default_factory=dict)
     branches: dict[tuple[int, str], tuple[float, dict[str, Any] | None]] = field(default_factory=dict)
-    default_branches: dict[int, str | None] = field(default_factory=dict)
+    projects: dict[int, dict[str, Any]] = field(default_factory=dict)
 
     def _trim(self) -> None:
-        for cache in (self.mrs, self.branches, self.default_branches):
+        for cache in (self.mrs, self.branches, self.projects):
             if len(cache) > LOOKUP_CACHE_SIZE:
                 cache.clear()
 
@@ -143,30 +150,53 @@ class GitlabLookups:
         self.branches[ref] = (time.monotonic(), info)
         return info
 
-    async def default_branch(self, gitlab, project_id: int) -> str | None:
-        if project_id not in self.default_branches:
+    async def project(self, gitlab, project_id: int) -> dict[str, Any]:
+        if project_id not in self.projects:
             try:
                 detail = await gitlab.get_project_by_path(str(project_id))
             except GitlabApiError as exc:
                 logger.warning("timesheet: project %s lookup failed: %s", project_id, exc.message)
-                return None
-            branch = detail.get("default_branch") if isinstance(detail, dict) else None
-            self.default_branches[project_id] = branch if isinstance(branch, str) else None
-        return self.default_branches[project_id]
+                return {}
+            detail = detail if isinstance(detail, dict) else {}
+            self.projects[project_id] = {
+                "default_branch": detail.get("default_branch") if isinstance(detail.get("default_branch"), str) else None,
+                "path": detail.get("path_with_namespace") if isinstance(detail.get("path_with_namespace"), str) else None,
+            }
+        return self.projects[project_id]
 
-    async def context(self, gitlab, conn, cfg: TrackerConfig, events: list[dict[str, Any]]) -> EventContext:
+    async def context(
+        self, gitlab, conn, cfg: TrackerConfig, events: list[dict[str, Any]],
+        links: dict[tuple[str, int], str] | None = None,
+    ) -> EventContext:
         self._trim()
         budget = MAX_GITLAB_LOOKUPS
         me = await self.me(gitlab)
         by_iid = _mr_lookup(conn)
         defaults: dict[int, str] = {}
+        paths = _project_paths(conn)
         for project_id in sorted({ref[0] for ref in map(push_ref, events) if ref is not None}):
             if budget <= 0:
                 break
-            budget -= project_id not in self.default_branches
-            branch = await self.default_branch(gitlab, project_id)
-            if branch:
-                defaults[project_id] = branch
+            budget -= project_id not in self.projects
+            detail = await self.project(gitlab, project_id)
+            if detail.get("default_branch"):
+                defaults[project_id] = detail["default_branch"]
+            if detail.get("path"):
+                paths.setdefault(project_id, detail["path"].lower())
+        tracker_links: dict[tuple[int, int], str] = {}
+        if links:
+            for project_id in sorted({event["project_id"] for event in events if isinstance(event.get("project_id"), int)}):
+                if project_id not in paths and budget > 0:
+                    budget -= project_id not in self.projects
+                    path = (await self.project(gitlab, project_id)).get("path")
+                    if path:
+                        paths[project_id] = path.lower()
+            by_path: dict[str, list[int]] = {}
+            for project_id, path in paths.items():
+                by_path.setdefault(path, []).append(project_id)
+            for (path, iid), key in links.items():
+                for project_id in by_path.get(path, []):
+                    tracker_links[(project_id, iid)] = key
         for ref in dict.fromkeys(ref for ref in map(mr_ref, events) if ref is not None):
             if ref in by_iid:
                 continue
@@ -184,6 +214,7 @@ class GitlabLookups:
         context = EventContext(
             mr_by_iid=by_iid, mr_by_branch=by_branch, me=me,
             ignored_push_branches=tuple(cfg.ignored_push_branches), default_branches=defaults, queues=tuple(cfg.queues),
+            tracker_links=tracker_links,
         )
         for event in events:
             ref = push_ref(event)
@@ -209,6 +240,7 @@ class TimesheetState:
     submit_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     tracker_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     gitlab: GitlabLookups = field(default_factory=lambda: GitlabLookups())
+    links: dict[date, tuple[float, dict[tuple[str, int], str]]] = field(default_factory=dict)
 
     async def aclose(self) -> None:
         if self.tracker is not None:
@@ -226,7 +258,44 @@ class TimesheetState:
                 self.tracker = self.tracker_factory(cfg)
                 self.tracker_cfg = cfg
                 self.me = None
+                self.links.clear()
             return self.tracker
+
+    async def pr_links(
+        self, tracker: TrackerClient, cfg: TrackerConfig, gitlab_url: str, since: date
+    ) -> dict[tuple[str, int], str]:
+        cached = self.links.get(since)
+        if cached is not None and time.monotonic() - cached[0] < PR_LINKS_TTL_SEC:
+            return cached[1]
+        try:
+            identities = user_identities(await self.myself(tracker))
+            query = f'Assignee: me() Updated: >= "{since.isoformat()}" "Sort by": Updated DESC'
+            issues = await tracker.search_issues(query, MAX_PR_LINK_ISSUES)
+        except TrackerApiError as exc:
+            logger.warning("timesheet: tracker merge request links skipped: %s", exc.message)
+            return {}
+        found: list[PrLink] = []
+        for issue in issues:
+            key = issue.get("key")
+            if not valid_issue_key(key) or (cfg.queues and queue_of(key) not in cfg.queues):
+                continue
+            assignee = issue.get("assignee") if isinstance(issue.get("assignee"), dict) else {}
+            assigned = bool(identities & {str(assignee.get(name)) for name in ("id", "login", "uid") if assignee.get(name)})
+            try:
+                comments = await tracker.issue_comments(key)
+            except TrackerApiError as exc:
+                logger.warning("timesheet: comments of %s skipped: %s", key, exc.message)
+                continue
+            for comment in comments:
+                author = comment.get("createdBy") if isinstance(comment.get("createdBy"), dict) else {}
+                name = author.get("login") or author.get("display")
+                for path, iid in parse_mr_links(comment.get("text"), gitlab_url):
+                    found.append(PrLink(path, iid, key, name in cfg.pr_link_bots, assigned))
+        links = resolve_pr_links(found)
+        self.links[since] = (time.monotonic(), links)
+        while len(self.links) > EVENTS_CACHE_SIZE:
+            self.links.pop(min(self.links, key=lambda item: self.links[item][0]))
+        return links
 
     async def myself(self, tracker: TrackerClient) -> dict[str, Any]:
         if self.me is None:
@@ -331,10 +400,15 @@ def _mr_lookup(conn) -> dict[tuple[int, int], dict[str, Any]]:
     return {
         (row["gitlab_project_id"], row["iid"]): {
             "source_branch": row["source_branch"], "title": row["title"], "web_url": row["web_url"],
-            "author_username": row["author_username"],
+            "author_username": row["author_username"], "iid": row["iid"],
         }
         for row in rows
     }
+
+
+def _project_paths(conn) -> dict[int, str]:
+    rows = conn.execute("SELECT gitlab_project_id, path_with_namespace FROM project").fetchall()
+    return {row["gitlab_project_id"]: row["path_with_namespace"].lower() for row in rows if row["path_with_namespace"]}
 
 
 def _in_progress(issues: list[dict[str, Any]], cfg: TrackerConfig) -> dict[str, str]:
@@ -422,10 +496,11 @@ async def api_timesheet(request: Request):
         logger.warning("timesheet: gitlab events failed: %s", exc.message)
         return _error("GitLab не отдал события, повторите позже", 502)
     week_events = [event for event in events if isinstance(event, dict) and event_day(event, tz) in days]
-    context = await state.gitlab.context(ctx.api, ctx.conn, cfg, week_events)
+    tracker = await state.tracker_for(cfg)
+    links = await state.pr_links(tracker, cfg, ctx.config.gitlab.url, week_start - PR_LINK_LOOKBACK) if tracker else None
+    context = await state.gitlab.context(ctx.api, ctx.conn, cfg, week_events, links)
     activity = bucket_events(week_events, tz, context)
     iso_days = [day.isoformat() for day in days]
-    tracker = await state.tracker_for(cfg)
     if tracker is not None:
         await _reconcile_week(ctx.conn, state, tracker, iso_days)
     edits = {(key, date.fromisoformat(day)): minutes for (key, day), minutes in timesheet_cells(ctx.conn, iso_days).items()}

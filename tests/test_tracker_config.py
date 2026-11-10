@@ -132,3 +132,11 @@ def test_ignored_push_branches_default_and_validation():
     for bad in ([""], [" "], ["a b"], ["x\n"]):
         with pytest.raises(ValidationError):
             TrackerConfig(ignored_push_branches=bad)
+
+
+def test_pr_link_bots_default_and_validation():
+    assert TrackerConfig().pr_link_bots == ["ya360-pr-check"]
+    assert TrackerConfig(pr_link_bots=["a", "a"]).pr_link_bots == ["a"]
+    for bad in ([""], [" "], ["x\n"]):
+        with pytest.raises(ValidationError):
+            TrackerConfig(pr_link_bots=bad)

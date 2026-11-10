@@ -15,7 +15,12 @@ from lpdev.timesheet import (
     event_keys,
     event_weight,
     extract_issue_keys,
+    PrLink,
+    extract_closing_keys,
     format_week,
+    mr_keys,
+    parse_mr_links,
+    resolve_pr_links,
     is_ignored_push,
     strip_issue_key_prefix,
     parse_week,
@@ -447,3 +452,112 @@ def test_build_week_does_not_suggest_into_the_future():
     cells = week["rows"][0]["cells"]
     assert cells["2026-11-10"]["suggested"] == 480
     assert all(cells[day]["suggested"] == 0 for day in ("2026-11-11", "2026-11-12", "2026-11-13"))
+
+
+@pytest.mark.parametrize(
+    ("text", "keys"),
+    [
+        ("Closes SUPERAPP-10397", ["SUPERAPP-10397"]),
+        ("fixes: superapp-1\nResolved SUPERAPP-2", ["SUPERAPP-1", "SUPERAPP-2"]),
+        ("Задача (SUPERAPP-10397)", ["SUPERAPP-10397"]),
+        ("CLOSED:SUPERAPP-3, Fixed SUPERAPP-4, Resolves SUPERAPP-5", ["SUPERAPP-3", "SUPERAPP-4", "SUPERAPP-5"]),
+        ("See SUPERAPP-10397 and SUPERAPP-1 nearby", []),
+        ("Prefixes SUPERAPP-1", []),
+        ("Closes OTHER-1 (OTHER-2)", []),
+        ("Closes SUPERAPP-12345678 (SUPERAPP-9x)", ["SUPERAPP-12345678"]),
+        (None, []),
+    ],
+)
+def test_extract_closing_keys(text, keys):
+    assert extract_closing_keys(text, ["SUPERAPP"]) == keys
+
+
+def test_extract_closing_keys_without_queue_filter():
+    assert extract_closing_keys("Closes ANY-1 (lower-2)", []) == ["ANY-1"]
+
+
+GITLAB = "https://gitlab.lmru.tech"
+
+
+@pytest.mark.parametrize(
+    ("text", "links"),
+    [
+        ("PR:   https://gitlab.lmru.tech/products/lmwork/lmru-mobile_lmwork/-/merge_requests/5175",
+         [("products/lmwork/lmru-mobile_lmwork", 5175)]),
+        ("https://gitlab.lmru.tech/a/B/-/merge_requests/7/diffs#note_1 и https://gitlab.lmru.tech/a/b/-/merge_requests/8?tab=x",
+         [("a/b", 7), ("a/b", 8)]),
+        ("[MR](https://gitlab.lmru.tech/a/b/-/merge_requests/9#note_5)", [("a/b", 9)]),
+        ("https://gitlab.lmru.tech:443/a/b/-/merge_requests/1 https://gitlab.lmru.tech/a/b/-/merge_requests/1", [("a/b", 1)]),
+        ("https://evil.example.com/a/b/-/merge_requests/1", []),
+        ("http://gitlab.lmru.tech/a/b/-/merge_requests/1", []),
+        ("https://gitlab.lmru.tech.evil.com/a/b/-/merge_requests/1", []),
+        ("https://gitlab.lmru.tech:bad/a/b/-/merge_requests/1", []),
+        ("https://gitlab.lmru.tech/a/b/-/issues/1", []),
+        ("https://gitlab.lmru.tech/a/b/-/merge_requests/new", []),
+        (None, []),
+    ],
+)
+def test_parse_mr_links(text, links):
+    assert parse_mr_links(text, GITLAB) == links
+
+
+def test_parse_mr_links_respects_the_gitlab_base_path():
+    assert parse_mr_links("https://h.example/gitlab/a/b/-/merge_requests/3 https://h.example/a/b/-/merge_requests/4",
+                          "https://h.example/gitlab") == [("a/b", 3)]
+
+
+def _link(key, bot=False, mine=True, iid=1):
+    return PrLink("a/b", iid, key, bot, mine)
+
+
+@pytest.mark.parametrize(
+    ("links", "expected"),
+    [
+        ([_link("SUPERAPP-1")], "SUPERAPP-1"),
+        ([_link("SUPERAPP-1"), _link("SUPERAPP-1", bot=True)], "SUPERAPP-1"),
+        ([_link("SUPERAPP-1"), _link("SUPERAPP-2", bot=True)], "SUPERAPP-2"),
+        ([_link("SUPERAPP-1", bot=True), _link("SUPERAPP-2", bot=True)], None),
+        ([_link("SUPERAPP-1"), _link("SUPERAPP-2")], None),
+        ([_link("SUPERAPP-1", mine=False), _link("SUPERAPP-2")], "SUPERAPP-2"),
+        ([_link("SUPERAPP-1", mine=False), _link("SUPERAPP-2", mine=False)], None),
+    ],
+)
+def test_resolve_pr_links(links, expected):
+    assert resolve_pr_links(links).get(("a/b", 1)) == expected
+
+
+def test_resolve_pr_links_keeps_other_merge_requests():
+    links = [_link("SUPERAPP-1"), _link("SUPERAPP-2"), _link("SUPERAPP-3", iid=2)]
+    assert resolve_pr_links(links) == {("a/b", 2): "SUPERAPP-3"}
+
+
+@pytest.mark.parametrize(
+    ("info", "keys"),
+    [
+        ({"iid": 5, "title": "SUPERAPP-1: x", "source_branch": "task/SUPERAPP-2", "description": "Closes SUPERAPP-4"}, ["SUPERAPP-1"]),
+        ({"iid": 5, "title": "x", "source_branch": "task/SUPERAPP-2", "description": "Closes SUPERAPP-4"}, ["SUPERAPP-2"]),
+        ({"iid": 5, "title": "x", "source_branch": "task/x", "description": "Closes SUPERAPP-4"}, ["SUPERAPP-3"]),
+        ({"iid": 6, "title": "x", "source_branch": "task/x", "description": "Closes SUPERAPP-4"}, ["SUPERAPP-4"]),
+        ({"iid": 6, "title": "x", "source_branch": "task/x", "description": "about SUPERAPP-4"}, []),
+        ({"title": "x", "source_branch": "task/x"}, []),
+    ],
+)
+def test_mr_key_sources_order(info, keys):
+    context = _context(tracker_links={(10, 5): "SUPERAPP-3"})
+    assert mr_keys(info, 10, context) == keys
+
+
+def test_title_wins_over_conflicting_tracker_link(caplog):
+    import logging
+
+    caplog.set_level(logging.DEBUG, logger="lpdev.timesheet")
+    context = _context(tracker_links={(10, 5): "SUPERAPP-3"})
+    assert mr_keys({"iid": 5, "title": "SUPERAPP-1 x"}, 10, context) == ["SUPERAPP-1"]
+    assert "linked to SUPERAPP-3" in caplog.text
+
+
+def test_tracker_link_does_not_make_foreign_reviews_count():
+    lookup = {(10, 7): {"iid": 7, "source_branch": "task/no_key", "title": "Their", "author_username": "colleague"}}
+    context = _context(mr_by_iid=lookup, tracker_links={(10, 7): "SUPERAPP-9"})
+    activity = bucket_events([_note("Their", iid=7), _mr_event("approved", "Their", iid=7)], MSK, context)
+    assert activity.weights == {}
