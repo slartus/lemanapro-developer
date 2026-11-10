@@ -101,6 +101,8 @@ tracker:
   pr_link_bots: [ya360-pr-check]
   # Ключи статусов workflow, которые считаются «в работе» (пусто — "Status Type": inProgress).
   in_progress_statuses: [development, codereview]
+  # Отметки в строке задачи: когда задача была в этих статусах (ключ статуса -> 1–2 латинские буквы).
+  activity_statuses: {development: d, codereview: r}
 
 paths:
   # Файл базы SQLite (каталог создаётся автоматически).

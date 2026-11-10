@@ -28,6 +28,7 @@ _RETRY_AFTER_CAP_SEC = 10.0
 _MAX_PAGES = 20
 _PER_PAGE = 100
 _KEYS_CHUNK = 100
+_HISTORY_MAX_PAGES = 10
 _ERROR_TEXT_LIMIT = 300
 _DURATION_RE = re.compile(
     r"P(?:(?P<weeks>\d+)W)?(?:(?P<days>\d+)D)?"
@@ -89,6 +90,11 @@ def _parse_moment(value: object) -> datetime | None:
     except ValueError:
         return None
     return moment if moment.tzinfo is not None else None
+
+
+def _status_key(value: object) -> str | None:
+    key = value.get("key") if isinstance(value, dict) else None
+    return key if isinstance(key, str) and key else None
 
 
 def worklog_author(user: dict[str, Any]) -> str:
@@ -268,25 +274,41 @@ class TrackerClient:
     async def search_my_issues(self, statuses: list[str], queues: list[str], limit: int) -> list[dict[str, Any]]:
         return await self._read_pages("/issues/_search", {"query": my_issues_query(statuses, queues)}, limit=limit)
 
-    async def _read_linked(self, path: str) -> list[dict[str, Any]]:
+    async def _read_linked(
+        self, path: str, params: dict[str, Any] | None = None, max_pages: int = _MAX_PAGES
+    ) -> list[dict[str, Any]]:
         items: list[dict[str, Any]] = []
         url = path
-        params: dict[str, Any] | None = {"perPage": _PER_PAGE}
-        for _ in range(_MAX_PAGES):
-            response = await self._read("GET", url, params=params)
+        query: dict[str, Any] | None = {**(params or {}), "perPage": _PER_PAGE}
+        for _ in range(max_pages):
+            response = await self._read("GET", url, params=query)
             payload = response.json()
             if not isinstance(payload, list):
                 raise TrackerApiError("Tracker: неожиданный ответ")
             items.extend(item for item in payload if isinstance(item, dict))
             next_url = response.links.get("next", {}).get("url")
-            if not next_url:
+            if not next_url or not payload:
                 return items
             if _origin(next_url) != _origin(self.cfg.url):
                 logger.warning("tracker pagination stopped: foreign next link for %s", path)
                 return items
-            url, params = next_url, None
-        logger.warning("tracker pagination capped at %s pages for %s", _MAX_PAGES, path)
+            url, query = next_url, None
+        logger.warning("tracker pagination capped at %s pages for %s", max_pages, path)
         return items
+
+    async def status_history(self, key: str) -> list[tuple[datetime, str | None, str | None]]:
+        entries = await self._read_linked(self._issue_path(key, "/changelog"), {"field": "status"}, _HISTORY_MAX_PAGES)
+        history = []
+        for entry in entries:
+            moment = _parse_moment(entry.get("updatedAt"))
+            fields = entry.get("fields") if isinstance(entry.get("fields"), list) else []
+            for change in fields:
+                if not isinstance(change, dict) or not isinstance(change.get("field"), dict):
+                    continue
+                if change["field"].get("id") != "status" or moment is None:
+                    continue
+                history.append((moment, _status_key(change.get("from")), _status_key(change.get("to"))))
+        return sorted(history, key=lambda item: item[0])
 
     async def search_issues(self, query: str, limit: int) -> list[dict[str, Any]]:
         return await self._read_pages("/issues/_search", {"query": query}, limit=limit)

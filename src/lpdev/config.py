@@ -160,6 +160,7 @@ class TrackerConfig(BaseModel):
     ignored_push_branches: list[str] = ["develop", "main", "master", "release/*", "rc/*"]
     pr_link_bots: list[str] = ["ya360-pr-check"]
     in_progress_statuses: list[str] = ["development", "codereview"]
+    activity_statuses: dict[str, str] = {"development": "d", "codereview": "r"}
 
     @field_validator("url")
     @classmethod
@@ -181,6 +182,14 @@ class TrackerConfig(BaseModel):
             if not TRACKER_STATUS_RE.fullmatch(status):
                 raise ValueError(f"invalid status key: {status!r}")
         return list(dict.fromkeys(value))
+
+    @field_validator("activity_statuses")
+    @classmethod
+    def valid_activity_statuses(cls, value: dict[str, str]) -> dict[str, str]:
+        for status, letter in value.items():
+            if not TRACKER_STATUS_RE.fullmatch(status) or not re.fullmatch(r"[A-Za-z]{1,2}", letter):
+                raise ValueError(f"invalid activity status: {status!r} -> {letter!r}")
+        return value
 
     @field_validator("pr_link_bots")
     @classmethod

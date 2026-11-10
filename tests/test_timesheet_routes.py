@@ -38,6 +38,11 @@ class FakeTracker:
         self.issue_worklogs_calls: list[str] = []
         self.linked_issues: list[dict] = []
         self.my_issue_queries: list[tuple] = []
+        self.histories: dict[str, list] = {}
+        self.history_calls: list[str] = []
+        self.failing_histories: set[str] = set()
+        self.history_active = 0
+        self.history_peak = 0
         self.comments: dict[str, list[dict]] = {}
         self.failing_comments: set[str] = set()
         self.fail_link_search = False
@@ -60,6 +65,18 @@ class FakeTracker:
             issue for issue in self.issues
             if issue["status"]["key"] in statuses and (not queues or issue["key"].rsplit("-", 1)[0] in queues)
         ][:limit]
+
+    async def status_history(self, key):
+        self.history_calls.append(key)
+        self.history_active += 1
+        self.history_peak = max(self.history_peak, self.history_active)
+        try:
+            await asyncio.sleep(0)
+            if key in self.failing_histories:
+                raise TrackerApiError("Tracker: ошибка 500", 500)
+            return self.histories.get(key, [])
+        finally:
+            self.history_active -= 1
 
     async def search_issues(self, query, limit):
         self._read()
@@ -1086,3 +1103,60 @@ async def test_in_progress_issues_are_requested_by_configured_statuses(env):
     assert env["tracker"].my_issue_queries[-1] == (("codereview",), (), 5)
     assert "in_progress" in _rows(payload)["OTHER-1"]["sources"]
     assert "SUPERAPP-5" not in _rows(payload) or "in_progress" not in _rows(payload)["SUPERAPP-5"]["sources"]
+
+
+def _history(*changes):
+    return [(datetime.fromisoformat(at), src, dst) for at, src, dst in changes]
+
+
+async def test_rows_show_development_and_review_activity_within_the_week(env):
+    env["tracker"].histories["SUPERAPP-1"] = _history(
+        ("2026-10-20T10:00:00+03:00", "todo", "development"),
+        ("2026-10-21T10:00:00+03:00", "development", "todo"),
+        ("2026-11-06T10:00:00+03:00", "todo", "development"),
+        ("2026-11-09T12:00:00+03:00", "development", "codereview"),
+    )
+    payload = await _get(env)
+    rows = _rows(payload)
+    assert rows["SUPERAPP-1"]["activity"] == [
+        {"status": "development", "letter": "d", "from": "2026-11-06", "to": "2026-11-09"},
+        {"status": "codereview", "letter": "r", "from": "2026-11-09", "to": "2026-11-10"},
+    ]
+    assert rows["SUPERAPP-5"]["activity"] == []
+
+
+async def test_activity_is_cached_and_failures_are_empty(env, caplog):
+    env["tracker"].failing_histories.add("SUPERAPP-5")
+    payload = await _get(env)
+    assert _rows(payload)["SUPERAPP-5"]["activity"] == []
+    assert "status history of SUPERAPP-5 skipped" in caplog.text
+    calls = len(env["tracker"].history_calls)
+    await _get(env)
+    assert len(env["tracker"].history_calls) == calls
+
+
+async def test_activity_requests_are_limited(env, monkeypatch):
+    monkeypatch.setattr("lpdev.web.timesheet_routes.MAX_HISTORY_KEYS", 3)
+    monkeypatch.setattr("lpdev.web.timesheet_routes.MAX_HISTORY_PARALLEL", 2)
+    for n in range(10):
+        await env["client"].post("/api/timesheet/tasks", json={"key": f"SUPERAPP-{100 + n}", "week": "2026-W46"}, headers=H)
+    payload = await _get(env)
+    assert len(env["tracker"].history_calls) == 3
+    assert env["tracker"].history_peak <= 2
+    assert all(row["activity"] == [] for row in payload["rows"][3:])
+
+
+async def test_no_activity_without_tracker(env):
+    env["ctx"].config = env["ctx"].config.model_copy(update={"tracker": TrackerConfig(queues=["SUPERAPP"])})
+    payload = await _get(env)
+    assert payload["rows"]
+    assert all(row["activity"] == [] for row in payload["rows"])
+    assert env["tracker"].history_calls == []
+
+
+async def test_activity_disabled_by_empty_status_map(env):
+    tracker = TRACKER.model_copy(update={"activity_statuses": {}})
+    env["ctx"].config = env["ctx"].config.model_copy(update={"tracker": tracker})
+    payload = await _get(env)
+    assert all(row["activity"] == [] for row in payload["rows"])
+    assert env["tracker"].history_calls == []

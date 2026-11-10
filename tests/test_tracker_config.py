@@ -148,3 +148,12 @@ def test_in_progress_statuses_default_and_validation():
     for bad in (["dev ops"], ['x" OR "y'], ["1dev"], [""]):
         with pytest.raises(ValidationError):
             TrackerConfig(in_progress_statuses=bad)
+
+
+def test_activity_statuses_default_and_validation():
+    assert TrackerConfig().activity_statuses == {"development": "d", "codereview": "r"}
+    assert TrackerConfig(activity_statuses={}).activity_statuses == {}
+    assert TrackerConfig(activity_statuses={"rc": "RC"}).activity_statuses == {"rc": "RC"}
+    for bad in ({"dev ops": "d"}, {"development": ""}, {"development": "abc"}, {"development": "д"}, {"development": "1"}):
+        with pytest.raises(ValidationError):
+            TrackerConfig(activity_statuses=bad)

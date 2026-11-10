@@ -504,3 +504,30 @@ def build_week(inputs: WeekInputs, norm_for: Callable[[date, int], int] = day_no
         "rows": row_payload,
         "unkeyed": unkeyed,
     }
+
+
+def status_intervals(
+    history: Iterable[tuple[datetime, str | None, str | None]],
+    statuses: Iterable[str],
+    tz: ZoneInfo,
+    today: date,
+) -> list[dict[str, str]]:
+    tracked = set(statuses)
+    raw: list[tuple[str, date, date]] = []
+    current: str | None = None
+    since: date | None = None
+    for moment, _, to_status in sorted(history, key=lambda item: item[0]):
+        day = moment.astimezone(tz).date()
+        if current in tracked and since is not None:
+            raw.append((current, since, day))
+        current, since = to_status, day
+    if current in tracked and since is not None:
+        raw.append((current, since, max(since, today)))
+    merged: list[tuple[str, date, date]] = []
+    for status, start, end in sorted(raw, key=lambda item: (item[0], item[1], item[2])):
+        if merged and merged[-1][0] == status and start <= merged[-1][2] + timedelta(days=1):
+            merged[-1] = (status, merged[-1][1], max(merged[-1][2], end))
+        else:
+            merged.append((status, start, end))
+    merged.sort(key=lambda item: (item[1], item[2], item[0]))
+    return [{"status": status, "from": start.isoformat(), "to": end.isoformat()} for status, start, end in merged]

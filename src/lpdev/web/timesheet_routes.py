@@ -41,6 +41,7 @@ from lpdev.timesheet import (
     parse_week,
     queue_of,
     resolve_pr_links,
+    status_intervals,
     submit_window,
     week_days,
     week_start_of,
@@ -79,6 +80,9 @@ LOOKUP_CACHE_SIZE = 5000
 BRANCH_LOOKUP_TTL_SEC = 600.0
 PR_LINKS_TTL_SEC = 600.0
 LOOKUP_FAILURE_TTL_SEC = 60.0
+HISTORY_TTL_SEC = 600.0
+MAX_HISTORY_PARALLEL = 4
+MAX_HISTORY_KEYS = 30
 USER_LOOKUP_WARNING = "GitLab не отдал текущего пользователя: комментарии, апрувы и мержи в своих MR не учтены"
 PR_LINK_LOOKBACK = timedelta(days=7)
 MAX_PR_LINK_ISSUES = 49
@@ -273,6 +277,7 @@ class TimesheetState:
     tracker_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     gitlab: GitlabLookups = field(default_factory=lambda: GitlabLookups())
     links: dict[date, tuple[float, dict[tuple[str, int], str]]] = field(default_factory=dict)
+    histories: dict[str, tuple[float, list[tuple[datetime, str | None, str | None]] | None]] = field(default_factory=dict)
 
     async def aclose(self) -> None:
         if self.tracker is not None:
@@ -291,6 +296,7 @@ class TimesheetState:
                 self.tracker_cfg = cfg
                 self.me = None
                 self.links.clear()
+                self.histories.clear()
             return self.tracker
 
     async def pr_links(
@@ -328,6 +334,41 @@ class TimesheetState:
         while len(self.links) > EVENTS_CACHE_SIZE:
             self.links.pop(min(self.links, key=lambda item: self.links[item][0]))
         return links
+
+    async def status_history(self, tracker: TrackerClient, key: str) -> list[tuple[datetime, str | None, str | None]] | None:
+        cached = self.histories.get(key)
+        if cached is not None:
+            ttl = HISTORY_TTL_SEC if cached[1] is not None else LOOKUP_FAILURE_TTL_SEC
+            if time.monotonic() - cached[0] < ttl:
+                return cached[1]
+        try:
+            history = await tracker.status_history(key)
+        except TrackerApiError as exc:
+            logger.warning("timesheet: status history of %s skipped: %s", key, exc.message)
+            history = None
+        if len(self.histories) > LOOKUP_CACHE_SIZE:
+            self.histories.clear()
+        self.histories[key] = (time.monotonic(), history)
+        return history
+
+    async def row_activity(
+        self, tracker: TrackerClient | None, cfg: TrackerConfig, keys: list[str], days: list[date], today: date
+    ) -> dict[str, list[dict[str, str]]]:
+        if tracker is None or not cfg.activity_statuses:
+            return {}
+        semaphore = asyncio.Semaphore(MAX_HISTORY_PARALLEL)
+
+        async def one(key: str) -> tuple[str, list[dict[str, str]]]:
+            async with semaphore:
+                history = await self.status_history(tracker, key)
+            intervals = status_intervals(history or [], cfg.activity_statuses, _tz(cfg), today)
+            return key, [
+                {**interval, "letter": cfg.activity_statuses[interval["status"]]}
+                for interval in intervals
+                if interval["from"] <= days[-1].isoformat() and interval["to"] >= days[0].isoformat()
+            ]
+
+        return dict(await asyncio.gather(*(one(key) for key in keys[:MAX_HISTORY_KEYS])))
 
     async def myself(self, tracker: TrackerClient) -> dict[str, Any]:
         if self.me is None:
@@ -556,7 +597,11 @@ async def api_timesheet(request: Request):
         },
         calendar_ok=all(has_year(day.year) for day in days),
     )
-    return JSONResponse({**build_week(inputs), "warnings": warnings}, headers={"Cache-Control": "no-store"})
+    payload = build_week(inputs)
+    activity_by_key = await state.row_activity(tracker, cfg, [row["key"] for row in payload["rows"]], days, today)
+    for row in payload["rows"]:
+        row["activity"] = activity_by_key.get(row["key"], [])
+    return JSONResponse({**payload, "warnings": warnings}, headers={"Cache-Control": "no-store"})
 
 
 @router.put("/api/timesheet/cell")

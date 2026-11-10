@@ -589,3 +589,68 @@ async def test_comments_pagination_is_capped():
     finally:
         await client.aclose()
     assert len(comments) == 20
+
+
+def _status_change(at, src, dst, kind="IssueWorkflow"):
+    def status(key, ident):
+        return None if key is None else {"self": f"https://api.tracker.yandex.net/v3/statuses/{ident}", "id": ident,
+                                         "key": key, "display": key}
+    return {
+        "id": at, "self": "x", "updatedAt": at, "type": kind, "transport": "front",
+        "fields": [
+            {"field": {"self": "https://api.tracker.yandex.net/v3/fields/status", "id": "status", "display": "Статус"},
+             "from": status(src, "10"), "to": status(dst, "37")},
+            {"field": {"self": "https://api.tracker.yandex.net/v3/fields/statusStartTime", "id": "statusStartTime",
+                       "display": "Статус изменен"}, "from": "2026-11-09T06:48:48.525+0000", "to": at},
+            {"field": {"id": "statusType", "display": "Тип статуса"}, "from": None, "to": None},
+        ],
+        "updatedBy": {"id": "9000000000151720", "display": "Артём Слинкин"},
+    }
+
+
+async def test_status_history_reads_the_real_changelog_shape_with_link_pages():
+    calls = []
+    pages = {
+        None: [_status_change("2026-11-09T06:48:21.060+0000", None, "backlog", "IssueCreated"),
+               _status_change("2026-11-09T06:48:51.745+0000", "todo", "development")],
+        "a": [_status_change("2026-11-09T06:48:48.525+0000", "backlog", "todo"),
+              {"id": "x", "updatedAt": "2026-11-09T07:00:00.000+0000", "fields": [{"field": {"id": "assignee"}}]},
+              {"id": "y", "updatedAt": "garbage", "fields": [{"field": {"id": "status"}, "from": None, "to": {"key": "x"}}]},
+              {"id": "z", "updatedAt": "2026-11-09T07:00:00.000+0000", "fields": "junk"},
+              _status_change("2026-11-09T06:57:06.162+0000", "development", "codereview")],
+        "b": [],
+    }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(str(request.url))
+        cursor = request.url.params.get("id")
+        following = {None: "a", "a": "b", "b": "c"}[cursor]
+        link = (f'<https://api.tracker.yandex.net/v3/issues/SUPERAPP-10397/changelog?field=status&perPage=100>; rel="first", '
+                f'<https://api.tracker.yandex.net/v3/issues/SUPERAPP-10397/changelog?field=status&id={following}&perPage=100>; rel="next"')
+        return httpx.Response(200, json=pages[cursor], headers={"Link": link})
+
+    client = _client(handler)
+    try:
+        history = await client.status_history("SUPERAPP-10397")
+    finally:
+        await client.aclose()
+    assert [(moment.isoformat(), src, dst) for moment, src, dst in history] == [
+        ("2026-11-09T06:48:21.060000+00:00", None, "backlog"),
+        ("2026-11-09T06:48:48.525000+00:00", "backlog", "todo"),
+        ("2026-11-09T06:48:51.745000+00:00", "todo", "development"),
+        ("2026-11-09T06:57:06.162000+00:00", "development", "codereview"),
+    ]
+    assert len(calls) == 3
+    assert "field=status" in calls[0] and "perPage=100" in calls[0]
+
+
+async def test_status_history_is_capped_at_ten_pages():
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=[_status_change("2026-11-09T06:48:51.745+0000", "todo", "development")], headers={
+            "Link": '<https://api.tracker.yandex.net/v3/issues/SUPERAPP-1/changelog?id=n>; rel="next"'})
+
+    client = _client(handler)
+    try:
+        assert len(await client.status_history("SUPERAPP-1")) == 10
+    finally:
+        await client.aclose()

@@ -21,6 +21,7 @@ from lpdev.timesheet import (
     mr_keys,
     parse_mr_links,
     resolve_pr_links,
+    status_intervals,
     is_ignored_push,
     strip_issue_key_prefix,
     parse_week,
@@ -578,3 +579,47 @@ def test_merge_commit_title_is_not_a_key_source():
     event = _push("task/x", "Merge branch 'feature/SUPERAPP-1' into task/x", count=3)
     assert event_keys(event, _context()) == []
     assert event_keys(_push("feature/SUPERAPP-2", "Merge branch 'develop'", count=3), _context()) == ["SUPERAPP-2"]
+
+
+def _at(text):
+    from datetime import datetime
+
+    return datetime.fromisoformat(text)
+
+
+STATUSES = {"development": "d", "codereview": "r"}
+
+
+@pytest.mark.parametrize(
+    ("history", "today", "expected"),
+    [
+        (
+            [(_at("2026-11-09T06:48:21+00:00"), None, "backlog"), (_at("2026-11-09T06:48:51+00:00"), "todo", "development"),
+             (_at("2026-11-09T06:57:06+00:00"), "development", "codereview")],
+            date(2026, 11, 12),
+            [("development", "2026-11-09", "2026-11-09"), ("codereview", "2026-11-09", "2026-11-12")],
+        ),
+        (
+            [(_at("2026-11-19T09:00:00+03:00"), "todo", "development"), (_at("2026-11-19T18:00:00+03:00"), "development", "onHold"),
+             (_at("2026-11-21T09:00:00+03:00"), "onHold", "development"), (_at("2026-11-22T10:00:00+03:00"), "development", "codereview"),
+             (_at("2026-11-22T15:00:00+03:00"), "codereview", "done")],
+            date(2026, 11, 25),
+            [("development", "2026-11-19", "2026-11-19"), ("development", "2026-11-21", "2026-11-22"),
+             ("codereview", "2026-11-22", "2026-11-22")],
+        ),
+        (
+            [(_at("2026-11-02T10:00:00+03:00"), "todo", "development"), (_at("2026-11-03T10:00:00+03:00"), "development", "codereview"),
+             (_at("2026-11-04T10:00:00+03:00"), "codereview", "development"), (_at("2026-11-04T12:00:00+03:00"), "development", "done")],
+            date(2026, 11, 10),
+            [("development", "2026-11-02", "2026-11-04"), ("codereview", "2026-11-03", "2026-11-04")],
+        ),
+        ([(_at("2026-11-08T22:30:00+00:00"), "todo", "development")], date(2026, 11, 10), [("development", "2026-11-09", "2026-11-10")]),
+        ([(_at("2026-11-09T10:00:00+03:00"), "todo", "open")], date(2026, 11, 10), []),
+        ([(_at("2026-11-09T10:00:00+03:00"), "development", "done")], date(2026, 11, 10), []),
+        ([(_at("2026-11-12T10:00:00+03:00"), "todo", "development")], date(2026, 11, 10), [("development", "2026-11-12", "2026-11-12")]),
+        ([], date(2026, 11, 10), []),
+    ],
+)
+def test_status_intervals(history, today, expected):
+    result = status_intervals(history, STATUSES, MSK, today)
+    assert [(item["status"], item["from"], item["to"]) for item in result] == expected
