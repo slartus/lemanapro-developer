@@ -197,3 +197,21 @@ export function stepMinutes(minutes, direction, step = DEFAULT_STEP_MINUTES) {
 export function isSafeUrl(url) {
   return typeof url === 'string' && /^https?:\/\//i.test(url);
 }
+
+const ISO_DATE_RE = /^\d{4}-(\d{2})-(\d{2})$/;
+
+function shortIsoDate(iso) {
+  const match = ISO_DATE_RE.exec(iso ?? '');
+  return match ? `${match[2]}.${match[1]}` : null;
+}
+
+export function formatActivity(activity) {
+  return (Array.isArray(activity) ? activity : []).flatMap((item) => {
+    const from = shortIsoDate(item?.from);
+    const to = shortIsoDate(item?.to ?? item?.from);
+    if (!from || !to) return [];
+    const range = item.from === (item.to ?? item.from) ? from : `${from}–${to}`;
+    const status = item.status ?? '';
+    return [{ text: `${range}${item.letter ?? ''}`, title: status ? `${status}: ${range}` : range }];
+  });
+}

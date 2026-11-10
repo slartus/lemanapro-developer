@@ -6,6 +6,7 @@ import {
   cellState,
   cellValue,
   dayTotals,
+  formatActivity,
   formatHours,
   groupEntriesByDay,
   hiddenDays,
@@ -402,5 +403,30 @@ describe('isUncertain', () => {
     assert.equal(isUncertain(cell({ submission: 'unknown' })), true);
     assert.equal(isUncertain(cell({ submission: 'failed' })), false);
     assert.equal(isUncertain(undefined), false);
+  });
+});
+
+describe('formatActivity', () => {
+  it('formats single days and ranges with the status letter', () => {
+    assert.deepEqual(
+      formatActivity([
+        { status: 'development', letter: 'd', from: '2026-11-19', to: '2026-11-19' },
+        { status: 'development', letter: 'd', from: '2026-11-21', to: '2026-11-22' },
+        { status: 'review', letter: 'r', from: '2026-11-22', to: '2026-11-22' },
+      ]),
+      [
+        { text: '19.11d', title: 'development: 19.11' },
+        { text: '21.11–22.11d', title: 'development: 21.11–22.11' },
+        { text: '22.11r', title: 'review: 22.11' },
+      ],
+    );
+  });
+
+  it('tolerates missing or broken data', () => {
+    assert.deepEqual(formatActivity(undefined), []);
+    assert.deepEqual(formatActivity(null), []);
+    assert.deepEqual(formatActivity([]), []);
+    assert.deepEqual(formatActivity([{ status: 'x', letter: 'x', from: 'bad', to: '2026-11-19' }, null]), []);
+    assert.deepEqual(formatActivity([{ from: '2026-12-31' }]), [{ text: '31.12', title: '31.12' }]);
   });
 });

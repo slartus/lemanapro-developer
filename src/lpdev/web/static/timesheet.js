@@ -3,6 +3,7 @@ import {
   cellState,
   cellValue,
   dayTotals,
+  formatActivity,
   formatHours,
   groupEntriesByDay,
   hiddenDays,
@@ -211,6 +212,9 @@ function renderBanners() {
     if (!data.tracker?.enabled) {
       banners.push(el('div', { className: 'flash warn', text: 'Tracker не настроен — см. README, раздел «Таймшит»' }));
     }
+    (Array.isArray(data.warnings) ? data.warnings : [])
+      .filter((warning) => typeof warning === 'string' && warning)
+      .forEach((warning) => banners.push(el('div', { className: 'flash warn', text: warning })));
     if (data.tracker?.error) {
       banners.push(el('div', { className: 'flash err', attrs: { role: 'alert' }, text: `Tracker: ${data.tracker.error}` }));
     }
@@ -283,6 +287,14 @@ function displayTitle(row) {
   return title.startsWith(row.key) ? title.slice(row.key.length).replace(/^[\s:·—-]+/, '') : title;
 }
 
+function activityLine(activity) {
+  const parts = activity.flatMap((item, index) => [
+    index ? ', ' : null,
+    el('span', { text: item.text, attrs: { title: item.title } }),
+  ]);
+  return el('span', { className: 'activity', attrs: { title: activity.map((item) => item.title).join('\n') } }, parts);
+}
+
 function taskCell(row) {
   const key = isSafeUrl(row.url)
     ? el('a', { className: 'task-key', text: row.key, attrs: { href: row.url, target: '_blank', rel: 'noopener noreferrer' } })
@@ -290,10 +302,11 @@ function taskCell(row) {
   const sources = (row.sources ?? []).map((source) =>
     el('span', { className: `src ${source}`, text: SOURCE_LABELS[source] ?? source, attrs: { title: SOURCE_TITLES[source] } }),
   );
+  const activity = formatActivity(row.activity);
   return el('th', { className: 'task', attrs: { scope: 'row' } }, [
     key,
     displayTitle(row) ? el('div', { className: 'task-title', text: displayTitle(row), attrs: { title: row.title } }) : null,
-    sources.length ? el('div', { className: 'sources' }, sources) : null,
+    sources.length || activity.length ? el('div', { className: 'sources' }, [...sources, activity.length ? activityLine(activity) : null]) : null,
   ]);
 }
 
