@@ -7,6 +7,7 @@ import pytest
 
 from lpdev.timesheet import (
     Activity,
+    EventContext,
     WeekInputs,
     allocate,
     bucket_events,
@@ -15,6 +16,7 @@ from lpdev.timesheet import (
     event_weight,
     extract_issue_keys,
     format_week,
+    is_ignored_push,
     strip_issue_key_prefix,
     parse_week,
     submit_window,
@@ -22,7 +24,6 @@ from lpdev.timesheet import (
 )
 
 MSK = ZoneInfo("Europe/Moscow")
-MR_LOOKUP = {(10, 5): {"source_branch": "feature/SUPERAPP-77-login", "title": "Login", "web_url": "https://gl/mr/5"}}
 
 
 @pytest.mark.parametrize(
@@ -44,39 +45,76 @@ def test_extract_issue_keys(text, queues, keys):
     assert extract_issue_keys(text, queues) == keys
 
 
-def _push(ref, title="wip", count=1, at="2026-11-09T10:00:00Z", action="pushed"):
+ME = "slinkin"
+MR_LOOKUP = {
+    (10, 5): {"source_branch": "feature/SUPERAPP-77-login", "title": "Login", "web_url": "https://gl/mr/5", "author_username": ME},
+    (10, 6): {"source_branch": "feature/SUPERAPP-88", "title": "SUPERAPP-88: Their work", "web_url": "https://gl/mr/6",
+              "author_username": "colleague"},
+    (10, 7): {"source_branch": "task/no_key", "title": "Their unkeyed work", "web_url": "https://gl/mr/7",
+              "author_username": "colleague"},
+}
+
+
+def _context(**overrides) -> EventContext:
+    by_branch = {(10, info["source_branch"]): info for (_, _), info in MR_LOOKUP.items()}
+    values = dict(
+        mr_by_iid=MR_LOOKUP, mr_by_branch=by_branch, me=ME,
+        ignored_push_branches=("develop", "main", "master", "release/*", "rc/*"), default_branches={10: "develop"},
+        queues=("SUPERAPP",),
+    )
+    values.update(overrides)
+    return EventContext(**values)
+
+
+def _push(ref, title="wip", count=1, at="2026-11-09T10:00:00Z", action="pushed", action_name="pushed to", project=10):
     return {
-        "action_name": "pushed to", "created_at": at, "project_id": 10,
-        "push_data": {"ref": ref, "commit_title": title, "commit_count": count, "action": action},
+        "project_id": project, "action_name": action_name, "target_id": None, "target_iid": None, "target_type": None,
+        "target_title": "lemanapro-mobile", "created_at": at, "author": {"username": ME},
+        "push_data": {"commit_count": count, "action": action, "ref_type": "branch", "commit_from": "a" * 40,
+                      "commit_to": "b" * 40, "ref": ref, "commit_title": title, "ref_count": None},
     }
 
 
 def _mr_event(action, title="Some MR", iid=5, at="2026-11-09T10:00:00Z"):
-    return {"action_name": action, "target_type": "MergeRequest", "target_iid": iid, "target_title": title,
-            "project_id": 10, "created_at": at}
+    return {"project_id": 10, "action_name": action, "target_id": 9000 + iid, "target_iid": iid,
+            "target_type": "MergeRequest", "target_title": title, "created_at": at, "author": {"username": ME}}
 
 
-def _note(title="Some MR", iid=5, at="2026-11-09T10:00:00Z", noteable="MergeRequest"):
-    return {"action_name": "commented on", "target_type": "DiffNote", "target_title": title, "project_id": 10,
-            "created_at": at, "note": {"noteable_type": noteable, "noteable_iid": iid}}
+def _note(title="Some MR", iid=5, at="2026-11-09T10:00:00Z", noteable="MergeRequest", target_type="DiffNote"):
+    return {"project_id": 10, "action_name": "commented on", "target_id": 777, "target_iid": None,
+            "target_type": target_type, "target_title": title, "created_at": at, "author": {"username": ME},
+            "note": {"id": 777, "type": target_type, "body": "x", "noteable_type": noteable, "noteable_id": 9000 + iid,
+                     "noteable_iid": iid}}
 
 
 @pytest.mark.parametrize(
     ("event", "keys"),
     [
         (_push("feature/SUPERAPP-1-x", "SUPERAPP-2 fix"), ["SUPERAPP-1"]),
-        (_push("main", "SUPERAPP-2 fix"), ["SUPERAPP-2"]),
-        (_push("main", "fix"), []),
+        (_push("task/x", "SUPERAPP-2 fix"), ["SUPERAPP-2"]),
+        (_push("task/x", "fix"), []),
+        (_push("feature/SUPERAPP-77-login", "fix"), ["SUPERAPP-77"]),
+        (_push("task/no_key", "fix"), []),
         (_mr_event("opened", "SUPERAPP-3: title"), ["SUPERAPP-3"]),
         (_mr_event("accepted", "no key"), ["SUPERAPP-77"]),
-        (_mr_event("approved", "no key", iid=6), []),
+        (_mr_event("approved", "no key", iid=60), []),
         (_note("no key"), ["SUPERAPP-77"]),
         (_note("no key", noteable="Issue"), []),
         ({**_mr_event("opened", "no key"), "project_id": "x"}, []),
     ],
 )
 def test_event_keys_fallback_order(event, keys):
-    assert event_keys(event, MR_LOOKUP, ["SUPERAPP"]) == keys
+    assert event_keys(event, _context()) == keys
+
+
+def test_push_key_falls_back_to_the_branch_merge_request():
+    context = _context(mr_by_branch={(10, "task/remove_old_snackbar"): {
+        "title": "SUPERAPP-10395: Remove old snackbar", "source_branch": "task/remove_old_snackbar", "web_url": "u",
+    }})
+    assert event_keys(_push("task/remove_old_snackbar", "same behaviour"), context) == ["SUPERAPP-10395"]
+    assert event_keys(_push("task/unknown_branch", "fix"), context) == []
+    context = _context(mr_by_branch={(10, "task/a"): {"title": "No key", "source_branch": "feature/SUPERAPP-6-a"}})
+    assert event_keys(_push("task/a", "fix"), context) == ["SUPERAPP-6"]
 
 
 @pytest.mark.parametrize(
@@ -86,7 +124,6 @@ def test_event_keys_fallback_order(event, keys):
         (_push("x", count=3), 5),
         (_push("x", count=40), 6),
         (_push("x", count=None), 3),
-        (_push("x", action="removed"), 0),
         (_mr_event("opened"), 2),
         (_mr_event("accepted"), 2),
         (_mr_event("merged"), 2),
@@ -100,37 +137,123 @@ def test_event_weights(event, weight):
     assert event_weight(event) == weight
 
 
-def test_bucket_events_by_local_day_with_unkeyed_and_sources():
+@pytest.mark.parametrize(
+    ("event", "ignored"),
+    [
+        (_push("develop", "Merge branch 'task/remove_old_snackbar' into 'develop'"), True),
+        (_push("task/x", "Merge branch 'develop' into task/x"), True),
+        (_push("task/x", "Merge remote-tracking branch 'origin/develop' into task/x"), True),
+        (_push("main"), True),
+        (_push("master"), True),
+        (_push("release/8.1"), True),
+        (_push("rc/8.1.0"), True),
+        (_push("trunk", project=10), True),
+        (_push("trunk", project=11), False),
+        (_push("hotfix/8.1.1"), False),
+        (_push("task/x", count=0, action="removed", action_name="deleted"), True),
+        (_push("task/x", count=0), True),
+        (_push("task/x", action_name="pushed new", action="created"), False),
+        ({**_push("v1.0"), "push_data": {**_push("v1.0")["push_data"], "ref_type": "tag"}}, True),
+        (_mr_event("opened"), False),
+    ],
+)
+def test_ignored_pushes(event, ignored):
+    assert is_ignored_push(event, _context(default_branches={10: "trunk"})) is ignored
+
+
+def test_default_branch_is_ignored_only_for_its_project():
+    context = _context(default_branches={10: "trunk"}, ignored_push_branches=())
+    assert is_ignored_push(_push("trunk", project=10), context)
+    assert not is_ignored_push(_push("trunk", project=11), context)
+    assert not is_ignored_push(_push("develop", project=10), context)
+
+
+def test_review_activity_counts_only_on_my_merge_requests():
     events = [
+        _mr_event("approved", "SUPERAPP-88: Their work", iid=6),
+        _note("SUPERAPP-88: Their work", iid=6),
+        _note("Their unkeyed work", iid=7),
+        _mr_event("approved", "Their unkeyed work", iid=7),
+        _mr_event("accepted", "SUPERAPP-88: Their work", iid=6),
+        _note("Unknown MR", iid=404),
+        _note("SUPERAPP-77 Login", iid=5),
+        _note("On an issue", iid=1, noteable="Issue", target_type="Note"),
+    ]
+    activity = bucket_events(events, MSK, _context())
+    assert activity.weights == {("SUPERAPP-77", date(2026, 11, 9)): 1}
+    assert activity.sources == {"SUPERAPP-77": {"comment"}}
+    assert activity.unkeyed == []
+
+
+def test_review_activity_is_dropped_when_my_username_is_unknown():
+    activity = bucket_events([_note("SUPERAPP-77 Login", iid=5)], MSK, _context(me=None))
+    assert activity.weights == {}
+
+
+def test_my_comment_without_key_is_not_unkeyed_work():
+    lookup = {(10, 8): {"source_branch": "task/mine", "title": "Mine", "web_url": "u", "author_username": ME}}
+    activity = bucket_events([_note("Mine", iid=8)], MSK, _context(mr_by_iid=lookup))
+    assert activity.weights == {}
+    assert activity.unkeyed == []
+
+
+def test_bucket_events_real_day_shape():
+    snackbar_mr = {"title": "SUPERAPP-10395: Remove old snackbar", "source_branch": "task/remove_old_snackbar",
+                   "web_url": "https://gl/mr/5172", "author_username": ME}
+    lookup = {**MR_LOOKUP, (3024, 5172): snackbar_mr}
+    context = _context(
+        mr_by_iid=lookup,
+        mr_by_branch={(3024, "task/remove_old_snackbar"): snackbar_mr},
+        default_branches={3024: "develop"},
+    )
+    events = [
+        _push("task/remove_old_snackbar", "same behaviour", project=3024, action_name="pushed new", action="created"),
+        _push("task/remove_old_snackbar", "ktlint", project=3024),
+        _push("develop", "Merge branch 'task/remove_old_snackbar' into 'develop'", project=3024),
+        _push("develop", "Merge branch 'task/ios_back_gesture' into 'develop'", project=3024),
+        _push("task/ios_back_gesture", "Fix gesture", project=3024, count=2),
+        _push("task/ios_back_gesture", "Polish", project=3024),
+        _push("task/remove_old_snackbar", count=0, action="removed", action_name="deleted", project=3024),
+        {**_mr_event("accepted", "SUPERAPP-10395: Remove old snackbar", iid=5172), "project_id": 3024},
+        _mr_event("approved", "Расширить скоупы источников для пропуска стадии скриншот тестов", iid=7),
+        _note("Расширить скоупы источников для пропуска стадии скриншот тестов", iid=7),
         _push("feature/SUPERAPP-1", at="2026-11-09T21:30:00Z", count=2),
-        _mr_event("opened", "SUPERAPP-1 and SUPERAPP-2"),
-        _mr_event("approved", "SUPERAPP-2 review"),
-        _push("main", "Bump deps"),
-        _push("main", "Bump deps"),
-        _mr_event("approved", "Unrelated", iid=5 + 100),
-        _note("OTHER-5 out of queue", iid=99),
-        {"action_name": "pushed to", "created_at": "garbage", "push_data": {"ref": "SUPERAPP-9"}},
-        {"action_name": "pushed to", "created_at": "2026-11-09T10:00:00", "push_data": {"ref": "SUPERAPP-9"}},
+        {"action_name": "pushed to", "created_at": "garbage", "project_id": 10, "push_data": {"ref": "SUPERAPP-9"}},
     ]
-    activity = bucket_events(events, MSK, MR_LOOKUP, ["SUPERAPP"])
+    activity = bucket_events(events, MSK, context)
+    monday = date(2026, 11, 9)
     assert activity.weights == {
+        ("SUPERAPP-10395", monday): 3 + 3 + 2,
+        (None, monday): 4 + 3,
         ("SUPERAPP-1", date(2026, 11, 10)): 4,
-        ("SUPERAPP-1", date(2026, 11, 9)): 1,
-        ("SUPERAPP-2", date(2026, 11, 9)): 2,
-        (None, date(2026, 11, 9)): 3 + 3 + 1 + 1,
     }
-    assert activity.sources == {"SUPERAPP-1": {"push", "mr"}, "SUPERAPP-2": {"mr", "review"}}
-    assert activity.titles["SUPERAPP-1"] == "SUPERAPP-1 and SUPERAPP-2"
-    assert activity.unkeyed == [
-        {"title": "main: Bump deps", "url": None},
-        {"title": "Unrelated", "url": None},
-        {"title": "OTHER-5 out of queue", "url": None},
+    assert activity.sources == {"SUPERAPP-10395": {"push", "mr"}, "SUPERAPP-1": {"push"}}
+    assert activity.titles["SUPERAPP-10395"] == "SUPERAPP-10395: Remove old snackbar"
+    assert activity.unkeyed == [{"title": "task/ios_back_gesture", "url": None}]
+
+
+def test_unkeyed_groups_by_branch_and_upgrades_to_the_merge_request():
+    mine = {"title": "Gesture polish", "source_branch": "task/ios_back_gesture", "web_url": "https://gl/mr/9",
+            "author_username": ME}
+    events = [
+        _push("task/ios_back_gesture", "Fix gesture"),
+        _push("task/ios_back_gesture", "Polish"),
+        _mr_event("opened", "Gesture polish", iid=9),
     ]
+    activity = bucket_events(events, MSK, _context(mr_by_iid={(10, 9): mine}))
+    assert activity.unkeyed == [{"title": "Gesture polish", "url": "https://gl/mr/9"}]
+    activity = bucket_events(events[:2], MSK, _context(mr_by_branch={(10, "task/ios_back_gesture"): mine}))
+    assert activity.unkeyed == [{"title": "Gesture polish", "url": "https://gl/mr/9"}]
+
+
+def test_unkeyed_opened_merge_request_without_known_branch():
+    activity = bucket_events([_mr_event("opened", "Draft idea", iid=50)], MSK, _context())
+    assert activity.unkeyed == [{"title": "Draft idea", "url": None}]
 
 
 def test_unkeyed_items_are_capped():
-    events = [_push("main", f"commit {n}") for n in range(80)]
-    assert len(bucket_events(events, MSK, {}, ["SUPERAPP"]).unkeyed) == 50
+    events = [_push(f"task/branch_{n}", "commit") for n in range(80)]
+    assert len(bucket_events(events, MSK, _context()).unkeyed) == 50
 
 
 ALLOCATE_CASES = [
@@ -220,10 +343,10 @@ def test_build_week_contract_shape_and_calendar():
     activity = bucket_events(
         [
             _push("feature/SUPERAPP-1", at="2026-11-02T08:00:00Z"),
-            _push("main", "chore", at="2026-11-02T09:00:00Z"),
+            _push("task/chore", "chore", at="2026-11-02T09:00:00Z"),
             _push("feature/SUPERAPP-1", at="2026-11-07T09:00:00Z"),
         ],
-        MSK, {}, ["SUPERAPP"],
+        MSK, _context(),
     )
     week = build_week(_inputs(
         activity=activity,
@@ -257,7 +380,7 @@ def test_build_week_contract_shape_and_calendar():
     assert rows["SUPERAPP-1"]["cells"][monday] == {"suggested": 180, "edited": None, "logged": 60, "submission": "unknown"}
     assert rows["SUPERAPP-5"]["cells"][monday]["suggested"] == 0
     assert week["unkeyed"]["cells"][monday] == {"suggested": 180}
-    assert week["unkeyed"]["items"] == [{"title": "main: chore", "url": None}]
+    assert week["unkeyed"]["items"] == [{"title": "task/chore", "url": None}]
     tuesday = "2026-11-03"
     assert rows["SUPERAPP-9"]["cells"][tuesday] == {"suggested": 90, "edited": 90, "logged": 0, "submission": None}
     assert rows["SUPERAPP-5"]["cells"][tuesday]["suggested"] == 330
@@ -313,7 +436,7 @@ def test_strip_issue_key_prefix(title, expected):
 
 
 def test_build_week_strips_key_from_titles_and_exposes_step():
-    activity = bucket_events([_mr_event("opened", "SUPERAPP-77: Login", at="2026-11-02T08:00:00Z")], MSK, {}, ["SUPERAPP"])
+    activity = bucket_events([_mr_event("opened", "SUPERAPP-77: Login", at="2026-11-02T08:00:00Z")], MSK, _context())
     week = build_week(_inputs(activity=activity))
     assert week["rows"][0]["title"] == "Login"
     assert week["step"] == 30

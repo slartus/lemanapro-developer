@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import fnmatch
 import math
 import re
 from collections.abc import Callable, Iterable, Mapping
@@ -22,6 +23,7 @@ MAX_UNKEYED_ITEMS = 50
 _UPPER_KEY_RE = re.compile(r"(?<![A-Za-z0-9_])[A-Z][A-Z0-9_]+-\d+(?!\d)")
 MR_ACTIONS = frozenset({"opened", "accepted", "merged"})
 NOTE_TARGETS = frozenset({"Note", "DiffNote", "DiscussionNote"})
+MERGE_COMMIT_PREFIXES = ("Merge branch ", "Merge remote-tracking branch ")
 
 MrLookup = Mapping[tuple[int, int], Mapping[str, Any]]
 
@@ -97,29 +99,45 @@ def _mr_iid(event: Mapping[str, Any]) -> int | None:
         iid = event.get("target_iid")
     else:
         return None
-    return iid if isinstance(iid, int) else None
+    return iid if isinstance(iid, int) and not isinstance(iid, bool) else None
 
 
-def _mr_info(event: Mapping[str, Any], mr_lookup: MrLookup) -> Mapping[str, Any]:
+def mr_ref(event: Mapping[str, Any]) -> tuple[int, int] | None:
     iid = _mr_iid(event)
     project_id = event.get("project_id")
     if iid is None or not isinstance(project_id, int):
-        return {}
-    return mr_lookup.get((project_id, iid), {})
+        return None
+    return project_id, iid
+
+
+def push_ref(event: Mapping[str, Any]) -> tuple[int, str] | None:
+    push = event.get("push_data")
+    project_id = event.get("project_id")
+    if not isinstance(push, Mapping) or not isinstance(project_id, int) or not isinstance(push.get("ref"), str):
+        return None
+    return project_id, push["ref"]
+
+
+@dataclass(frozen=True)
+class EventContext:
+    mr_by_iid: MrLookup = field(default_factory=dict)
+    mr_by_branch: Mapping[tuple[int, str], Mapping[str, Any]] = field(default_factory=dict)
+    me: str | None = None
+    ignored_push_branches: tuple[str, ...] = ()
+    default_branches: Mapping[int, str] = field(default_factory=dict)
+    queues: tuple[str, ...] = ()
 
 
 def event_source(event: Mapping[str, Any]) -> str | None:
     action = str(event.get("action_name") or "")
     push = event.get("push_data")
     if isinstance(push, Mapping):
-        return None if push.get("action") == "removed" else "push"
-    if event.get("target_type") in NOTE_TARGETS or action == "commented on":
+        return "push"
+    if event.get("target_type") in NOTE_TARGETS:
         return "comment"
     if event.get("target_type") != "MergeRequest":
         return None
-    if action == "approved":
-        return "review"
-    return "mr" if action in MR_ACTIONS else None
+    return "mr" if action in MR_ACTIONS or action == "approved" else None
 
 
 def event_weight(event: Mapping[str, Any]) -> float:
@@ -128,37 +146,84 @@ def event_weight(event: Mapping[str, Any]) -> float:
         count = event["push_data"].get("commit_count")
         extra = max(0, count - 1) if isinstance(count, int) else 0
         return min(PUSH_WEIGHT + extra, PUSH_MAX_WEIGHT)
-    if source == "mr":
+    if source == "mr" and event.get("action_name") != "approved":
         return MR_WEIGHT
-    if source in ("comment", "review"):
+    if source in ("comment", "mr"):
         return REVIEW_WEIGHT
     return 0
 
 
-def event_keys(event: Mapping[str, Any], mr_lookup: MrLookup, queues: Iterable[str] = ()) -> list[str]:
-    queues = list(queues)
+def is_ignored_push(event: Mapping[str, Any], context: EventContext) -> bool:
+    push = event.get("push_data")
+    if not isinstance(push, Mapping):
+        return False
+    ref = push.get("ref")
+    title = str(push.get("commit_title") or "")
+    if push.get("action") in ("removed", "deleted") or event.get("action_name") == "deleted":
+        return True
+    if push.get("commit_count") == 0 or push.get("ref_type") == "tag" or not isinstance(ref, str) or not ref:
+        return True
+    if title.startswith(MERGE_COMMIT_PREFIXES):
+        return True
+    if ref == context.default_branches.get(event.get("project_id")):
+        return True
+    return any(fnmatch.fnmatchcase(ref, pattern) for pattern in context.ignored_push_branches)
+
+
+def event_mr(event: Mapping[str, Any], context: EventContext) -> Mapping[str, Any]:
+    ref = mr_ref(event)
+    if ref is not None:
+        return context.mr_by_iid.get(ref, {})
+    branch = push_ref(event)
+    return context.mr_by_branch.get(branch, {}) if branch is not None else {}
+
+
+def is_counted(event: Mapping[str, Any], context: EventContext) -> bool:
+    source = event_source(event)
+    if source is None:
+        return False
+    if source == "push":
+        return not is_ignored_push(event, context)
+    if mr_ref(event) is None:
+        return False
+    if source == "mr" and event.get("action_name") == "opened":
+        return True
+    author = event_mr(event, context).get("author_username")
+    return context.me is not None and author == context.me
+
+
+def event_keys(event: Mapping[str, Any], context: EventContext) -> list[str]:
+    info = event_mr(event, context)
     push = event.get("push_data")
     if isinstance(push, Mapping):
-        candidates = [push.get("ref"), push.get("commit_title")]
+        candidates = [push.get("ref"), push.get("commit_title"), info.get("title"), info.get("source_branch")]
     else:
-        candidates = [event.get("target_title"), _mr_info(event, mr_lookup).get("source_branch")]
+        candidates = [event.get("target_title"), info.get("title"), info.get("source_branch")]
     for text in candidates:
-        keys = extract_issue_keys(text, queues)
+        keys = extract_issue_keys(text, context.queues)
         if keys:
             return keys
     return []
 
 
-def event_description(event: Mapping[str, Any], mr_lookup: MrLookup) -> dict[str, str | None]:
-    push = event.get("push_data")
-    if isinstance(push, Mapping):
-        ref = str(push.get("ref") or "")
-        title = str(push.get("commit_title") or "")
-        return {"title": f"{ref}: {title}" if ref and title else ref or title or "push", "url": None}
-    info = _mr_info(event, mr_lookup)
-    title = event.get("target_title") or info.get("title") or info.get("source_branch") or ""
-    url = info.get("web_url")
-    return {"title": str(title), "url": str(url) if url else None}
+def event_title(event: Mapping[str, Any], context: EventContext) -> str:
+    info = event_mr(event, context)
+    if isinstance(event.get("push_data"), Mapping):
+        return str(info.get("title") or "")
+    return str(event.get("target_title") or info.get("title") or "")
+
+
+def unkeyed_item(event: Mapping[str, Any], context: EventContext) -> tuple[tuple[Any, ...], dict[str, str | None]]:
+    info = event_mr(event, context)
+    project_id = event.get("project_id")
+    url = str(info["web_url"]) if info.get("web_url") else None
+    branch = push_ref(event)
+    if branch is not None:
+        return (project_id, "branch", branch[1]), {"title": str(info.get("title") or branch[1]), "url": url}
+    title = str(event.get("target_title") or info.get("title") or info.get("source_branch") or "")
+    if info.get("source_branch"):
+        return (project_id, "branch", info["source_branch"]), {"title": title, "url": url}
+    return (project_id, "mr", _mr_iid(event)), {"title": title, "url": url}
 
 
 def event_day(event: Mapping[str, Any], tz: ZoneInfo) -> date | None:
@@ -171,35 +236,36 @@ def event_day(event: Mapping[str, Any], tz: ZoneInfo) -> date | None:
     return moment.astimezone(tz).date()
 
 
-def bucket_events(
-    events: Iterable[Mapping[str, Any]], tz: ZoneInfo, mr_lookup: MrLookup, queues: Iterable[str] = ()
-) -> Activity:
-    queues = list(queues)
+def bucket_events(events: Iterable[Mapping[str, Any]], tz: ZoneInfo, context: EventContext) -> Activity:
     activity = Activity()
-    seen_unkeyed: set[tuple[str, str | None]] = set()
+    unkeyed: dict[tuple[Any, ...], dict[str, str | None]] = {}
     for event in events:
         weight = event_weight(event)
         day = event_day(event, tz)
-        if not weight or day is None:
+        if not weight or day is None or not is_counted(event, context):
             continue
         source = event_source(event)
-        keys = event_keys(event, mr_lookup, queues)
+        keys = event_keys(event, context)
         if not keys:
+            if source == "comment" or event.get("action_name") == "approved":
+                continue
             bucket = (None, day)
             activity.weights[bucket] = activity.weights.get(bucket, 0) + weight
-            item = event_description(event, mr_lookup)
-            marker = (str(item["title"]), item["url"])
-            if marker not in seen_unkeyed and len(activity.unkeyed) < MAX_UNKEYED_ITEMS:
-                seen_unkeyed.add(marker)
-                activity.unkeyed.append(item)
+            group, item = unkeyed_item(event, context)
+            known = unkeyed.get(group)
+            if known is None and len(unkeyed) < MAX_UNKEYED_ITEMS:
+                unkeyed[group] = item
+            elif known is not None and known["url"] is None and item["url"] is not None:
+                unkeyed[group] = item
             continue
-        title = event_description(event, mr_lookup)["title"]
+        title = event_title(event, context)
         for key in keys:
             bucket = (key, day)
             activity.weights[bucket] = activity.weights.get(bucket, 0) + weight / len(keys)
             activity.sources.setdefault(key, set()).add(source)
-            if title and key not in activity.titles and source != "push":
-                activity.titles[key] = str(title)
+            if title and key not in activity.titles:
+                activity.titles[key] = title
+    activity.unkeyed = list(unkeyed.values())
     return activity
 
 

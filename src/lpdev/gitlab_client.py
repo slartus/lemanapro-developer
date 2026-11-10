@@ -226,6 +226,14 @@ class GitLabClient:
         response = await self._get(f"/api/v4/projects/{encoded}")
         return response.json()
 
+    async def get_merge_requests_by_branch(self, project_id: int, branch: str) -> list[dict[str, Any]]:
+        response = await self._get(
+            f"/api/v4/projects/{project_id}/merge_requests",
+            {"source_branch": branch, "state": "all", "order_by": "updated_at", "sort": "desc", "per_page": 20},
+        )
+        payload = response.json()
+        return payload if isinstance(payload, list) else []
+
     async def get_project_mr(self, project_id: int, iid: int) -> dict[str, Any]:
         response = await self._get(f"/api/v4/projects/{project_id}/merge_requests/{iid}")
         return response.json()

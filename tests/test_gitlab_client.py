@@ -332,3 +332,30 @@ async def test_get_my_events_passes_exclusive_dates_and_paginates():
     first = calls[0].url
     assert first.path == "/api/v4/events"
     assert (first.params["after"], first.params["before"], first.params["per_page"]) == ("2026-11-08", "2026-11-16", "100")
+
+
+async def test_get_merge_requests_by_branch_encodes_the_branch():
+    seen = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return httpx.Response(200, json=[{"iid": 1}])
+
+    client = _client(handler)
+    try:
+        assert await client.get_merge_requests_by_branch(3024, "task/remove old&x") == [{"iid": 1}]
+    finally:
+        await client.aclose()
+    url = seen[0].url
+    assert url.path == "/api/v4/projects/3024/merge_requests"
+    assert url.params["source_branch"] == "task/remove old&x"
+    assert url.params["state"] == "all"
+    assert b"source_branch=task%2Fremove+old%26x" in url.query
+
+
+async def test_get_merge_requests_by_branch_tolerates_non_list():
+    client = _client(lambda request: httpx.Response(200, json={"message": "x"}))
+    try:
+        assert await client.get_merge_requests_by_branch(1, "a") == []
+    finally:
+        await client.aclose()

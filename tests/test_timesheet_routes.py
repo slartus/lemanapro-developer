@@ -95,11 +95,52 @@ class FakeTracker:
         self.closed = True
 
 
+class FakeGitlab:
+    def __init__(self) -> None:
+        self.mrs: dict[tuple[int, int], dict] = {}
+        self.branch_mrs: dict[tuple[int, str], list[dict]] = {}
+        self.default_branches: dict[int, str] = {10: "develop"}
+        self.calls: list[tuple] = []
+        self.fail: set[str] = set()
+
+    def install(self, api) -> None:
+        api.get_user = self.get_user
+        api.get_project_mr = self.get_project_mr
+        api.get_merge_requests_by_branch = self.get_merge_requests_by_branch
+        api.get_project_by_path = self.get_project_by_path
+
+    def _maybe_fail(self, name: str) -> None:
+        if name in self.fail:
+            raise GitlabApiError("gitlab error status 500", status=500)
+
+    async def get_user(self):
+        self.calls.append(("user",))
+        self._maybe_fail("user")
+        return {"id": 1, "username": "me"}
+
+    async def get_project_mr(self, project_id, iid):
+        self.calls.append(("mr", project_id, iid))
+        self._maybe_fail("mr")
+        if (project_id, iid) not in self.mrs:
+            raise GitlabApiError("gitlab error status 404", status=404)
+        return self.mrs[(project_id, iid)]
+
+    async def get_merge_requests_by_branch(self, project_id, branch):
+        self.calls.append(("branch", project_id, branch))
+        self._maybe_fail("branch")
+        return self.branch_mrs.get((project_id, branch), [])
+
+    async def get_project_by_path(self, path):
+        self.calls.append(("project", path))
+        self._maybe_fail("project")
+        return {"id": int(path), "default_branch": self.default_branches.get(int(path), "main")}
+
+
 EVENTS = [
     {"action_name": "pushed to", "created_at": "2026-11-09T09:00:00Z", "project_id": 10,
      "push_data": {"ref": "feature/SUPERAPP-1-login", "commit_title": "wip", "commit_count": 1}},
     {"action_name": "pushed to", "created_at": "2026-11-09T10:00:00Z", "project_id": 10,
-     "push_data": {"ref": "main", "commit_title": "Bump", "commit_count": 1}},
+     "push_data": {"ref": "task/bump", "commit_title": "Bump", "commit_count": 1}},
     {"action_name": "opened", "created_at": "2026-11-10T10:00:00Z", "project_id": 10, "target_type": "MergeRequest",
      "target_iid": 1, "target_title": "Without key"},
     {"action_name": "pushed to", "created_at": "2026-11-20T10:00:00Z", "project_id": 10,
@@ -119,9 +160,11 @@ def env(ctx, monkeypatch):
         gitlab_calls.append((after, before))
         if getattr(get_my_events, "fail", False):
             raise GitlabApiError("gitlab error status 502", status=502)
-        return EVENTS
+        return getattr(get_my_events, "events", EVENTS)
 
     ctx_obj.api.get_my_events = get_my_events
+    gitlab = FakeGitlab()
+    gitlab.install(ctx_obj.api)
     tracker = FakeTracker()
     factory_calls = []
     app = create_app(ctx_obj)
@@ -134,7 +177,7 @@ def env(ctx, monkeypatch):
     client = httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://127.0.0.1:8123")
     yield {
         "ctx": ctx_obj, "app": app, "client": client, "tracker": tracker,
-        "gitlab": get_my_events, "gitlab_calls": gitlab_calls, "factory_calls": factory_calls,
+        "gitlab": get_my_events, "gitlab_calls": gitlab_calls, "factory_calls": factory_calls, "fake_gitlab": gitlab,
     }
 
 
@@ -178,7 +221,7 @@ async def test_api_timesheet_current_week(env):
     monday = rows["SUPERAPP-1"]["cells"]["2026-11-09"]
     assert monday["logged"] == 60
     assert monday["suggested"] + payload["unkeyed"]["cells"]["2026-11-09"]["suggested"] + rows["SUPERAPP-5"]["cells"]["2026-11-09"]["suggested"] == 420
-    assert payload["unkeyed"]["items"] == [{"title": "main: Bump", "url": None}]
+    assert payload["unkeyed"]["items"] == [{"title": "task/bump", "url": None}]
     assert "SUPERAPP-99" not in rows
     assert env["gitlab_calls"] == [(date(2026, 11, 7), date(2026, 11, 17))]
 
@@ -678,3 +721,140 @@ async def test_get_reconciliation_is_time_boxed_and_releases_the_lock(env, monke
     assert asyncio.get_running_loop().time() - started < 2
     assert _rows(payload)["SUPERAPP-1"]["cells"]["2026-11-09"]["submission"] == "pending"
     assert not env["app"].state.timesheet.submit_lock.locked()
+
+
+def _ev_push(ref, title, at="2026-11-09T09:00:00Z", project=10, count=1, action_name="pushed to"):
+    return {"project_id": project, "action_name": action_name, "target_type": None, "target_iid": None,
+            "target_title": "lemanapro-mobile", "created_at": at,
+            "push_data": {"commit_count": count, "action": "pushed", "ref_type": "branch", "ref": ref, "commit_title": title}}
+
+
+def _ev_mr(action, iid, title, at="2026-11-09T11:00:00Z", project=10):
+    return {"project_id": project, "action_name": action, "target_type": "MergeRequest", "target_iid": iid,
+            "target_title": title, "created_at": at}
+
+
+def _ev_note(iid, title, at="2026-11-09T12:00:00Z", project=10):
+    return {"project_id": project, "action_name": "commented on", "target_type": "DiffNote", "target_iid": None,
+            "target_title": title, "created_at": at, "note": {"noteable_type": "MergeRequest", "noteable_iid": iid}}
+
+
+def _gl_mr(iid, title, branch, author, project=10):
+    return {"iid": iid, "project_id": project, "title": title, "source_branch": branch,
+            "web_url": f"https://gitlab.example.com/g/p/-/merge_requests/{iid}", "author": {"username": author}}
+
+
+async def test_push_without_key_is_attributed_through_the_branch_merge_request(env):
+    fake = env["fake_gitlab"]
+    fake.branch_mrs[(10, "task/remove_old_snackbar")] = [
+        _gl_mr(5172, "SUPERAPP-10395: Remove old snackbar", "task/remove_old_snackbar", "me")
+    ]
+    env["gitlab"].events = [
+        _ev_push("task/remove_old_snackbar", "same behaviour", action_name="pushed new"),
+        _ev_push("task/remove_old_snackbar", "ktlint"),
+        _ev_push("develop", "Merge branch 'task/remove_old_snackbar' into 'develop'"),
+        {**_ev_push("task/remove_old_snackbar", ""), "action_name": "deleted",
+         "push_data": {"commit_count": 0, "action": "removed", "ref_type": "branch", "ref": "task/remove_old_snackbar"}},
+    ]
+    payload = await _get(env)
+    rows = _rows(payload)
+    assert rows["SUPERAPP-10395"]["sources"] == ["push"]
+    assert rows["SUPERAPP-10395"]["title"] == "Remove old snackbar"
+    assert payload["unkeyed"] is None
+    assert fake.calls.count(("branch", 10, "task/remove_old_snackbar")) == 1
+    env["app"].state.timesheet.events.clear()
+    await _get(env)
+    assert fake.calls.count(("branch", 10, "task/remove_old_snackbar")) == 1
+    assert fake.calls.count(("project", "10")) == 1
+
+
+async def test_merge_request_from_events_resolves_pushes_without_branch_search(env):
+    fake = env["fake_gitlab"]
+    fake.mrs[(10, 77)] = _gl_mr(77, "SUPERAPP-500: Gesture", "task/ios_back_gesture", "me")
+    env["gitlab"].events = [
+        _ev_push("task/ios_back_gesture", "Fix gesture", count=2),
+        _ev_mr("accepted", 77, "SUPERAPP-500: Gesture"),
+    ]
+    rows = _rows(await _get(env))
+    assert rows["SUPERAPP-500"]["sources"] == ["mr", "push"]
+    assert not any(call[0] == "branch" for call in env["fake_gitlab"].calls)
+
+
+async def test_unkeyed_branch_is_grouped_and_links_to_its_merge_request(env):
+    fake = env["fake_gitlab"]
+    fake.branch_mrs[(10, "task/cleanup")] = [_gl_mr(90, "Cleanup", "task/cleanup", "me")]
+    env["gitlab"].events = [_ev_push("task/cleanup", "one"), _ev_push("task/cleanup", "two"), _ev_push("task/lonely", "x")]
+    payload = await _get(env)
+    assert payload["unkeyed"]["items"] == [
+        {"title": "Cleanup", "url": "https://gitlab.example.com/g/p/-/merge_requests/90"},
+        {"title": "task/lonely", "url": None},
+    ]
+
+
+async def test_reviews_on_foreign_merge_requests_are_ignored(env):
+    fake = env["fake_gitlab"]
+    fake.mrs[(10, 6)] = _gl_mr(6, "SUPERAPP-10126: Their feature", "feature/SUPERAPP-10126", "colleague")
+    fake.mrs[(10, 8)] = _gl_mr(8, "Расширить скоупы источников для пропуска стадии скриншот тестов", "task/scopes", "colleague")
+    env["ctx"].conn.execute("UPDATE mr SET title = 'SUPERAPP-10349: Mine', author_username = 'me' WHERE iid = 1")
+    env["gitlab"].events = [
+        _ev_mr("approved", 6, "SUPERAPP-10126: Their feature"),
+        _ev_note(6, "SUPERAPP-10126: Their feature"),
+        _ev_mr("accepted", 6, "SUPERAPP-10126: Their feature"),
+        _ev_mr("approved", 8, "Расширить скоупы источников для пропуска стадии скриншот тестов"),
+        _ev_note(8, "Расширить скоупы источников для пропуска стадии скриншот тестов"),
+        _ev_note(1, "SUPERAPP-10349: Mine"),
+    ]
+    env["ctx"].config = env["ctx"].config.model_copy(update={"tracker": TrackerConfig(queues=["SUPERAPP"])})
+    payload = await _get(env)
+    rows = _rows(payload)
+    assert set(rows) == {"SUPERAPP-10349"}
+    assert rows["SUPERAPP-10349"]["sources"] == ["comment"]
+    assert payload["unkeyed"] is None
+    assert not any(call == ("mr", 10, 1) for call in fake.calls)
+
+
+async def test_review_events_are_ignored_when_the_author_cannot_be_resolved(env, caplog):
+    fake = env["fake_gitlab"]
+    fake.fail.add("mr")
+    env["gitlab"].events = [_ev_note(6, "SUPERAPP-10300: Something")]
+    env["ctx"].config = env["ctx"].config.model_copy(update={"tracker": TrackerConfig(queues=["SUPERAPP"])})
+    payload = await _get(env)
+    assert payload["rows"] == []
+    assert "merge request 10!6 lookup failed" in caplog.text
+
+
+async def test_review_events_are_ignored_when_my_username_is_unknown(env):
+    fake = env["fake_gitlab"]
+    fake.fail.add("user")
+    env["ctx"].conn.execute("UPDATE mr SET title = 'SUPERAPP-10349: Mine', author_username = 'me' WHERE iid = 1")
+    env["gitlab"].events = [_ev_note(1, "SUPERAPP-10349: Mine"), _ev_push("feature/SUPERAPP-1", "x")]
+    env["ctx"].config = env["ctx"].config.model_copy(update={"tracker": TrackerConfig(queues=["SUPERAPP"])})
+    rows = _rows(await _get(env))
+    assert set(rows) == {"SUPERAPP-1"}
+
+
+async def test_pushes_to_the_project_default_and_configured_branches_are_ignored(env):
+    fake = env["fake_gitlab"]
+    fake.default_branches[10] = "trunk"
+    env["gitlab"].events = [_ev_push("trunk", "SUPERAPP-1 direct"), _ev_push("stable/x", "SUPERAPP-2 fix"),
+                            _ev_push("hotfix/8.1", "SUPERAPP-3 fix")]
+    tracker = TrackerConfig(queues=["SUPERAPP"], ignored_push_branches=["stable/*"])
+    env["ctx"].config = env["ctx"].config.model_copy(update={"tracker": tracker})
+    rows = _rows(await _get(env))
+    assert set(rows) == {"SUPERAPP-3"}
+
+
+async def test_gitlab_lookup_failures_degrade_gracefully(env):
+    fake = env["fake_gitlab"]
+    fake.fail |= {"project", "branch"}
+    env["gitlab"].events = [_ev_push("task/x", "no key"), _ev_push("feature/SUPERAPP-1", "x")]
+    payload = await _get(env)
+    assert set(_rows(payload)) == {"SUPERAPP-1", "SUPERAPP-5"}
+    assert payload["unkeyed"]["items"] == [{"title": "task/x", "url": None}]
+
+
+async def test_gitlab_lookups_are_capped_per_request(env, monkeypatch):
+    monkeypatch.setattr("lpdev.web.timesheet_routes.MAX_GITLAB_LOOKUPS", 3)
+    env["gitlab"].events = [_ev_push(f"task/b{n}", "x") for n in range(10)]
+    await _get(env)
+    assert len([call for call in env["fake_gitlab"].calls if call[0] != "user"]) == 3

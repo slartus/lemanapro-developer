@@ -156,11 +156,20 @@ class TrackerConfig(BaseModel):
     day_hours: int = Field(default=8, ge=1, le=24)
     step_minutes: int = Field(default=30, ge=5, le=240)
     timezone: str = "Europe/Moscow"
+    ignored_push_branches: list[str] = ["develop", "main", "master", "release/*", "rc/*"]
 
     @field_validator("url")
     @classmethod
     def normalize_url(cls, value: str) -> str:
         return normalize_https_url(value)
+
+    @field_validator("ignored_push_branches")
+    @classmethod
+    def valid_branch_patterns(cls, value: list[str]) -> list[str]:
+        for pattern in value:
+            if not pattern.strip() or any(c.isspace() or not c.isprintable() for c in pattern):
+                raise ValueError(f"invalid branch pattern: {pattern!r}")
+        return list(dict.fromkeys(value))
 
     @field_validator("org_id")
     @classmethod

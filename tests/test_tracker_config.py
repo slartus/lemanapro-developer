@@ -123,3 +123,12 @@ async def test_settings_save_rejects_tracker_smuggled_through_review(ctx, tmp_pa
         response = await client.post("/settings", json=payload, headers={"X-Requested-With": "lpdev"})
     assert response.status_code == 400
     assert cfg.read_text(encoding="utf-8") == before
+
+
+def test_ignored_push_branches_default_and_validation():
+    assert TrackerConfig().ignored_push_branches == ["develop", "main", "master", "release/*", "rc/*"]
+    assert TrackerConfig(ignored_push_branches=["a", "a", "b/*"]).ignored_push_branches == ["a", "b/*"]
+    assert TrackerConfig(ignored_push_branches=[]).ignored_push_branches == []
+    for bad in ([""], [" "], ["a b"], ["x\n"]):
+        with pytest.raises(ValidationError):
+            TrackerConfig(ignored_push_branches=bad)
