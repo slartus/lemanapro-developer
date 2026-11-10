@@ -44,8 +44,11 @@ class StubApi:
         self.details: dict[tuple[int, int], dict] = {}
         self.notes: dict[tuple[int, int], list[dict]] = {}
         self.project_calls: list[tuple] = []
+        self.group_calls: list[tuple] = []
+        self.group_project_ids: set[int] = set()
         self.fail_todos = False
         self.fail_notes = False
+        self.fail_group = False
 
     async def get_user(self):
         return dict(self.user)
@@ -58,6 +61,12 @@ class StubApi:
     async def get_project_merge_requests(self, project_id: int, updated_after=None, state="opened"):
         self.project_calls.append((project_id, updated_after, state))
         return [m for m in self.mrs if m.get("project_id") == project_id]
+
+    async def get_group_merge_requests(self, group_path: str, updated_after=None, state="opened"):
+        self.group_calls.append((group_path, updated_after, state))
+        if self.fail_group:
+            raise GitlabApiError("group down", status=500)
+        return [m for m in self.mrs if m.get("project_id") in self.group_project_ids]
 
     async def get_mr_notes(self, project_id: int, iid: int):
         if self.fail_notes:
@@ -112,7 +121,7 @@ def _make_poller(conn, api, config=None, work_event=None, registry=None):
     return Poller(conn, api, config, mapping, work_event=work_event, registry=registry)
 
 
-async def test_todo_triggers_review_and_is_remembered(conn):
+async def test_todo_updates_table_and_is_remembered(conn):
     api = StubApi()
     api.details[(10, 5)] = _detail(10, 5, reviewers=["me"])
     api.todos = [{"id": 77, "target_type": "MergeRequest", "action_name": "mentioned",
@@ -121,12 +130,10 @@ async def test_todo_triggers_review_and_is_remembered(conn):
 
     created = await poller.tick()
 
-    assert created == 1
+    assert created == 0
     assert todo_seen_ids(conn) == {77}
-    reviews = list_reviews(conn)
-    assert len(reviews) == 1
-    assert reviews[0]["trigger"] == "new"
-    assert reviews[0]["agent"] == "agent-a"
+    assert list_reviews(conn) == []
+    assert _roles(conn, 5) == "mentioned,reviewer"
 
 
 async def test_todo_foreign_project_ignored(conn):
@@ -143,16 +150,15 @@ async def test_todo_foreign_project_ignored(conn):
     assert list_reviews(conn) == []
 
 
-async def test_full_scan_my_mr_triggers_review(conn):
+async def test_full_scan_my_mr_visible_in_table(conn):
     api = StubApi()
     api.mrs = [_mr(10, 1, author="me")]
     poller = _make_poller(conn, api)
 
     created = await poller.tick()
 
-    assert created == 1
-    reviews = list_reviews(conn)
-    assert reviews[0]["trigger"] == "new"
+    assert created == 0
+    assert any(m["iid"] == 1 for m in list_mrs(conn))
 
 
 async def test_full_scan_foreign_mr_no_review(conn):
@@ -166,30 +172,32 @@ async def test_full_scan_foreign_mr_no_review(conn):
     assert list_reviews(conn) == []
 
 
-async def test_full_scan_reviewer_mr_triggers_review(conn):
+async def test_full_scan_reviewer_role_saved(conn):
     api = StubApi()
     api.mrs = [_mr(10, 1, author="other", reviewers=["me"])]
     poller = _make_poller(conn, api)
 
-    assert await poller.tick() == 1
+    assert await poller.tick() == 0
+    assert _roles(conn, 1) == "reviewer"
 
 
-async def test_full_scan_mention_in_notes_triggers_review(conn):
+async def test_full_scan_mention_in_notes_role_saved(conn):
     api = StubApi()
     api.mrs = [_mr(10, 2, author="other", reviewers=[])]
     api.notes[(10, 2)] = [{"body": "посмотри пожалуйста @me"}]
     poller = _make_poller(conn, api)
 
-    assert await poller.tick() == 1
-    assert list_reviews(conn)[0]["trigger"] == "new"
+    assert await poller.tick() == 0
+    assert "mentioned" in _roles(conn, 2)
 
 
-async def test_full_scan_mention_in_description_triggers_review(conn):
+async def test_full_scan_mention_in_description_role_saved(conn):
     api = StubApi()
     api.mrs = [_mr(10, 3, author="other", reviewers=[], description="cc @me")]
     poller = _make_poller(conn, api)
 
-    assert await poller.tick() == 1
+    assert await poller.tick() == 0
+    assert "mentioned" in _roles(conn, 3)
 
 
 async def test_full_scan_mention_substring_not_matched(conn):
@@ -209,25 +217,6 @@ async def test_full_scan_notes_failure_not_fatal(conn):
 
     assert await poller.tick() == 0
     assert poll_state_get(conn, CURSOR_KEY) is not None
-
-
-async def test_push_re_review_flag(conn):
-    api = StubApi()
-    api.mrs = [_mr(10, 1, author="me")]
-    poller = _make_poller(conn, api, _config(re_review_on_push=False))
-    await poller.tick()
-    finish_review(conn, list_reviews(conn)[0]["id"], "done", review_md="ok")
-    api.mrs = [_mr(10, 1, sha="b" * 40, author="me")]
-    assert await poller.tick() == 0
-
-    api2 = StubApi()
-    api2.mrs = [_mr(10, 1, author="me")]
-    poller2 = _make_poller(conn, api2, _config(re_review_on_push=True))
-    await poller2.tick()
-    api2.mrs = [_mr(10, 1, sha="b" * 40, author="me")]
-    assert await poller2.tick() == 1
-    reviews = list_reviews(conn)
-    assert reviews[0]["trigger"] == "push"
 
 
 async def test_cursor_written_with_overlap(conn):
@@ -286,46 +275,22 @@ async def test_failed_todo_tick_creates_no_reviews(conn):
     assert list_reviews(conn) == []
 
 
-async def test_run_loop_records_error_and_clears_on_success(conn):
+async def test_refresh_job_records_error_and_clears_on_success(conn):
     api = StubApi()
     api.fail_todos = True
-    config = _config()
-    config = config.model_copy(
-        update={"gitlab": config.gitlab.model_copy(update={"poll_interval_sec": 1})}
-    )
     mapping = sync_projects(conn, [(10, "g/p", "agent-a", False, True)])
-    poller = Poller(conn, api, config, mapping)
+    poller = Poller(conn, api, _config(), mapping)
 
-    task = asyncio.create_task(poller.run())
-    await _wait_until(lambda: poll_state_get(conn, "poll_last_error") is not None)
-    task.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await task
+    await poller._refresh_job()
 
     assert poll_state_get(conn, "poll_last_error") is not None
     assert poll_state_get(conn, "poll_last_ok") is None
 
     api.fail_todos = False
-    task = asyncio.create_task(poller.run())
-    await _wait_until(lambda: poll_state_get(conn, "poll_last_ok") is not None)
-    task.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await task
+    await poller.refresh_now()
 
     assert poll_state_get(conn, "poll_last_error") is None
     assert poll_state_get(conn, "poll_last_ok") is not None
-
-
-async def test_work_event_set_on_new_reviews(conn):
-    api = StubApi()
-    api.mrs = [_mr(10, 1, author="me")]
-    work_event = asyncio.Event()
-    poller = _make_poller(conn, api, work_event=work_event)
-
-    await poller.tick()
-
-    assert work_event.is_set()
-    assert get_review(conn, 1)["status"] == "queued"
 
 
 async def test_full_scan_new_project_picked_up_later(conn):
@@ -333,7 +298,7 @@ async def test_full_scan_new_project_picked_up_later(conn):
     api.mrs = [_mr(10, 1, author="me")]
     poller = _make_poller(conn, api)
 
-    assert await poller.tick() == 1
+    assert await poller.tick() == 0
     calls = {"n": 0}
     original = api.get_project_merge_requests
 
@@ -356,9 +321,8 @@ async def test_full_scan_new_project_picked_up_later(conn):
     poller2 = Poller(conn, api, config, mapping)
 
     created = await poller2.tick()
-    assert created == 1
-    reviews = list_reviews(conn)
-    assert any(r["iid"] == 9 for r in reviews)
+    assert created == 0
+    assert any(m["iid"] == 9 for m in list_mrs(conn))
 
 
 async def test_sweep_picks_up_merged_state(conn):
@@ -762,21 +726,21 @@ async def test_mention_url_updated_to_latest(conn):
     assert _mention_url(conn) == MR_URL + "#note_2"
 
 
-async def test_mention_url_invalid_still_enqueues_review_and_marks_todo(conn):
+async def test_mention_url_invalid_still_marks_todo(conn):
     for i, bad in enumerate(["https://gitlab.example.com＃/g", "https://[abc/g/p"], start=1):
         await _tick_with_target_url(conn, bad, todo_id=i)
     assert _mention_url(conn) is None
-    assert len(list_reviews(conn)) == 1
+    assert list_reviews(conn) == []
     assert todo_seen_ids(conn) == {1, 2}
 
 
-async def test_mention_url_save_failure_does_not_block_review(conn, monkeypatch):
+async def test_mention_url_save_failure_does_not_block_todo(conn, monkeypatch):
     def boom(*args, **kwargs):
         raise RuntimeError("db")
 
     monkeypatch.setattr("lpdev.poller.set_mention_url", boom)
     await _tick_with_target_url(conn, MR_URL + "#note_9")
-    assert len(list_reviews(conn)) == 1
+    assert list_reviews(conn) == []
     assert todo_seen_ids(conn) == {1}
 
 
@@ -914,8 +878,10 @@ async def test_head_change_via_todo_does_not_duplicate_reviews(conn):
     api.todos = [{"id": 1, "target_type": "MergeRequest", "action_name": "review_requested",
                   "target": {"project_id": 10, "iid": 5}}]
     poller = _make_poller(conn, api, registry=registry)
-    assert await poller.tick() == 1
-    review_id = claim_next_review(conn)["id"]
+    assert await poller.tick() == 0
+    mr_id = conn.execute("SELECT id FROM mr WHERE iid = 5").fetchone()["id"]
+    review_id = create_review(conn, mr_id, "manual", "a" * 40, "agent-a")
+    claim_next_review(conn)
 
     api.details[(10, 5)] = _detail(10, 5, sha="b" * 40, reviewers=["me"])
     api.todos.append({"id": 2, "target_type": "MergeRequest", "action_name": "mentioned",
@@ -999,11 +965,12 @@ async def test_draft_sweep_new_and_push_do_not_enqueue(conn):
 async def test_missing_draft_field_is_not_draft(conn):
     api = StubApi()
     api.mrs = [_draft(_mr(10, 1, author="me"), None)]
-    assert await _make_poller(conn, api).tick() == 1
-    assert [r["trigger"] for r in list_reviews(conn)] == ["new"]
+    assert await _make_poller(conn, api).tick() == 0
+    assert list_reviews(conn) == []
+    assert _is_draft(conn, 1) == 0
 
 
-async def test_draft_to_ready_enqueues_review(conn):
+async def test_draft_to_ready_updates_table(conn):
     api = StubApi()
     work_event = asyncio.Event()
     api.mrs = [_draft(_mr(10, 1, author="me"))]
@@ -1011,13 +978,11 @@ async def test_draft_to_ready_enqueues_review(conn):
     assert await poller.tick() == 0
 
     api.mrs = [_draft(_mr(10, 1, author="me", updated_at="2026-01-02T12:00:00Z"), False)]
-    assert await poller.tick() == 1
+    assert await poller.tick() == 0
 
-    reviews = list_reviews(conn)
-    assert [(r["trigger"], r["head_sha"], r["status"]) for r in reviews] == [
-        ("new", "a" * 40, "queued")
-    ]
-    assert work_event.is_set()
+    assert list_reviews(conn) == []
+    assert not work_event.is_set()
+    assert _is_draft(conn, 1) == 0
 
 
 async def test_draft_to_ready_skips_irrelevant_or_reviewed_head(conn):
@@ -1037,7 +1002,7 @@ async def test_draft_to_ready_skips_irrelevant_or_reviewed_head(conn):
     assert [r["id"] for r in list_reviews(conn)] == [review_id]
 
 
-async def test_draft_to_ready_with_review_history_enqueues(conn):
+async def test_draft_to_ready_with_review_history_does_not_re_review(conn):
     api = StubApi()
     api.mrs = [_draft(_mr(10, 1, author="other"))]
     poller = _make_poller(conn, api)
@@ -1047,12 +1012,11 @@ async def test_draft_to_ready_with_review_history_enqueues(conn):
     finish_review(conn, old, "done", review_md="ok")
 
     api.mrs = [_draft(_mr(10, 1, author="other", updated_at="2026-01-02T12:00:00Z"), False)]
-    assert await poller.tick() == 1
-    fresh = [r for r in list_reviews(conn) if r["head_sha"] == "a" * 40]
-    assert [r["trigger"] for r in fresh] == ["new"]
+    assert await poller.tick() == 0
+    assert [r["id"] for r in list_reviews(conn)] == [old]
 
 
-async def test_draft_to_ready_via_todo_enqueues_once(conn):
+async def test_draft_to_ready_via_todo_updates_once(conn):
     api = StubApi()
     api.details[(10, 5)] = _draft(_detail(10, 5, reviewers=["me"]))
     api.todos = [{"id": 1, "target_type": "MergeRequest", "action_name": "review_requested",
@@ -1063,8 +1027,9 @@ async def test_draft_to_ready_via_todo_enqueues_once(conn):
     api.details[(10, 5)] = _draft(_detail(10, 5, reviewers=["me"]), False)
     api.todos.append({"id": 2, "target_type": "MergeRequest", "action_name": "mentioned",
                       "target": {"project_id": 10, "iid": 5}})
-    assert await poller.tick() == 1
-    assert [r["trigger"] for r in list_reviews(conn)] == ["new"]
+    assert await poller.tick() == 0
+    assert list_reviews(conn) == []
+    assert todo_seen_ids(conn) == {1, 2}
 
 
 async def test_ready_to_draft_cancels_active_reviews(conn):
@@ -1140,21 +1105,6 @@ async def test_push_review_after_cancel_is_deferred(conn):
     assert claim_next_review(conn) is None
 
 
-async def test_re_review_on_push_is_deferred(conn):
-    api = StubApi()
-    api.mrs = [_mr(10, 1, author="me")]
-    poller = _make_poller(conn, api, _debounce_config(300, re_review_on_push=True))
-    await poller.tick()
-    finish_review(conn, list_reviews(conn)[0]["id"], "done", review_md="ok")
-
-    api.mrs = [_mr(10, 1, sha="b" * 40, author="me")]
-    assert await poller.tick() == 1
-
-    fresh = list_reviews(conn)[0]
-    assert fresh["trigger"] == "push"
-    assert 290 < _delay_sec(fresh) <= 300
-
-
 async def test_repeated_push_moves_queued_review_start_forward(conn):
     api = StubApi()
     poller, mr_id = await _seen_foreign_mr(conn, api, FakeRegistry())
@@ -1190,18 +1140,102 @@ async def test_zero_debounce_does_not_defer(conn):
     assert get_review(conn, queued)["head_sha"] == "b" * 40
 
 
-async def test_new_and_ready_reviews_are_not_deferred(conn):
+async def test_request_refresh_single_flight(conn):
     api = StubApi()
-    api.details[(10, 5)] = _detail(10, 5, reviewers=["me"])
-    api.todos = [{"id": 1, "target_type": "MergeRequest", "action_name": "mentioned",
-                  "target": {"project_id": 10, "iid": 5}}]
-    api.mrs = [_draft(_mr(10, 1, author="me"))]
-    poller = _make_poller(conn, api, _debounce_config(300))
-    await poller.tick()
+    mapping = sync_projects(conn, [(10, "g/p", "agent-a", False, True)])
+    poller = Poller(conn, api, _config(), mapping)
 
-    api.mrs = [_draft(_mr(10, 1, author="me", updated_at="2026-01-02T12:00:00Z"), False)]
-    await poller.tick()
+    started = asyncio.Event()
+    release = asyncio.Event()
 
-    reviews = list_reviews(conn)
-    assert sorted(r["trigger"] for r in reviews) == ["new", "new"]
-    assert all(r["not_before"] is None for r in reviews)
+    async def slow_todos():
+        started.set()
+        await release.wait()
+        return []
+
+    api.get_todos = slow_todos
+
+    assert poller.request_refresh() is True
+    task = poller._refresh_task
+    await _wait_until(lambda: started.is_set())
+    assert poller.request_refresh() is False
+    assert poller.request_refresh(force=True) is False
+
+    release.set()
+    await task
+    assert poller._refresh_task is None
+
+
+async def test_request_refresh_respects_gap(conn):
+    api = StubApi()
+    mapping = sync_projects(conn, [(10, "g/p", "agent-a", False, True)])
+    poller = Poller(conn, api, _config(), mapping)
+
+    loop = asyncio.get_running_loop()
+    poller._last_refresh = loop.time() - 120.0
+    assert poller.request_refresh() is True
+    await poller._refresh_task
+    assert poller.request_refresh() is False
+
+    poller._last_refresh = loop.time() - 30.0
+    assert poller.request_refresh() is False
+    poller._last_refresh = loop.time() - 61.0
+    assert poller.request_refresh() is True
+    await poller._refresh_task
+
+
+async def test_group_sweep_single_request_for_two_projects(conn):
+    api = StubApi()
+    api.group_project_ids = {10, 20}
+    api.mrs = [
+        _mr(10, 1, author="me"),
+        _mr(20, 2, author="other", reviewers=["me"]),
+        _mr(30, 3, author="me"),
+    ]
+    mapping = sync_projects(conn, [(10, "g/p", "agent-a", False, True), (20, "g/p2", "agent-a", True, True)])
+    poller = Poller(conn, api, _config(), mapping)
+
+    # инициализация курсоров
+    await poller.tick()
+    api.mrs = [
+        _mr(10, 1, author="me", updated_at="2026-01-02T12:00:00Z"),
+        _mr(20, 2, author="other", reviewers=["me"], updated_at="2026-01-02T12:00:00Z"),
+    ]
+    created = await poller.tick()
+
+    assert created == 0
+    assert len(api.group_calls) == 1
+    group_path, updated_after, state = api.group_calls[0]
+    assert group_path == "g"
+    assert updated_after is not None
+    assert state is None
+    assert any(m["iid"] == 1 for m in list_mrs(conn))
+    assert any(m["iid"] == 2 for m in list_mrs(conn))
+    assert not any(m["iid"] == 3 for m in list_mrs(conn))
+
+
+async def test_group_sweep_falls_back_to_per_project_on_error(conn):
+    api = StubApi()
+    api.group_project_ids = {10, 20}
+    api.fail_group = True
+    api.mrs = [
+        _mr(10, 1, author="me"),
+        _mr(20, 2, author="other", reviewers=["me"]),
+    ]
+    mapping = sync_projects(conn, [(10, "g/p", "agent-a", False, True), (20, "g/p2", "agent-a", True, True)])
+    poller = Poller(conn, api, _config(), mapping)
+
+    await poller.tick()
+    api.group_calls.clear()
+    api.project_calls.clear()
+    api.mrs = [
+        _mr(10, 1, author="me", updated_at="2026-01-02T12:00:00Z"),
+        _mr(20, 2, author="other", reviewers=["me"], updated_at="2026-01-02T12:00:00Z"),
+    ]
+    created = await poller.tick()
+
+    assert created == 0
+    assert len(api.group_calls) == 1
+    assert [c[0] for c in api.project_calls] == [10, 20]
+    assert any(m["iid"] == 1 for m in list_mrs(conn))
+    assert any(m["iid"] == 2 for m in list_mrs(conn))

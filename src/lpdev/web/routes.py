@@ -90,6 +90,12 @@ def _ctx(request: Request):
 async def index(request: Request):
     ctx = _ctx(request)
     gitlab_url = ctx.config.gitlab.url
+    poller = getattr(request.app.state, "poller", None)
+    if poller is not None:
+        poller.request_refresh()
+    radar = getattr(request.app.state, "radar", None)
+    if radar is not None:
+        radar.request_refresh()
     initial = {
         "gitlabUrl": gitlab_url,
         "mrs": [_mr_payload(row, gitlab_url) for row in list_mrs(ctx.conn)],
@@ -283,7 +289,11 @@ async def start_mr_review(request: Request, gitlab_project_id: int, iid: int):
     if mr is None and detail is not None and detail.get("state") not in (None, "opened"):
         return PlainTextResponse("MR не открыт", status_code=409)
     if mr is None:
-        return PlainTextResponse("MR ещё не загружен, попробуй через минуту", status_code=409)
+        if poller is not None:
+            poller.request_refresh(force=True)
+        return PlainTextResponse(
+            "в таблице нет этого MR — сначала нажми «Проверить сейчас» и повтори", status_code=409
+        )
     active = ctx.conn.execute(
         f"SELECT id FROM review WHERE mr_id = ? AND status IN ({','.join('?' * len(ACTIVE_STATUSES))})"
         " ORDER BY id DESC LIMIT 1",
@@ -451,10 +461,10 @@ def _apply_config(request: Request, config: Config, force_radar: bool = False):
     poller = getattr(request.app.state, "poller", None)
     if poller is not None:
         poller.reload(config, mapping)
-        poller.wake()
+        poller.request_refresh(force=force_radar)
     radar = getattr(request.app.state, "radar", None)
     if radar is not None and (force_radar or radar_changed):
-        radar.wake()
+        radar.request_refresh(force=force_radar)
 
 
 def _list_agents() -> list[str]:
@@ -556,10 +566,7 @@ async def settings_save(request: Request):
     if not isinstance(raw, dict) or not isinstance(raw.get("gitlab"), dict):
         return PlainTextResponse("config.yaml повреждён, правки не сохранены", status_code=400)
     previous_projects = raw.get("projects")
-    gitlab = body.get("gitlab") if isinstance(body.get("gitlab"), dict) else {}
     review = body.get("review") if isinstance(body.get("review"), dict) else {}
-    if "poll_interval_sec" in gitlab:
-        raw["gitlab"]["poll_interval_sec"] = gitlab["poll_interval_sec"]
     if review:
         review_section = raw.setdefault("review", {})
         if isinstance(review_section, dict):

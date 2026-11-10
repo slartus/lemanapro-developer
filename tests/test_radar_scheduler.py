@@ -12,7 +12,6 @@ from lpdev.config import RadarConfig
 from lpdev.db import radar_snapshot_get
 from lpdev.main import create_app
 from lpdev.radar_scheduler import (
-    FAST_REFRESH_SEC,
     RUNNER_PATH,
     RadarRunnerError,
     RadarScheduler,
@@ -48,7 +47,7 @@ def _scheduler(ctx, runner, clock=None, **radar):
     ctx_obj, _ = ctx
     ctx_obj.config = ctx_obj.config.model_copy(update={"radar": RadarConfig(**radar)})
     return RadarScheduler(
-        ctx_obj.conn, lambda: ctx_obj.config, API_BASE, "secret", runner=runner, clock=clock, startup_delay_sec=0
+        ctx_obj.conn, lambda: ctx_obj.config, API_BASE, "secret", runner=runner, clock=clock
     )
 
 
@@ -102,59 +101,54 @@ async def test_success_clears_the_previous_error(ctx):
     assert row["error"] is None and row["failed_at"] is None
 
 
-def test_fast_refresh_while_ci_runs_for_at_most_an_hour(ctx):
+async def test_request_refresh_is_deduplicated_and_respects_the_gap(ctx):
     now = [1000.0]
-    scheduler = _scheduler(ctx, FakeRunner(), clock=lambda: now[0], interval_minutes=5)
-    radar = ctx[0].config.radar
-    assert scheduler._next_delay(False, radar) == 300
-    assert scheduler._next_delay(True, radar) == FAST_REFRESH_SEC
-    now[0] += 3599
-    assert scheduler._next_delay(True, radar) == FAST_REFRESH_SEC
-    now[0] += 2
-    assert scheduler._next_delay(True, radar) == 300
-    assert scheduler._next_delay(False, radar) == 300
-    assert scheduler._next_delay(True, radar) == FAST_REFRESH_SEC
-
-
-def test_fast_refresh_can_be_disabled_and_never_exceeds_the_interval(ctx):
-    scheduler = _scheduler(ctx, FakeRunner(), clock=lambda: 0.0, interval_minutes=1, fast_refresh_while_ci=False)
-    assert scheduler._next_delay(True, ctx[0].config.radar) == 60
-
-
-async def test_wake_during_a_refresh_triggers_exactly_one_more(ctx):
-    started = asyncio.Event()
     release = asyncio.Event()
+    started = asyncio.Event()
+
+    async def runner(payload, radar):
+        started.set()
+        await release.wait()
+        return _ok()
+
+    scheduler = _scheduler(ctx, runner, clock=lambda: now[0])
+    assert scheduler.request_refresh() is True
+    await started.wait()
+    assert scheduler.request_refresh(force=True) is False
+    release.set()
+    for _ in range(20):
+        await asyncio.sleep(0)
+    now[0] += 60
+    assert scheduler.request_refresh() is False
+    now[0] += 60.1
+    assert scheduler.request_refresh() is True
+
+
+async def test_request_refresh_force_bypasses_the_gap(ctx):
+    now = [1000.0]
+    scheduler = _scheduler(ctx, FakeRunner(_ok(), _ok()), clock=lambda: now[0])
+    assert scheduler.request_refresh() is True
+    for _ in range(20):
+        await asyncio.sleep(0)
+    now[0] += 1
+    assert scheduler.request_refresh() is False
+    assert scheduler.request_refresh(force=True) is True
+
+
+async def test_unexpected_runner_error_is_logged_not_raised(ctx):
     calls = []
 
     async def runner(payload, radar):
         calls.append(payload)
-        if len(calls) == 1:
-            started.set()
-            await release.wait()
-        return _ok()
+        raise ValueError("boom")
 
     scheduler = _scheduler(ctx, runner)
-    task = asyncio.create_task(scheduler.run())
-    await started.wait()
-    scheduler.wake()
-    scheduler.wake()
-    release.set()
-    for _ in range(50):
+    assert scheduler.request_refresh() is True
+    for _ in range(20):
         await asyncio.sleep(0)
-    task.cancel()
-    await asyncio.gather(task, return_exceptions=True)
-    assert len(calls) == 2
-
-
-async def test_disabled_radar_does_not_refresh(ctx):
-    runner = FakeRunner()
-    scheduler = _scheduler(ctx, runner, enabled=False)
-    task = asyncio.create_task(scheduler.run())
-    for _ in range(10):
-        await asyncio.sleep(0)
-    task.cancel()
-    await asyncio.gather(task, return_exceptions=True)
-    assert runner.payloads == []
+    assert scheduler._refresh_task is None
+    assert scheduler.request_refresh() is False
+    assert scheduler.request_refresh(force=True) is True
 
 
 def _script(tmp_path: Path, body: str) -> RadarConfig:
@@ -220,28 +214,6 @@ async def test_node_runner_reports_a_binary_that_cannot_start(tmp_path):
     broken.chmod(0o755)
     with pytest.raises(RadarRunnerError, match="не удалось запустить node"):
         await run_node_runner({}, RadarConfig(node_bin=str(broken)))
-
-
-async def test_unexpected_errors_do_not_stop_the_loop(ctx):
-    calls = []
-
-    async def runner(payload, radar):
-        calls.append(payload)
-        if len(calls) == 1:
-            raise ValueError("boom")
-        return _ok()
-
-    scheduler = _scheduler(ctx, runner)
-    task = asyncio.create_task(scheduler.run())
-    for _ in range(20):
-        await asyncio.sleep(0)
-    scheduler.wake()
-    for _ in range(50):
-        await asyncio.sleep(0)
-    task.cancel()
-    await asyncio.gather(task, return_exceptions=True)
-    assert len(calls) == 2
-    assert radar_snapshot_get(ctx[0].conn)["error"] is None
 
 
 async def test_result_is_dropped_when_settings_change_during_the_refresh(ctx):

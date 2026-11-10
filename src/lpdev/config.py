@@ -56,7 +56,9 @@ class GitlabConfig(BaseModel):
     model_config = {"extra": "forbid"}
 
     url: str
-    poll_interval_sec: int = Field(default=60, ge=1)
+    # Background polling removed (on-demand only). The field is kept for config
+    # compatibility; the value is accepted but ignored. 0 means "off".
+    poll_interval_sec: int = Field(default=0, ge=0)
     pat_command: str = DEFAULT_PAT_COMMAND
 
     @field_validator("url")
@@ -128,7 +130,9 @@ class RadarConfig(BaseModel):
     model_config = {"extra": "forbid"}
 
     enabled: bool = True
-    interval_minutes: int = Field(default=5, ge=1, le=120)
+    # Background refresh removed (on-demand only). The field is kept for config
+    # compatibility; the value is accepted but ignored. 0 means "off".
+    interval_minutes: int = Field(default=0, ge=0, le=120)
     fast_refresh_while_ci: bool = True
     project_filter_mode: Literal["all", "selected"] = "all"
     selected_project_ids: list[int] = []

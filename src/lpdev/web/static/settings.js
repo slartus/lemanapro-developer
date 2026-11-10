@@ -68,17 +68,11 @@ function renderProject(project) {
   }, !selected || (!project.maintainer && !project.radar), `${project.key}:radar`);
   radar.title = radarTitle;
   const review = checkbox('wreview', `Авторевью: ${project.path}`, Boolean(project.review), (value) => {
-    project.review = value ? { agent: DEFAULT_AGENT, push: false } : null;
+    project.review = value ? { agent: DEFAULT_AGENT } : null;
     render();
   }, false, `${project.key}:review`);
   const extra = project.review
-    ? el('span', { className: 'review-opts' }, [
-        agentSelect(project),
-        el('label', { className: 'small' }, [
-          checkbox('wpush', `Ревью на push: ${project.path}`, project.review.push, (value) => (project.review.push = value), false, `${project.key}:push`),
-          el('span', { text: ' ревью на push' }),
-        ]),
-      ])
+    ? el('span', { className: 'review-opts' }, [agentSelect(project)])
     : null;
   return el('div', { className: 'tree-row', attrs: { 'data-project-id': project.key } }, [
     el('span', { className: 'tree-name' }, [
@@ -206,13 +200,11 @@ async function save() {
   const button = $('save');
   if (button.disabled) return;
   const values = {
-    poll_interval_sec: readInt('poll_interval_sec', 1),
     max_parallel: readInt('max_parallel', 1),
     timeout_sec: readInt('timeout_sec', 1),
     clone_depth: readInt('clone_depth', 1),
     workspace_ttl_days: readInt('workspace_ttl_days', 1),
     push_debounce_sec: readInt('push_debounce_sec', 0),
-    interval_minutes: readInt('radar-interval', 1, 120),
     approval_threshold: readInt('radar-threshold', 0, 20),
   };
   if (Object.values(values).some((value) => value === null)) {
@@ -229,7 +221,6 @@ async function save() {
     return;
   }
   const payload = {
-    gitlab: { poll_interval_sec: values.poll_interval_sec },
     review: {
       max_parallel: values.max_parallel,
       timeout_sec: values.timeout_sec,
@@ -240,8 +231,6 @@ async function save() {
     projects: review,
     radar: {
       enabled: $('radar-enabled').checked,
-      interval_minutes: values.interval_minutes,
-      fast_refresh_while_ci: $('radar-fast').checked,
       project_filter_mode: radarSelectedMode() ? 'selected' : 'all',
       selected_project_ids: radarIds,
       ignored_check_names: parseCheckNames($('radar-ignored').value),

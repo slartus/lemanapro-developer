@@ -225,14 +225,12 @@ def create_app(ctx: AppContext, port: int = DEFAULT_PORT, timesheet_only: bool =
         app.state.radar = radar
         poller = Poller(
             ctx.conn, ctx.api, ctx.config, ctx.project_ids, work_event, registry=registry,
-            on_mr_updated=radar.notify_mr_updated,
         )
         app.state.poller = poller
         app.state.work_event = work_event
         worker_count = ctx.config.review.max_parallel
         app.state.worker_count = worker_count
-        tasks = [asyncio.create_task(poller.run(), name="lpdev-poller")]
-        tasks.extend(start_workers(
+        tasks = list(start_workers(
             worker_count, ctx.conn, ctx.api, ctx.config,
             ctx.paths, work_event, config_provider=lambda: ctx.config,
             registry=registry,
@@ -246,13 +244,11 @@ def create_app(ctx: AppContext, port: int = DEFAULT_PORT, timesheet_only: bool =
         tasks.append(
             asyncio.create_task(question_worker.run(), name="lpdev-question-worker")
         )
-        tasks.append(asyncio.create_task(radar.run(), name="lpdev-radar"))
         tasks.append(asyncio.create_task(_backup_loop(ctx), name="lpdev-backup"))
         for task in tasks:
             _supervise(task)
         app.state.tasks = tasks
-        logger.info("started: %s workers, poll interval %ss",
-                    worker_count, ctx.config.gitlab.poll_interval_sec)
+        logger.info("started: %s workers (on-demand: no background GitLab polling)", worker_count)
         yield
         for task in tasks:
             task.cancel()

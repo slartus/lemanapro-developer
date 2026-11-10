@@ -18,7 +18,6 @@ from lpdev.db import (
     MrUpsertResult,
     cancel_draft_reviews,
     create_review,
-    mr_wants_review,
     poll_state_delete,
     review_exists_for_head,
     poll_state_get,
@@ -36,7 +35,7 @@ from lpdev.worker import ReviewRegistry
 logger = logging.getLogger(__name__)
 
 CURSOR_OVERLAP_SEC = 120
-ERROR_PAUSE_SEC = 5.0
+MIN_REFRESH_GAP_SEC = 60.0
 MENTION_ACTIONS = ("mentioned", "directly_addressed")
 
 
@@ -66,34 +65,45 @@ class Poller:
         self._work_event = work_event
         self._registry = registry
         self._me: dict[str, Any] | None = None
-        self._wake = asyncio.Event()
+        self._refresh_task: asyncio.Task | None = None
+        self._last_refresh: float | None = None
         self._on_mr_updated = on_mr_updated
 
-    async def run(self) -> None:
-        while True:
-            self._wake.clear()
-            try:
-                await self.tick()
-                poll_state_set(self._conn, "poll_last_ok", datetime.now(UTC).isoformat())
-                poll_state_delete(self._conn, "poll_last_error")
-            except Exception as exc:
-                logger.exception("poll tick failed")
-                try:
-                    poll_state_set(self._conn, "poll_last_error", f"{type(exc).__name__}: {exc}")
-                except Exception:
-                    logger.exception("failed to record poll error")
-                    await asyncio.sleep(ERROR_PAUSE_SEC)
-            if self._wake.is_set():
-                continue
-            try:
-                await asyncio.wait_for(
-                    self._wake.wait(), timeout=self._config.gitlab.poll_interval_sec
-                )
-            except asyncio.TimeoutError:
-                pass
+    def request_refresh(self, force: bool = False) -> bool:
+        """Schedule one poll tick in the background (on-demand mode).
 
-    def wake(self) -> None:
-        self._wake.set()
+        Returns False when a refresh is already running or the minimal
+        gap between refreshes has not elapsed yet (unless force=True).
+        """
+        if self._refresh_task is not None and not self._refresh_task.done():
+            return False
+        loop = asyncio.get_running_loop()
+        if not force and self._last_refresh is not None:
+            if loop.time() - self._last_refresh < MIN_REFRESH_GAP_SEC:
+                return False
+        self._refresh_task = loop.create_task(self._refresh_job())
+        return True
+
+    async def refresh_now(self) -> None:
+        if self._refresh_task is not None and not self._refresh_task.done():
+            await self._refresh_task
+            return
+        await self._refresh_job()
+
+    async def _refresh_job(self) -> None:
+        try:
+            await self.tick()
+            poll_state_set(self._conn, "poll_last_ok", datetime.now(UTC).isoformat())
+            poll_state_delete(self._conn, "poll_last_error")
+        except Exception as exc:
+            logger.exception("poll tick failed")
+            try:
+                poll_state_set(self._conn, "poll_last_error", f"{type(exc).__name__}: {exc}")
+            except Exception:
+                logger.exception("failed to record poll error")
+        finally:
+            self._last_refresh = asyncio.get_running_loop().time()
+            self._refresh_task = None
 
     def reload(self, config: Config, project_ids: dict[int, int]) -> None:
         self._config = config
@@ -123,10 +133,6 @@ class Poller:
         if row is None:
             raise RuntimeError(f"project db row missing: {project_db_id}")
         return row["agent"]
-
-    def _re_review_on_push(self, project_db_id: int) -> bool:
-        row = get_project_row(self._conn, project_db_id)
-        return bool(row["re_review_on_push"]) if row is not None else False
 
     def _upsert(
         self,
@@ -189,13 +195,7 @@ class Poller:
     ) -> int | None:
         if result.became_draft:
             self._cancel_for_draft(result.mr_id, mr)
-        superseded = self._supersede_stale(result, mr, project_db_id)
-        if not result.became_ready:
-            return superseded
-        ready = self._enqueue_ready(result, mr, project_db_id)
-        if not ready:
-            return superseded
-        return (superseded or 0) + ready
+        return self._supersede_stale(result, mr, project_db_id)
 
     def _cancel_for_draft(self, mr_id: int, mr: dict[str, Any]) -> None:
         outcome = cancel_draft_reviews(self._conn, mr_id)
@@ -208,17 +208,6 @@ class Poller:
         if self._registry is not None:
             for review_id in outcome.cancelled_active:
                 self._registry.cancel(review_id)
-
-    def _enqueue_ready(
-        self, result: MrUpsertResult, mr: dict[str, Any], project_db_id: int
-    ) -> int:
-        if mr.get("state") not in (None, "opened"):
-            return 0
-        if not mr_wants_review(self._conn, result.mr_id):
-            return 0
-        if review_exists_for_head(self._conn, result.mr_id, mr["sha"]):
-            return 0
-        return self._enqueue(result.mr_id, "new", mr, project_db_id)
 
     def _enqueue(self, mr_id: int, trigger: str, mr: dict[str, Any], project_db_id: int) -> int:
         if parse_draft(mr) is True:
@@ -304,12 +293,7 @@ class Poller:
                     set_mention_url(self._conn, result.mr_id, mention_url)
             except Exception:
                 logger.exception("failed to save mention url for todo %s", todo.get("id"))
-        if superseded is not None:
-            return superseded
-        is_reviewer = self._username() in _reviewer_usernames(detail)
-        if result.inserted or mentioned or is_reviewer:
-            return self._enqueue(result.mr_id, "new", detail, project_db_id)
-        return 0
+        return superseded or 0
 
     async def _full_scan(self, scanned: set[int]) -> int:
         created = 0
@@ -349,11 +333,7 @@ class Poller:
         if result is None:
             return 0
         superseded = self._reconcile(result, mr, project_db_id)
-        if superseded is not None:
-            return superseded
-        if (mine or mentioned) and mr.get("state") in (None, "opened"):
-            return self._enqueue(result.mr_id, "new", mr, project_db_id)
-        return 0
+        return superseded or 0
 
     def _advance_cursor(
         self,
@@ -396,7 +376,7 @@ class Poller:
 
     async def _sweep_merge_requests(self, scanned: set[int]) -> tuple[int, Exception | None]:
         created = 0
-        first_error: Exception | None = None
+        pending: list[tuple[int, int, str]] = []
         for gitlab_pid, project_db_id in self._project_ids.items():
             if gitlab_pid in scanned:
                 continue
@@ -408,24 +388,69 @@ class Poller:
                     (datetime.now(UTC) - timedelta(seconds=CURSOR_OVERLAP_SEC)).isoformat(),
                 )
                 continue
+            pending.append((gitlab_pid, project_db_id, cursor))
+        if not pending:
+            return 0, None
+        group_path = self._common_group(pending)
+        error: Exception | None = None
+        if group_path is not None:
+            try:
+                mrs = await self._api.get_group_merge_requests(
+                    group_path, updated_after=min(cursor for _, _, cursor in pending), state=None
+                )
+            except Exception:
+                logger.exception("group sweep failed for %s, falling back per project", group_path)
+            else:
+                for gitlab_pid, project_db_id, cursor in pending:
+                    project_mrs = [mr for mr in mrs if mr.get("project_id") == gitlab_pid]
+                    created += self._sweep_project(gitlab_pid, project_db_id, project_mrs)
+                return created, None
+        for gitlab_pid, project_db_id, cursor in pending:
             try:
                 mrs = await self._api.get_project_merge_requests(
                     gitlab_pid, updated_after=cursor, state=None
                 )
             except Exception as exc:
                 logger.exception("sweep failed for project %s", gitlab_pid)
-                first_error = first_error or exc
+                error = exc
                 continue
-            for mr in mrs:
-                try:
-                    updated = self._is_update_of_known(project_db_id, mr)
-                    created += self._sweep_one(project_db_id, mr)
-                    if updated and self._on_mr_updated is not None:
-                        self._on_mr_updated(gitlab_pid, mr["iid"])
-                except Exception:
-                    logger.exception("sweep: MR %s/%s failed", gitlab_pid, mr.get("iid"))
-            self._advance_cursor(gitlab_pid, mrs)
-        return created, first_error
+            created += self._sweep_project(gitlab_pid, project_db_id, mrs)
+        return created, error
+
+    def _sweep_project(
+        self, gitlab_pid: int, project_db_id: int, mrs: list[dict[str, Any]]
+    ) -> int:
+        created = 0
+        for mr in mrs:
+            try:
+                updated = self._is_update_of_known(project_db_id, mr)
+                created += self._sweep_one(project_db_id, mr)
+                if updated and self._on_mr_updated is not None:
+                    self._on_mr_updated(gitlab_pid, mr["iid"])
+            except Exception:
+                logger.exception("sweep: MR %s/%s failed", gitlab_pid, mr.get("iid"))
+        self._advance_cursor(gitlab_pid, mrs)
+        return created
+
+    def _common_group(self, pending: list[tuple[int, int, str]]) -> str | None:
+        """Longest common group path for 2+ pending projects, or None."""
+        if len(pending) < 2:
+            return None
+        paths: list[str] = []
+        for _, project_db_id, _ in pending:
+            row = get_project_row(self._conn, project_db_id)
+            if row is None or not row["path_with_namespace"]:
+                return None
+            paths.append(row["path_with_namespace"])
+        segments = [path.split("/") for path in paths]
+        common: list[str] = []
+        for group in zip(*segments):
+            if len(set(group)) != 1:
+                break
+            common.append(group[0])
+        if len(common) >= len(segments[0]):
+            common = common[:-1]
+        return "/".join(common) if common else None
 
     def _is_update_of_known(self, project_db_id: int, mr: dict[str, Any]) -> bool:
         pair = self._stored_and_incoming(project_db_id, mr)
@@ -487,25 +512,7 @@ class Poller:
         result = self._upsert(project_db_id, mr)
         if result is None:
             return 0
-        superseded = self._reconcile(result, mr, project_db_id)
-        if superseded is not None:
-            return superseded
-        username = self._username()
-        mine = _author(mr).get("username") == username or username in _reviewer_usernames(mr)
-        opened = mr.get("state") in (None, "opened")
-        if result.inserted and mine and opened:
-            return self._enqueue(result.mr_id, "new", mr, project_db_id)
-        if (
-            not result.inserted
-            and result.head_sha_changed
-            and self._re_review_on_push(project_db_id)
-            and mine
-            and opened
-        ):
-            if review_exists_for_head(self._conn, result.mr_id, mr["sha"]):
-                return 0
-            return self._enqueue(result.mr_id, "push", mr, project_db_id)
-        return 0
+        return self._reconcile(result, mr, project_db_id) or 0
 
     def _username(self) -> str:
         if self._me is None:

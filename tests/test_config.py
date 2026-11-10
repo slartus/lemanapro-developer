@@ -29,7 +29,7 @@ def test_valid_config(tmp_path):
     cfg = load_config(path)
     assert isinstance(cfg, Config)
     assert cfg.gitlab.url == "https://gitlab.example.com"
-    assert cfg.gitlab.poll_interval_sec == 60
+    assert cfg.gitlab.poll_interval_sec == 0
     assert cfg.projects[0].gitlab_project_id == 42
     assert cfg.projects[0].agent == "mr-watch-reviewer"
     assert cfg.projects[0].re_review_on_push is False

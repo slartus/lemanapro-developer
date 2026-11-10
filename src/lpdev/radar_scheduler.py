@@ -22,11 +22,7 @@ from lpdev.procutil import OutputLimitExceeded, communicate_capped, kill_group, 
 logger = logging.getLogger(__name__)
 
 RUNNER_PATH = Path(__file__).resolve().parents[2] / "radar" / "src" / "runner.mjs"
-FAST_REFRESH_SEC = 60
-MAX_FAST_REFRESH_SEC = 60 * 60
-STARTUP_DELAY_SEC = 3.0
-MIN_EXTERNAL_WAKE_GAP_SEC = 60.0
-MR_SECTION_IDS = ("reviewing", "assigned", "mentioned", "awaitingApproval", "threads", "authored")
+MIN_REFRESH_GAP_SEC = 120.0
 MAX_RUNNER_OUTPUT_BYTES = 32 * 1024 * 1024
 STDERR_TAIL_CHARS = 500
 
@@ -107,7 +103,6 @@ class RadarScheduler:
         proxy_secret: str,
         runner: RunnerFn = run_node_runner,
         clock: Callable[[], float] | None = None,
-        startup_delay_sec: float = STARTUP_DELAY_SEC,
     ) -> None:
         self._conn = conn
         self._config_provider = config_provider
@@ -115,78 +110,37 @@ class RadarScheduler:
         self._proxy_secret = proxy_secret
         self._runner = runner
         self._clock = clock or (lambda: asyncio.get_running_loop().time())
-        self._wake = asyncio.Event()
-        self._fast_since: float | None = None
-        self._startup_delay_sec = startup_delay_sec
-        self._known_mr_keys: set[str] | None = None
-        self._last_refresh_started: float | None = None
-        self._scheduled_wake: asyncio.TimerHandle | None = None
+        self._refresh_task: asyncio.Task | None = None
+        self._last_refresh_done: float | None = None
 
-    def wake(self) -> None:
-        self._wake.set()
+    def request_refresh(self, force: bool = False) -> bool:
+        """Schedule one radar refresh in the background (on-demand mode).
 
-    def notify_mr_updated(self, gitlab_project_id: int, iid: int) -> None:
-        if self._known_mr_keys is None:
-            self._known_mr_keys = _mr_keys(loads_or_none(_snapshot_dashboard_json(self._conn)))
-        if f"{gitlab_project_id}!{iid}" not in self._known_mr_keys:
-            return
-        if self._scheduled_wake is not None:
-            return
+        Returns False when a refresh is already running or the minimal
+        gap between refreshes has not elapsed yet (unless force=True).
+        """
+        if self._refresh_task is not None and not self._refresh_task.done():
+            return False
         loop = asyncio.get_running_loop()
-        since_last = None if self._last_refresh_started is None else self._clock() - self._last_refresh_started
-        if since_last is None or since_last >= MIN_EXTERNAL_WAKE_GAP_SEC:
-            self.wake()
-            return
-        self._scheduled_wake = loop.call_later(MIN_EXTERNAL_WAKE_GAP_SEC - since_last, self._fire_scheduled_wake)
+        if not force and self._last_refresh_done is not None:
+            if self._clock() - self._last_refresh_done < MIN_REFRESH_GAP_SEC:
+                return False
+        self._refresh_task = loop.create_task(self._refresh_job())
+        return True
 
-    def _fire_scheduled_wake(self) -> None:
-        self._scheduled_wake = None
-        self.wake()
-
-    async def run(self) -> None:
+    async def _refresh_job(self) -> None:
         try:
-            await self._run()
+            await self.refresh_once()
+        except Exception:
+            logger.exception("radar refresh crashed")
         finally:
-            if self._scheduled_wake is not None:
-                self._scheduled_wake.cancel()
-                self._scheduled_wake = None
-
-    async def _run(self) -> None:
-        if self._startup_delay_sec:
-            await asyncio.sleep(self._startup_delay_sec)
-        while True:
-            self._wake.clear()
-            radar = self._config_provider().radar
-            delay: float | None = None
-            if radar.enabled:
-                try:
-                    active = await self.refresh_once()
-                except Exception:
-                    logger.exception("radar refresh crashed")
-                    active = False
-                delay = self._next_delay(active, radar)
-            try:
-                await asyncio.wait_for(self._wake.wait(), timeout=delay)
-            except asyncio.TimeoutError:
-                pass
-
-    def _next_delay(self, active_pipelines: bool, radar: RadarConfig) -> float:
-        interval = radar.interval_minutes * 60
-        if not (active_pipelines and radar.fast_refresh_while_ci):
-            self._fast_since = None
-            return interval
-        now = self._clock()
-        if self._fast_since is None:
-            self._fast_since = now
-        if now - self._fast_since < MAX_FAST_REFRESH_SEC:
-            return min(FAST_REFRESH_SEC, interval)
-        return interval
+            self._last_refresh_done = self._clock()
+            self._refresh_task = None
 
     def _source_of(self, config: Config) -> tuple[str, dict[str, Any]]:
         return config.gitlab.url, runner_settings(config.radar)
 
     async def refresh_once(self) -> bool:
-        self._last_refresh_started = self._clock()
         config = self._config_provider()
         source = self._source_of(config)
         snapshot = radar_snapshot_get(self._conn)
@@ -213,7 +167,6 @@ class RadarScheduler:
             logger.warning("radar refresh failed: %s", error)
             radar_snapshot_save_failure(self._conn, utcnow_iso(), error)
             return False
-        self._known_mr_keys = _mr_keys(dashboard)
         radar_snapshot_save_success(
             self._conn,
             str(dashboard.get("fetchedAt") or utcnow_iso()),
@@ -221,23 +174,6 @@ class RadarScheduler:
             json.dumps(result.get("threadCache"), ensure_ascii=False),
         )
         return bool(result.get("activePipelines"))
-
-
-def _snapshot_dashboard_json(conn: sqlite3.Connection) -> str | None:
-    snapshot = radar_snapshot_get(conn)
-    return snapshot["dashboard_json"] if snapshot else None
-
-
-def _mr_keys(dashboard: Any) -> set[str]:
-    sections = dashboard.get("sections") if isinstance(dashboard, dict) else None
-    if not isinstance(sections, dict):
-        return set()
-    return {
-        item["key"]
-        for section in MR_SECTION_IDS
-        for item in sections.get(section) or []
-        if isinstance(item, dict) and item.get("kind") == "mr" and isinstance(item.get("key"), str)
-    }
 
 
 def loads_or_none(value: str | None) -> Any:

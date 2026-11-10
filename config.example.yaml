@@ -8,8 +8,9 @@ gitlab:
   # Базовый URL self-hosted GitLab: только https://, без логина/пароля, query и fragment.
   # Trailing slash не обязателен, срезается.
   url: https://gitlab.example.com
-  # Интервал опроса GitLab, секунды.
-  poll_interval_sec: 60
+  # Фоновый опрос GitLab удалён (on-demand): опрос идёт при открытии страницы и
+  # по кнопке «Проверить сейчас». Поле оставлено для совместимости, значение игнорируется.
+  poll_interval_sec: 0
   # Shell-команда, печатающая PAT в stdout (без перевода строки — ок).
   # Пример сохранения в Keychain (scope: read_api + read_repository):
   #   security add-generic-password -s mr-watch -a gitlab -w <token>
@@ -23,7 +24,8 @@ projects:
     # Имя глобального read-only агента opencode (~/.config/opencode/agent/<имя>.md).
     # В frontmatter должны быть запрещены edit, bash, webfetch, иначе ревью не запустится.
     agent: mr-watch-reviewer
-    # Перезапускать ревью при смене head_sha (push в MR).
+    # Историческое поле: авто-ревью на push удалено, значение игнорируется.
+    # Ревью запускается только кнопкой в интерфейсе.
     re_review_on_push: false
     # Необязательно: модель/вариант только для этого проекта (переопределяют opencode.*).
     # model: provider/model
@@ -59,9 +61,11 @@ opencode:
 
 radar:
   enabled: true
-  # Интервал обновления радара, минуты (1–120). Пока в моих MR идёт CI — раз в минуту, не дольше часа подряд.
-  interval_minutes: 5
-  fast_refresh_while_ci: true
+  # Фоновое автообновление радара удалено (on-demand): снапшот обновляется при
+  # открытии страницы и по кнопке «Проверить сейчас». Поля оставлены для
+  # совместимости, значения игнорируются.
+  interval_minutes: 0
+  fast_refresh_while_ci: false
   # all — все проекты с правами Maintainer+; selected — только selected_project_ids
   # (для «Ждут моего апрува», «Возможные MR», «Сломан default branch»).
   project_filter_mode: all

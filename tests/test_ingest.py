@@ -7,10 +7,9 @@ import json
 import httpx
 
 from helpers import list_reviews
-from lpdev.db import claim_next_review, create_review, get_review, radar_snapshot_save_success
+from lpdev.db import claim_next_review, create_review, get_review, list_mrs
 from lpdev.gitlab_client import GitLabClient
 from lpdev.main import create_app
-from lpdev.radar_scheduler import RadarScheduler
 from test_poller import FakeRegistry, StubApi, _make_poller, _mr, _seen_foreign_mr
 
 OLD = "2026-01-01T12:00:00Z"
@@ -79,8 +78,9 @@ async def test_ingest_adds_a_new_own_mr_like_the_sweep(conn):
     api = StubApi()
     poller = _make_poller(conn, api)
     await poller.tick()
-    assert poller.ingest([_mr(10, 7, author="me", updated_at=NEW)]) == 1
-    assert [(r["trigger"], r["status"]) for r in list_reviews(conn)] == [("new", "queued")]
+    assert poller.ingest([_mr(10, 7, author="me", updated_at=NEW)]) == 0
+    assert any(r["iid"] == 7 for r in list_mrs(conn))
+    assert list_reviews(conn) == []
 
 
 async def test_poller_reports_mr_updates_after_the_first_sighting(conn):
@@ -115,28 +115,6 @@ async def test_mr_updates_seen_through_radar_do_not_wake_radar_again(conn):
 
 def _dashboard(*keys):
     return {"fetchedAt": NEW, "sections": {"authored": [{"key": key, "kind": "mr"} for key in keys]}}
-
-
-async def test_radar_wakes_only_for_known_mrs_and_at_most_once_a_minute(ctx):
-    ctx_obj, _ = ctx
-    radar_snapshot_save_success(ctx_obj.conn, NEW, json.dumps(_dashboard("10!1")), "{}")
-    now = [1000.0]
-    scheduler = RadarScheduler(ctx_obj.conn, lambda: ctx_obj.config, "http://x/gl", "s", clock=lambda: now[0], startup_delay_sec=0)
-    scheduler.notify_mr_updated(10, 2)
-    assert not scheduler._wake.is_set()
-    scheduler.notify_mr_updated(10, 1)
-    assert scheduler._wake.is_set()
-
-    scheduler._wake.clear()
-    scheduler._last_refresh_started = now[0]
-    now[0] += 10
-    scheduler.notify_mr_updated(10, 1)
-    scheduler.notify_mr_updated(10, 1)
-    assert not scheduler._wake.is_set()
-    assert scheduler._scheduled_wake is not None
-    delay = scheduler._scheduled_wake.when() - asyncio.get_running_loop().time()
-    assert 45 < delay <= 50
-    scheduler._scheduled_wake.cancel()
 
 
 async def test_proxy_shares_merge_request_lists_with_the_poller(ctx):
@@ -313,7 +291,7 @@ async def test_radar_wakes_for_the_first_update_after_a_restart(conn):
     assert seen == [(10, 1)]
 
 
-async def test_start_review_of_my_new_mr_reports_the_review_ingest_queued(ctx):
+async def test_start_review_of_unknown_mr_queues_a_manual_review(ctx):
     def gitlab(request):
         return httpx.Response(200, json=_mr(10, 43, author="me", updated_at=NEW) | {"project_id": 10})
 
@@ -322,7 +300,7 @@ async def test_start_review_of_my_new_mr_reports_the_review_ingest_queued(ctx):
         response = await client.post("/api/mr/10/43/review", headers=H)
     assert response.status_code == 201
     review = get_review(ctx_obj.conn, response.json()["review_id"])
-    assert (review["trigger"], review["status"]) == ("new", "queued")
+    assert (review["trigger"], review["status"]) == ("manual", "queued")
 
 
 async def test_start_review_uses_the_current_head_from_gitlab(ctx):

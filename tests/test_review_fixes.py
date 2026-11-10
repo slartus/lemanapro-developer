@@ -128,12 +128,15 @@ async def test_empty_full_scan_sets_cursor(conn):
 
 
 async def test_push_review_skipped_when_head_already_reviewed(conn):
+    from lpdev.db import create_review
+
     api = StubApi()
     api.mrs = [_mr(10, 1, author="me")]
     poller = _make_poller(conn, api, _config(re_review_on_push=True))
     await poller.tick()
-    review = list_reviews(conn)[0]
-    assert rebase_review_head(conn, review["id"], "b" * 40)
+    mr_id = conn.execute("SELECT id FROM mr WHERE iid = 1").fetchone()["id"]
+    review_id = create_review(conn, mr_id, "manual", "a" * 40, "agent-a")
+    assert rebase_review_head(conn, review_id, "b" * 40)
     api.mrs = [_mr(10, 1, sha="b" * 40, author="me")]
     assert await poller.tick() == 0
     assert len(list_reviews(conn)) == 1

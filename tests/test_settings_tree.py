@@ -105,7 +105,7 @@ async def test_settings_save_writes_radar_section_and_keeps_other_radar_keys(ctx
 @pytest.mark.parametrize(
     "radar",
     [
-        {"interval_minutes": 0},
+        {"interval_minutes": 121},
         {"approval_threshold": 21},
         {"project_filter_mode": "some"},
         {"hidden_sections": ["unknown"]},

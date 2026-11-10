@@ -50,7 +50,6 @@
 <h2>Обзор</h2>
 <div class="card">
 <div class="form-grid">
-  <div class="field"><label for="poll_interval_sec">Интервал опроса, сек</label><input type="number" id="poll_interval_sec" value="{{ config.gitlab.poll_interval_sec }}" min="1" step="1"><div class="err"></div></div>
   <div class="field"><label for="max_parallel">Параллельных ревью</label><input type="number" id="max_parallel" value="{{ config.review.max_parallel }}" min="1" step="1"><div class="err"></div></div>
   <div class="field"><label for="timeout_sec">Таймаут ревью, сек</label><input type="number" id="timeout_sec" value="{{ config.review.timeout_sec }}" min="1" step="1"><div class="err"></div></div>
   <div class="field"><label for="clone_depth">Глубина клона</label><input type="number" id="clone_depth" value="{{ config.review.clone_depth }}" min="1" step="1"><div class="err"></div></div>
@@ -83,10 +82,9 @@
 <div class="card">
 <div class="form-grid">
   <div class="field field-check"><label class="check"><input type="checkbox" id="radar-enabled" {% if config.radar.enabled %}checked{% endif %}> Радар включён</label></div>
-  <div class="field"><label for="radar-interval">Интервал обновления, мин</label><input type="number" id="radar-interval" value="{{ config.radar.interval_minutes }}" min="1" max="120" step="1"><div class="err"></div></div>
-  <div class="field field-check"><label class="check"><input type="checkbox" id="radar-fast" {% if config.radar.fast_refresh_while_ci %}checked{% endif %}> Раз в минуту, пока идёт мой CI (до часа)</label></div>
   <div class="field"><label for="radar-threshold">Порог апрувов («Ждут моего апрува», 0 — выкл)</label><input type="number" id="radar-threshold" value="{{ config.radar.approval_threshold }}" min="0" max="20" step="1"><div class="err"></div></div>
 </div>
+<p class="muted small" style="margin-top:0.5rem">Опрос GitLab и радар выполняются по открытию страницы и кнопке «Проверить сейчас», без фонового интервала.</p>
 <div class="form-grid" style="margin-top:1rem">
   <div class="field"><label for="radar-ignored">Проверки, падение которых не считается упавшим CI (через запятую или с новой строки)</label><textarea id="radar-ignored" rows="2">{{ config.radar.ignored_check_names | join(", ") }}</textarea></div>
   <div class="field"><span class="muted small">Скрытые секции</span><div id="radar-hidden" class="hidden-sections"></div></div>

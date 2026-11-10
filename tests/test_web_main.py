@@ -122,7 +122,7 @@ async def test_force_check_requires_header(ctx, monkeypatch):
     assert response.status_code == 403
 
 
-async def test_force_check_reloads_config_and_wakes_poller(ctx, monkeypatch, tmp_path):
+async def test_force_check_reloads_config_and_requests_refresh(ctx, monkeypatch, tmp_path):
     ctx_obj, _ = ctx
     config_path = tmp_path / "config.yaml"
     config_path.write_text(
@@ -142,13 +142,14 @@ projects:
     class FakePoller:
         def __init__(self):
             self.reloaded = None
-            self.woke = False
+            self.refreshes: list[bool] = []
 
         def reload(self, config, project_ids):
             self.reloaded = (config, project_ids)
 
-        def wake(self):
-            self.woke = True
+        def request_refresh(self, force=False):
+            self.refreshes.append(force)
+            return True
 
     app = create_app(ctx_obj)
     fake = FakePoller()
@@ -160,7 +161,7 @@ projects:
             "/force-check", headers={"X-Requested-With": "lpdev"}
         )
     assert response.status_code == 303
-    assert fake.woke is True
+    assert fake.refreshes == [True]
     assert fake.reloaded is not None
     assert 10 in fake.reloaded[1]
     assert ctx_obj.config.gitlab.url == "https://gitlab.example.com"
@@ -226,7 +227,6 @@ async def test_settings_save_updates_config_and_projects(ctx, tmp_path, monkeypa
     cfg = await _write_config(tmp_path)
     monkeypatch.setenv("LPDEV_CONFIG", str(cfg))
     payload = {
-        "gitlab": {"poll_interval_sec": 30},
         "review": {"timeout_sec": 900, "max_parallel": 2, "clone_depth": 50,
                    "workspace_ttl_days": 3},
         "projects": [
@@ -244,10 +244,10 @@ async def test_settings_save_updates_config_and_projects(ctx, tmp_path, monkeypa
     import yaml as _yaml
 
     saved = _yaml.safe_load(cfg.read_text(encoding="utf-8"))
-    assert saved["gitlab"]["poll_interval_sec"] == 30
+    assert saved["gitlab"]["poll_interval_sec"] == 60
     assert len(saved["projects"]) == 2
     assert saved["projects"][0]["re_review_on_push"] is True
-    assert ctx_obj.config.gitlab.poll_interval_sec == 30
+    assert ctx_obj.config.gitlab.poll_interval_sec == 60
     assert 11 in ctx_obj.project_ids
     assert (tmp_path / "cfg.yaml.bak").is_file()
 
@@ -257,8 +257,8 @@ async def test_settings_save_invalid_rejected(ctx, tmp_path, monkeypatch):
     cfg = await _write_config(tmp_path)
     monkeypatch.setenv("LPDEV_CONFIG", str(cfg))
     payload = {
-        "gitlab": {"poll_interval_sec": 0},
         "review": {},
+        "radar": {"approval_threshold": 21},
         "projects": [{"gitlab_project_id": 10, "slug": "g/p", "agent": "a",
                       "re_review_on_push": False}],
     }
@@ -807,10 +807,11 @@ async def test_review_page_highlights_merge_requests(ctx):
 
 class _FakeRadar:
     def __init__(self) -> None:
-        self.wakes = 0
+        self.refreshes: list[bool] = []
 
-    def wake(self) -> None:
-        self.wakes += 1
+    def request_refresh(self, force: bool = False) -> bool:
+        self.refreshes.append(force)
+        return True
 
 
 @pytest.mark.parametrize(
@@ -823,7 +824,7 @@ class _FakeRadar:
         ({"review": {"timeout_sec": 99}}, False, 0),
     ],
 )
-async def test_apply_config_wakes_radar_only_when_needed(ctx, update, force, expected):
+async def test_apply_config_requests_radar_refresh_only_when_needed(ctx, update, force, expected):
     from types import SimpleNamespace
 
     from lpdev.config import Config
@@ -836,4 +837,4 @@ async def test_apply_config_wakes_radar_only_when_needed(ctx, update, force, exp
     for section, values in update.items():
         data[section] = {**data[section], **values}
     _apply_config(request, Config(**data), force_radar=force)
-    assert radar.wakes == expected
+    assert len(radar.refreshes) == expected

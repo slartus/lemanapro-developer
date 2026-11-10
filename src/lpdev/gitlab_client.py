@@ -208,6 +208,25 @@ class GitLabClient:
             f"/api/v4/projects/{project_id}/merge_requests", params
         )
 
+    async def get_group_merge_requests(
+        self,
+        group_path: str,
+        updated_after: str | None = None,
+        state: str | None = "opened",
+    ) -> list[dict[str, Any]]:
+        params: dict[str, Any] = {
+            "order_by": "updated_at",
+            "sort": "asc" if updated_after is not None else "desc",
+            "per_page": 100,
+            "pagination": "keyset",
+        }
+        if state is not None:
+            params["state"] = state
+        if updated_after is not None:
+            params["updated_after"] = updated_after
+        encoded = quote(group_path, safe="")
+        return await self._paginated(f"/api/v4/groups/{encoded}/merge_requests", params)
+
     async def get_member_projects(self, min_access_level: int) -> list[dict[str, Any]]:
         return await self._paginated(
             "/api/v4/projects",

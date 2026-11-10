@@ -291,37 +291,19 @@ async def test_worker_wakes_on_event(tmp_path, db, origin, monkeypatch):
         await task
 
 
-async def test_poller_loop_survives_error_recording_failure(conn, monkeypatch):
+async def test_refresh_job_survives_error_recording_failure(conn, monkeypatch):
     api = StubApi()
     api.fail_todos = True
-    config = poller_config()
-    config = config.model_copy(
-        update={"gitlab": config.gitlab.model_copy(update={"poll_interval_sec": 1})}
-    )
-    mapping = sync_projects(conn, [(10, "g/p", "agent-a", False, True)])
-    p = Poller(conn, api, config, mapping)
-    monkeypatch.setattr(poller_module, "ERROR_PAUSE_SEC", 0.01)
+    p = _poller(conn, api)
     monkeypatch.setattr(
         poller_module, "poll_state_set",
         lambda *a, **k: (_ for _ in ()).throw(sqlite3.OperationalError("locked")),
     )
-    ticks = {"n": 0}
-    original = p.tick
 
-    async def counting():
-        ticks["n"] += 1
-        return await original()
+    await p._refresh_job()
 
-    p.tick = counting
-    p._config = config.model_copy(
-        update={"gitlab": config.gitlab.model_copy(update={"poll_interval_sec": 1})}
-    )
-    task = asyncio.create_task(p.run())
-    await _wait_for(lambda: ticks["n"] >= 1)
-    assert not task.done()
-    task.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await task
+    assert p._refresh_task is None
+    assert p._last_refresh is not None
 
 
 async def test_supervise_logs_dead_task(caplog):
@@ -410,11 +392,13 @@ async def test_lifespan_starts_supervised_tasks(tmp_path):
     ctx = _app_ctx(tmp_path, max_parallel=2)
     app = create_app(ctx)
     async with app.router.lifespan_context(app):
-        assert len(app.state.tasks) == 6
+        assert len(app.state.tasks) == 4
         assert app.state.worker_count == 2
         assert isinstance(app.state.work_event, asyncio.Event)
         assert isinstance(app.state.question_event, asyncio.Event)
-        assert {"lpdev-question-worker", "lpdev-radar"} <= {t.get_name() for t in app.state.tasks}
+        names = {t.get_name() for t in app.state.tasks}
+        assert "lpdev-question-worker" in names
+        assert "lpdev-radar" not in names
     assert all(t.done() for t in app.state.tasks)
 
 
@@ -768,7 +752,7 @@ async def test_todo_not_reprocessed_and_no_mr_refetch(conn):
     api.get_project_mr = spy
     p = _poller(conn, api)
 
-    assert await p.tick() == 1
+    assert await p.tick() == 0
     assert await p.tick() == 0
     assert fetched == [(10, 5)]
     assert not hasattr(api, "mark_todo_done")
@@ -845,8 +829,8 @@ async def test_head_sha_none_mr_skipped_tick_survives(conn):
     api.mrs = [broken, _mr(10, 2, author="me")]
     p = _poller(conn, api)
 
-    assert await p.tick() == 1
-    assert [r["head_sha"] for r in _reviews(conn)] == ["a" * 40]
+    assert await p.tick() == 0
+    assert _reviews(conn) == []
     iids = [r["iid"] for r in conn.execute("SELECT iid FROM mr")]
     assert iids == [2]
 
@@ -866,7 +850,7 @@ async def test_single_mr_failure_does_not_abort_tick(conn, monkeypatch):
     api = StubApi()
     api.mrs = [_mr(10, 1, author="me"), _mr(10, 2, author="me")]
     p = _poller(conn, api)
-    original = p._enqueue
+    original = p._scan_one
     calls = {"n": 0}
 
     def flaky(*args, **kwargs):
@@ -875,9 +859,10 @@ async def test_single_mr_failure_does_not_abort_tick(conn, monkeypatch):
             raise RuntimeError("db hiccup")
         return original(*args, **kwargs)
 
-    p._enqueue = flaky
+    p._scan_one = flaky
 
-    assert await p.tick() == 1
+    assert await p.tick() == 0
+    assert conn.execute("SELECT COUNT(*) FROM mr WHERE iid = 2").fetchone()[0] == 1
 
 
 async def test_author_null_does_not_crash(conn):
@@ -887,7 +872,7 @@ async def test_author_null_does_not_crash(conn):
     api.mrs = [mr]
     p = _poller(conn, api)
 
-    assert await p.tick() == 1
+    assert await p.tick() == 0
 
     api.mrs = [dict(mr, updated_at="2026-02-01T00:00:00Z", sha="b" * 40)]
     await p.tick()
@@ -901,11 +886,12 @@ async def test_push_on_closed_mr_no_review(conn):
     api.mrs = [dict(_mr(10, 1, sha="b" * 40, author="me", updated_at="2026-02-01T00:00:00Z"), state="closed")]
 
     assert await p.tick() == 0
-    assert [r["trigger"] for r in _reviews(conn)] == ["new"]
+    assert _reviews(conn) == []
 
 
 async def test_sweep_error_propagates_after_other_projects(conn):
     api = StubApi()
+    api.fail_group = True
     config = poller_config()
     config.projects.append(ProjectConfig(gitlab_project_id=20, slug="g/q", agent="agent-a"))
     mapping = sync_projects(
@@ -927,11 +913,12 @@ async def test_sweep_error_propagates_after_other_projects(conn):
 
     with pytest.raises(GitlabApiError):
         await p.tick()
-    assert len(_reviews(conn)) == 1
+    assert conn.execute("SELECT COUNT(*) FROM mr WHERE iid = 3").fetchone()[0] == 1
 
 
 async def test_work_event_set_even_if_sweep_raises(conn):
     api = StubApi()
+    api.fail_group = True
     event = asyncio.Event()
     config = poller_config()
     config.projects.append(ProjectConfig(gitlab_project_id=20, slug="g/q", agent="agent-a"))
@@ -939,10 +926,13 @@ async def test_work_event_set_even_if_sweep_raises(conn):
         conn, [(10, "g/p", "agent-a", False, True), (20, "g/q", "agent-a", False, True)]
     )
     p = Poller(conn, api, config, mapping, work_event=event)
+    api.mrs = [_mr(10, 1, author="other")]
     await p.tick()
-    poll_state_set(conn, MR_CURSOR_KEY.format(10), "2026-01-01T00:00:00+00:00")
-    poll_state_set(conn, MR_CURSOR_KEY.format(20), "2026-01-01T00:00:00+00:00")
-    api.mrs = [_mr(10, 1, author="me")]
+    mr_id = conn.execute("SELECT id FROM mr WHERE iid = 1").fetchone()["id"]
+    review_id = create_review(conn, mr_id, "manual", "a" * 40, "agent-a")
+    claim_next_review(conn)
+
+    api.mrs = [_mr(10, 1, sha="b" * 40, author="other")]
     original = api.get_project_merge_requests
 
     async def failing(project_id, updated_after=None, state="opened"):
@@ -955,6 +945,7 @@ async def test_work_event_set_even_if_sweep_raises(conn):
     with pytest.raises(GitlabApiError):
         await p.tick()
     assert event.is_set()
+    assert get_review(conn, review_id)["status"] == "cancelled"
 
 
 # ---------- maintenance ----------

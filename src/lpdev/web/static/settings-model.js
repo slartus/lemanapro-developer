@@ -26,7 +26,7 @@ export function mergeProjects(gitlabProjects, reviewProjects, radarIds) {
       ...project,
       radar: radar.has(project.key),
       review: reviewByKey.has(project.key)
-        ? { agent: reviewByKey.get(project.key).agent, push: Boolean(reviewByKey.get(project.key).re_review_on_push) }
+        ? { agent: reviewByKey.get(project.key).agent }
         : null,
     }))
     .sort((a, b) => a.path.localeCompare(b.path));
@@ -74,9 +74,9 @@ export function projectPathFromInput(input, gitlabUrl) {
 export function addProjectByPath(projects, path, agent) {
   const existing = projects.find((project) => project.path.toLowerCase() === path.toLowerCase());
   if (existing) {
-    return projects.map((project) => (project === existing && !project.review ? { ...project, review: { agent, push: false } } : project));
+    return projects.map((project) => (project === existing && !project.review ? { ...project, review: { agent } } : project));
   }
-  const added = { id: null, key: `new:${path}`, path, name: path, maintainer: false, known: false, radar: false, review: { agent, push: false } };
+  const added = { id: null, key: `new:${path}`, path, name: path, maintainer: false, known: false, radar: false, review: { agent } };
   return [...projects, added].sort((a, b) => a.path.localeCompare(b.path));
 }
 
@@ -88,7 +88,6 @@ export function settingsPayloadProjects(projects, defaultAgent) {
         gitlab_project_id: project.id,
         slug: project.path.startsWith('#') ? '' : project.path,
         agent: project.review.agent || defaultAgent,
-        re_review_on_push: project.review.push,
       })),
     radarIds: projects.filter((project) => project.radar && project.id !== null).map((project) => project.id).sort((a, b) => a - b),
   };
