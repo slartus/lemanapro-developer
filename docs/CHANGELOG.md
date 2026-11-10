@@ -723,8 +723,9 @@ addRow была задвоенная кнопка. Блок <script> переп�
   `pyinstaller==6.22.3`), zip `dist/lpdev-qa-arm64-<commit>.zip` с бинарём,
   `Lemanapro Timesheet.command` (двойной клик) и `INSTALL.md`; сборка только
   из чистого дерева, печатает commit + sha256 для публикации.
-- org_id в мастере по умолчанию `7867633` (наша организация); ссылка на
-  выдачу OAuth-токена в INSTALL.md — `oauth.yandex.ru/client/new/api`
+- org_id в мастере по умолчанию `7867633` (наша организация); в INSTALL.md
+  описано получение OAuth-токена: ClientId на `oauth.yandex.ru/client/new/api`
+  → `oauth.yandex.ru/authorize?response_type=token&client_id=<ClientId>`
   (прежняя страница документации не работает).
 - `src/lpdev/qa_setup.py` — мастер первого запуска: GitLab URL (дефолт
   `gitlab.lmru.tech`), PAT `read_api` (проверка `GET /user`), org_id, очереди,
