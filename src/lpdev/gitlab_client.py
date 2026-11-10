@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import math
+from datetime import date
 from typing import Any
 
 import httpx
@@ -166,6 +167,12 @@ class GitLabClient:
 
     async def get_todos(self) -> list[dict[str, Any]]:
         return await self._paginated("/api/v4/todos", {"state": "pending", "per_page": 100})
+
+    async def get_my_events(self, after: date, before: date) -> list[dict[str, Any]]:
+        return await self._paginated(
+            "/api/v4/events",
+            {"after": after.isoformat(), "before": before.isoformat(), "per_page": 100, "sort": "asc"},
+        )
 
     async def _paginated(self, url: str, params: dict[str, Any]) -> list[dict[str, Any]]:
         items: list[dict[str, Any]] = []

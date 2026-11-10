@@ -308,3 +308,27 @@ async def test_synthetic_rate_limit_does_not_extend_the_pause():
     assert first.status_code == second.status_code == 429
     assert client._paused_until == paused_until
     assert sent == []
+
+
+async def test_get_my_events_passes_exclusive_dates_and_paginates():
+    from datetime import date
+
+    calls = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request)
+        if request.url.params.get("page") == "2":
+            return httpx.Response(200, json=[{"id": 2}])
+        return httpx.Response(
+            200, json=[{"id": 1}], headers={"Link": f'<{BASE_URL}/api/v4/events?page=2>; rel="next"'}
+        )
+
+    client = _client(handler)
+    try:
+        events = await client.get_my_events(date(2026, 11, 8), date(2026, 11, 16))
+    finally:
+        await client.aclose()
+    assert [event["id"] for event in events] == [1, 2]
+    first = calls[0].url
+    assert first.path == "/api/v4/events"
+    assert (first.params["after"], first.params["before"], first.params["per_page"]) == ("2026-11-08", "2026-11-16", "100")
