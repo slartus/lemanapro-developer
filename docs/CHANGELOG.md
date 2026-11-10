@@ -642,3 +642,23 @@ addRow была задвоенная кнопка. Блок <script> переп�
   перенесёт/отменит другие ревью этого MR.
 - `parse_draft` перенесён в `gitlab_client` (импорт в worker без цикла
   poller ↔ worker), из `poller` по-прежнему импортируется.
+
+## 2026-11-10 — Таймшит
+
+**Что:**
+- Вкладка «Таймшит»: `GET /timesheet`, `GET /api/timesheet?week=YYYY-Www`,
+  `PUT /api/timesheet/cell`, `POST /api/timesheet/tasks`,
+  `DELETE /api/timesheet/cells`, `POST /api/timesheet/submit`. Предложения по
+  списанию времени в задачи Yandex Tracker на неделю из GitLab-событий и моих
+  задач «в работе», запись worklog в Tracker без дублей (журнал
+  `worklog_submission`, блокировка, сверка `unknown` после таймаута).
+- `tracker:` в конфиге (по умолчанию выключен, через `/settings` не меняется),
+  токен — `token_command` (Keychain), `run_secret_command` для PAT и токена.
+- Производственный календарь РФ на 2026 год (`calendar/ru/2026.json`),
+  `workcalendar.py`; для лет без файла — Пн–Пт и `calendar_ok=false`.
+- `tracker_client.py` (OAuth + `X-Org-Id`/`X-Cloud-Org-Id`, без редиректов,
+  ключ задачи в пути только после проверки, ретраи только на чтение),
+  `gitlab_client.get_my_events`.
+- Миграция БД v13: `timesheet_cell`, `timesheet_task`, `worklog_submission`.
+- Hardening: все не-GET/HEAD/OPTIONS запросы без `X-Requested-With: lpdev` —
+  403 (кроме прокси радара `/gl/`); маскирование `OAuth <token>` и `y0_…`.
