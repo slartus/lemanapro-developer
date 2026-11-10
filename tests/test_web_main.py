@@ -836,5 +836,5 @@ async def test_apply_config_requests_radar_refresh_only_when_needed(ctx, update,
     data = ctx_obj.config.model_dump()
     for section, values in update.items():
         data[section] = {**data[section], **values}
-    _apply_config(request, Config(**data), force_radar=force)
+    _apply_config(request, Config(**data), force=force)
     assert len(radar.refreshes) == expected

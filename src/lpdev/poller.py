@@ -88,7 +88,8 @@ class Poller:
         if self._refresh_task is not None and not self._refresh_task.done():
             await self._refresh_task
             return
-        await self._refresh_job()
+        self._refresh_task = asyncio.get_running_loop().create_task(self._refresh_job())
+        await self._refresh_task
 
     async def _refresh_job(self) -> None:
         try:

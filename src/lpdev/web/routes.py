@@ -216,7 +216,7 @@ async def force_check(request: Request):
     try:
         config = load_config(default_config_path())
         _warn_if_workers_changed(request, config)
-        _apply_config(request, config, force_radar=True)
+        _apply_config(request, config, force=True)
     except Exception:
         logger.exception("force-check: config reload failed")
         return PlainTextResponse(
@@ -446,7 +446,7 @@ def _warn_if_workers_changed(request: Request, config: Config) -> bool:
     return True
 
 
-def _apply_config(request: Request, config: Config, force_radar: bool = False):
+def _apply_config(request: Request, config: Config, force: bool = False):
     ctx = _ctx(request)
     radar_changed = (ctx.config.radar, ctx.config.gitlab.url) != (config.radar, config.gitlab.url)
     mapping = sync_projects(
@@ -461,10 +461,10 @@ def _apply_config(request: Request, config: Config, force_radar: bool = False):
     poller = getattr(request.app.state, "poller", None)
     if poller is not None:
         poller.reload(config, mapping)
-        poller.request_refresh(force=force_radar)
+        poller.request_refresh(force=force)
     radar = getattr(request.app.state, "radar", None)
-    if radar is not None and (force_radar or radar_changed):
-        radar.request_refresh(force=force_radar)
+    if radar is not None and (force or radar_changed):
+        radar.request_refresh(force=force)
 
 
 def _list_agents() -> list[str]:
