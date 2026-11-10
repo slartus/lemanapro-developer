@@ -368,7 +368,7 @@ def test_migration_v1_to_v2_adds_severity_columns(tmp_path):
     assert {"crit_count", "major_count", "minor_count", "nit_count"} <= columns
     mr_columns = {r[1] for r in conn.execute("PRAGMA table_info(mr)")}
     assert "author_name" in mr_columns
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == 13
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 14
     assert "my_roles" in mr_columns
     conn.close()
 
@@ -407,7 +407,7 @@ def test_migration_v5_idempotent_and_keeps_data(tmp_path):
     init_schema(conn)
     _run_migration(conn, 5, _migrate_to_v5)
     init_schema(conn)
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == 13
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 14
     assert conn.execute("SELECT my_roles FROM mr").fetchone()["my_roles"] == "mentioned"
     conn.close()
 
@@ -443,11 +443,11 @@ def test_migration_v6_adds_is_draft_and_is_idempotent(tmp_path):
     columns = {r[1]: r for r in conn.execute("PRAGMA table_info(mr)")}
     assert columns["is_draft"][3] == 1
     assert columns["is_draft"][4] == "0"
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == 13
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 14
     conn.execute("PRAGMA user_version = 5")
     conn.commit()
     init_schema(conn)
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == 13
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 14
     conn.close()
 
 
@@ -476,7 +476,7 @@ def test_migration_v7_adds_verdict_backfills_and_is_idempotent(tmp_path):
     init_schema(conn)
     verdicts = [r[0] for r in conn.execute("SELECT verdict FROM review ORDER BY id")]
     assert verdicts == ["REQUEST_CHANGES", "APPROVE_WITH_NITS", None, None, None]
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == 13
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 14
     conn.execute("PRAGMA user_version = 6")
     conn.commit()
     init_schema(conn)
@@ -531,11 +531,11 @@ def test_migration_v8_adds_mention_url_idempotently(tmp_path):
     init_schema(conn)
     columns = {r[1]: r for r in conn.execute("PRAGMA table_info(mr)")}
     assert columns["mention_url"][3] == 0
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == 13
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 14
     conn.execute("PRAGMA user_version = 7")
     conn.commit()
     init_schema(conn)
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == 13
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 14
     conn.close()
 
 
@@ -640,7 +640,7 @@ def _review_indexes(conn):
 
 
 def test_fresh_schema_accepts_cancelled(conn):
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == 13
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 14
     project_id = _sync_projects(conn)[10]
     mr_id = _upsert_mr(conn, project_id).mr_id
     review_id = create_review(conn, mr_id, "new", "a" * 40, "agent-a")
@@ -672,7 +672,7 @@ def test_migration_v9_to_v10_keeps_data_indexes_and_unique(tmp_path):
 
     init_schema(conn)
 
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == 13
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 14
     assert [tuple(r) for r in conn.execute("SELECT * FROM review ORDER BY id")] == [
         row + (None,) for row in before
     ]
@@ -914,7 +914,7 @@ def test_migration_v10_to_v11_keeps_data_and_adds_question_table(tmp_path):
     init_schema(conn)
     init_schema(conn)
 
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == 13
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 14
     after = tuple(conn.execute("SELECT * FROM review WHERE id = ?", (review_id,)).fetchone())
     assert after == before + (None,)
     assert create_question(conn, review_id, "почему?") is not None
@@ -929,7 +929,7 @@ def test_migration_v10_to_v11_keeps_data_and_adds_question_table(tmp_path):
 
 
 def test_fresh_schema_has_questions_and_instructions(conn):
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == 13
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 14
     columns = {r[1] for r in conn.execute("PRAGMA table_info(review)")}
     assert "extra_instructions" in columns
     review_id = _done_review(conn)

@@ -27,7 +27,7 @@ def test_migration_v13_from_v12_keeps_data_and_is_idempotent(tmp_path):
         conn.execute(f"DROP TABLE {table}")
     conn.execute("PRAGMA user_version = 12")
     init_schema(conn)
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 13
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 14
     assert conn.execute("SELECT value FROM poll_state WHERE key = 'k'").fetchone()[0] == "v"
     timesheet_cell_set(conn, "SUPERAPP-1", "2026-11-09", 60)
     conn.execute("PRAGMA user_version = 12")
@@ -86,3 +86,36 @@ def test_worklog_submission_constraints(conn, minutes, status):
     with pytest.raises(sqlite3.IntegrityError):
         submission_id = worklog_submission_create(conn, "A-1", "2026-11-09", minutes)
         worklog_submission_finish(conn, submission_id, status)
+
+
+def test_migration_v14_adds_reconcile_attempts_to_existing_v13_journal(tmp_path):
+    from lpdev.db import worklog_submission_attempted
+
+    conn = connect(tmp_path / "db.sqlite")
+    init_schema(conn)
+    conn.execute("DROP TABLE worklog_submission")
+    conn.execute(
+        """
+        CREATE TABLE worklog_submission (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, issue_key TEXT NOT NULL, day TEXT NOT NULL,
+            minutes INTEGER NOT NULL CHECK(minutes > 0),
+            status TEXT NOT NULL CHECK(status IN ('pending','done','failed','unknown')),
+            tracker_id TEXT, error TEXT, created_at TEXT NOT NULL, updated_at TEXT
+        )
+        """
+    )
+    conn.execute(
+        "INSERT INTO worklog_submission (issue_key, day, minutes, status, created_at) VALUES ('A-1', '2026-11-09', 30, 'unknown', 'x')"
+    )
+    conn.execute("PRAGMA user_version = 13")
+    init_schema(conn)
+    init_schema(conn)
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 14
+    row = worklog_submissions(conn, ["2026-11-09"])[0]
+    assert (row["status"], row["reconcile_attempts"]) == ("unknown", 0)
+    worklog_submission_attempted(conn, row["id"])
+    worklog_submission_attempted(conn, row["id"])
+    row = worklog_submissions(conn, ["2026-11-09"])[0]
+    assert row["reconcile_attempts"] == 2
+    assert row["updated_at"] is not None
+    conn.close()

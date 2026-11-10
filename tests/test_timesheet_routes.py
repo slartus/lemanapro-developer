@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from datetime import date, datetime, timedelta, UTC
 
 import httpx
@@ -32,6 +33,9 @@ class FakeTracker:
         self.mode = "ok"
         self.fail_reads: TrackerApiError | None = None
         self.fail_issue_worklogs = False
+        self.issue_worklogs_error: TrackerApiError | None = None
+        self.issue_worklogs_delay = 0.0
+        self.issue_worklogs_calls: list[str] = []
         self.closed = False
         self.next_id = 100
 
@@ -58,8 +62,13 @@ class FakeTracker:
 
     async def issue_worklogs(self, key, authors=None):
         self._read()
+        self.issue_worklogs_calls.append(key)
+        if self.issue_worklogs_delay:
+            await asyncio.sleep(self.issue_worklogs_delay)
         if self.fail_issue_worklogs:
             raise TrackerApiError("Tracker недоступен: ConnectError")
+        if self.issue_worklogs_error is not None:
+            raise self.issue_worklogs_error
         assert authors is not None and "me" in authors
         return [w for w in self.worklogs if w.key == key]
 
@@ -603,3 +612,55 @@ def test_matches_requires_created_at():
 
     worklog = Worklog("1", "SUPERAPP-1", date(2026, 11, 9), 30, None)
     assert not _matches(worklog, "SUPERAPP-1", date(2026, 11, 9), 30, datetime.now(UTC), set())
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        TrackerApiError("Tracker: не найдено", 404),
+        TrackerApiError("Tracker: нет доступа (проверьте org_id, org_header и scope токена)", 403),
+        TrackerApiError("Tracker: неожиданный редирект 301", 301),
+    ],
+)
+async def test_permanent_reconcile_errors_fail_the_row(env, error):
+    env["tracker"].mode = "timeout_lost"
+    await _submit(env, [ENTRY])
+    _age_journal(env, minutes=5)
+    env["tracker"].issue_worklogs_error = error
+    await _get(env)
+    row = worklog_submissions(env["ctx"].conn, ["2026-11-09"])[0]
+    assert row["status"] == "failed"
+    assert row["error"] == f"сверка невозможна: {error.message}"
+
+
+async def test_transient_reconcile_errors_count_attempts(env):
+    from lpdev.db import worklog_submission_create
+
+    conn = env["ctx"].conn
+    worklog_submission_create(conn, "SUPERAPP-1", "2026-11-09", 120)
+    _age_journal(env, minutes=5)
+    env["tracker"].issue_worklogs_error = TrackerApiError("Tracker: ошибка 500", 500)
+    await _get(env)
+    await _get(env)
+    row = worklog_submissions(conn, ["2026-11-09"])[0]
+    assert (row["status"], row["reconcile_attempts"]) == ("pending", 2)
+
+
+async def test_get_reconciles_least_attempted_rows_first(env):
+    from lpdev.db import worklog_submission_create
+
+    conn = env["ctx"].conn
+    ids = [worklog_submission_create(conn, f"SUPERAPP-{n + 1}", "2026-11-09", 30) for n in range(25)]
+    _age_journal(env, minutes=5)
+    conn.execute(f"UPDATE worklog_submission SET reconcile_attempts = 7 WHERE id <= {ids[19]}")
+    await _get(env)
+    assert env["tracker"].issue_worklogs_calls[:5] == [f"SUPERAPP-{n}" for n in range(21, 26)]
+    assert len(env["tracker"].issue_worklogs_calls) == 20
+
+
+async def test_get_does_not_poll_fresh_rows(env):
+    from lpdev.db import worklog_submission_create
+
+    worklog_submission_create(env["ctx"].conn, "SUPERAPP-1", "2026-11-09", 120)
+    await _get(env)
+    assert env["tracker"].issue_worklogs_calls == []

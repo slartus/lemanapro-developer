@@ -9,7 +9,7 @@ from lpdev.opencode_runner import MAX_VERDICT_INPUT_CHARS, parse_verdict
 
 MAX_REVIEW_MD_LENGTH = MAX_VERDICT_INPUT_CHARS
 TRUNCATION_MARKER = "...[truncated]"
-SCHEMA_VERSION = 13
+SCHEMA_VERSION = 14
 
 DERIVED_ROLES = frozenset({"reviewer", "assignee", "author"})
 MENTIONED_ROLE = "mentioned"
@@ -153,6 +153,8 @@ def init_schema(conn: sqlite3.Connection) -> None:
         _run_migration(conn, 12, _migrate_to_v12)
     if version < 13:
         _run_migration(conn, 13, _migrate_to_v13)
+    if version < 14:
+        _run_migration(conn, 14, _migrate_to_v14)
     conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
     conn.commit()
 
@@ -674,6 +676,10 @@ def _migrate_to_v13(conn: sqlite3.Connection) -> None:
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_worklog_submission_day ON worklog_submission(day, issue_key)"
     )
+
+
+def _migrate_to_v14(conn: sqlite3.Connection) -> None:
+    _add_column(conn, "worklog_submission", "reconcile_attempts", "INTEGER NOT NULL DEFAULT 0")
 
 
 def supersede_reviews(
@@ -1203,6 +1209,14 @@ def worklog_submission_finish(
         conn.execute(
             "UPDATE worklog_submission SET status = ?, tracker_id = ?, error = ?, updated_at = ? WHERE id = ?",
             (status, tracker_id, error, utcnow_iso(), submission_id),
+        )
+
+
+def worklog_submission_attempted(conn: sqlite3.Connection, submission_id: int) -> None:
+    with conn:
+        conn.execute(
+            "UPDATE worklog_submission SET reconcile_attempts = reconcile_attempts + 1, updated_at = ? WHERE id = ?",
+            (utcnow_iso(), submission_id),
         )
 
 

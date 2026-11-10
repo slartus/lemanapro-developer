@@ -21,6 +21,7 @@ from lpdev.db import (
     timesheet_task_add,
     timesheet_tasks,
     worklog_submission_create,
+    worklog_submission_attempted,
     worklog_submission_finish,
     worklog_submissions,
 )
@@ -59,6 +60,7 @@ DUPLICATE_WINDOW = timedelta(minutes=10)
 RECONCILE_SLACK = timedelta(minutes=1)
 RECONCILE_MIN_AGE = timedelta(minutes=2)
 MAX_RECONCILE_ON_READ = 20
+PERMANENT_RECONCILE_STATUSES = frozenset({403, 404})
 MAX_IN_PROGRESS = 5
 IN_PROGRESS_STATUSES = frozenset({"inProgress", "inReview", "testing"})
 WORKLOG_START = dt_time(9, 0)
@@ -431,7 +433,12 @@ async def _reconcile(conn, tracker: TrackerClient, identities: set[str], rows, c
         try:
             worklogs = await tracker.issue_worklogs(key, identities)
         except TrackerApiError as exc:
+            if _is_permanent(exc):
+                worklog_submission_finish(conn, row["id"], "failed", error=f"сверка невозможна: {exc.message}")
+                logger.info("timesheet: reconcile %s %s gave up (%s)", key, day, exc.status)
+                continue
             logger.warning("timesheet: reconcile %s %s failed: %s", key, day, exc.message)
+            worklog_submission_attempted(conn, row["id"])
             outcome.unresolved.add((key, day))
             continue
         match = next((w for w in worklogs if _matches(w, key, day, row["minutes"], since, claimed)), None)
@@ -442,6 +449,7 @@ async def _reconcile(conn, tracker: TrackerClient, identities: set[str], rows, c
             outcome.confirmed.add((key, day))
             logger.info("timesheet: reconciled %s %s %s as done", key, day, row["minutes"])
         elif now - since < RECONCILE_MIN_AGE:
+            worklog_submission_attempted(conn, row["id"])
             outcome.unresolved.add((key, day))
         else:
             worklog_submission_finish(conn, row["id"], "failed", error="не найдено в Tracker после сбоя, можно повторить")
@@ -458,6 +466,16 @@ def _open_rows(journal, cells: set[tuple[str, date]] | None = None) -> list:
     ]
 
 
+def _is_permanent(exc: TrackerApiError) -> bool:
+    return exc.status is not None and (exc.status in PERMANENT_RECONCILE_STATUSES or 300 <= exc.status < 400)
+
+
+def _rows_for_read(journal, now: datetime) -> list:
+    rows = [row for row in _open_rows(journal) if now - _parse_created(row["created_at"]) >= RECONCILE_MIN_AGE]
+    rows.sort(key=lambda row: (row["reconcile_attempts"], row["updated_at"] or row["created_at"], row["id"]))
+    return rows[:MAX_RECONCILE_ON_READ]
+
+
 def _claimed(journal) -> set[str]:
     return {row["tracker_id"] for row in journal if row["status"] == "done" and row["tracker_id"]}
 
@@ -467,7 +485,7 @@ async def _reconcile_week(conn, state: TimesheetState, tracker: TrackerClient, i
         return
     async with state.submit_lock:
         journal = worklog_submissions(conn, iso_days)
-        rows = _open_rows(journal)[:MAX_RECONCILE_ON_READ]
+        rows = _rows_for_read(journal, datetime.now(UTC))
         if not rows:
             return
         try:
