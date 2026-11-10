@@ -196,6 +196,18 @@ class Wizard:
                 self.print_fn(f"  ! {exc}")
                 self.print_fn("  попробуйте ещё раз (Ctrl+C — отмена)")
 
+    def ask_verified_secret(self, label: str, validator, verify_fn, verify_args: tuple) -> tuple[str, str]:
+        while True:
+            secret = self.ask_secret(label, validator)
+            self.print_fn("  проверяю...")
+            try:
+                result = verify_fn(*verify_args, secret)
+            except WizardError as exc:
+                self.print_fn(f"  ! {exc}")
+                self.print_fn("  проверьте токен и введите его ещё раз (Ctrl+C — отмена)")
+                continue
+            return secret, result
+
     def ask_valid(self, label: str, default: str, parser) -> object:
         while True:
             try:
@@ -209,25 +221,21 @@ class Wizard:
         self.print_fn("Ctrl+C — отмена.\n")
 
         gitlab_url = self.ask_valid("GitLab URL", QA_DEFAULT_GITLAB_URL, normalize_https_url)
-        pat = self.ask_secret("GitLab PAT (scope read_api)", validate_gitlab_pat)
-        self.print_fn("  проверяю PAT...")
-        login = self.verify_gitlab_fn(gitlab_url, pat)
+        pat, login = self.ask_verified_secret(
+            "GitLab PAT (scope read_api)", validate_gitlab_pat, self.verify_gitlab_fn, (gitlab_url,)
+        )
         self.print_fn(f"  GitLab: {login}")
-
         self.keychain_add_fn("gitlab", pat)
 
         org_id = self.ask_valid("Tracker org_id (ID организации)", "", validate_org_id)
         queues = self.ask_valid("Очереди через запятую", QA_DEFAULT_QUEUES, parse_queues)
         submit = self.ask("Списывать время из интерфейса? (y/n)", "y").lower() in ("y", "yes", "д", "да")
 
-        tracker_token = self.ask_secret(
-            "OAuth-токен Трекера (tracker:read" + (", tracker:write" if submit else "") + ")",
-            validate_tracker_token,
+        scopes = "tracker:read" + (", tracker:write" if submit else "")
+        tracker_token, display = self.ask_verified_secret(
+            f"OAuth-токен Трекера ({scopes})", validate_tracker_token, self.verify_tracker_fn, (org_id,)
         )
-        self.print_fn("  проверяю токен...")
-        display = self.verify_tracker_fn(org_id, tracker_token)
         self.print_fn(f"  Трекер: {display}")
-
         self.keychain_add_fn("tracker", tracker_token)
 
         port = self.ask_valid("Порт", str(QA_DEFAULT_PORT), validate_port)

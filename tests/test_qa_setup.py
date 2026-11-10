@@ -6,6 +6,7 @@ from lpdev.qa_setup import (
     QA_CONFIG_PATH,
     QA_DATA_DIR,
     Wizard,
+    WizardError,
     build_config,
     keychain_add,
     keychain_read_command,
@@ -186,6 +187,16 @@ def test_wizard_reasks_on_invalid_queue(tmp_path):
     wizard.run()
     raw = yaml.safe_load((tmp_path / "config.yaml").read_text(encoding="utf-8"))
     assert raw["tracker"]["queues"] == ["SUPERAPP"]
+
+
+def test_wizard_reasks_on_verify_failure(tmp_path):
+    answers = ["", "123", "", "y", "8124"]
+    prompts = ["glpat-abc", "glpat-abc", "y0_tok"]
+    gitlab_verify = [WizardError("PAT отклонён"), "qa-user"]
+    keychain_calls = []
+    wizard = _wizard_with(answers, prompts, gitlab_verify, ["QA User"], tmp_path, keychain_calls)
+    wizard.run()
+    assert keychain_calls == [("gitlab", "glpat-abc"), ("tracker", "y0_tok")]
 
 
 def test_run_wizard_if_needed_skips_existing_config(tmp_path, monkeypatch):

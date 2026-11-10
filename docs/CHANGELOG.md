@@ -715,3 +715,46 @@ addRow была задвоенная кнопка. Блок <script> переп�
 **Проверка:** pytest, `node --test`, ruff; на копии БД и с записью,
 выключенной в конфиге: две недели в роли разработчика, неделя в роли QA,
 история двух реальных задач тестировщика (интервалы совпали с changelog).
+
+## 2026-11-10 — Готовая сборка таймшита для QA
+
+**Что:**
+- `deploy/qa/build.sh`: PyInstaller-бинарь (one-dir, arm64, ad-hoc codesign,
+  `pyinstaller==6.22.3`), zip `dist/lpdev-qa-arm64-<commit>.zip` с бинарём,
+  `Lemanapro Timesheet.command` (двойной клик) и `INSTALL.md`; сборка только
+  из чистого дерева, печатает commit + sha256 для публикации.
+- `src/lpdev/qa_setup.py` — мастер первого запуска: GitLab URL (дефолт
+  `gitlab.lmru.tech`), PAT `read_api` (проверка `GET /user`), org_id, очереди,
+  «Списывать?», OAuth-токен Трекера (проверка `/myself`), порт. Токены — в
+  Keychain (`service lpdev-qa`), в конфиг пишутся только `*_command`; конфиг
+  `~/.config/lpdev-qa/config.yaml` (0600, role qa), данные `~/lemanapro-timesheet/`.
+- `src/lpdev/qa_main.py` (entry `lpdev-qa`) — повторный запуск гасит прошлый
+  инстанс по pidfile (pid + время старта процесса, SIGTERM → SIGKILL через 10 с),
+  открывает вкладку браузера; Ctrl+C — остановка сервиса и закрытие вкладки
+  (osascript, только для уже запущенных Chrome/Safari, best-effort);
+  `--setup` — мастер заново, `--port` — порт.
+- Тесты `tests/test_qa_setup.py`, `tests/test_qa_main.py` (36), README и
+  INSTALL.md.
+
+**Self-review:** ревью-агент, вердикт APPROVE_WITH_NITS — 0 BLOCKER/MAJOR,
+8 MINOR, 5 NIT. Смоук бинаря: старт, `/healthz`, страница таймшита, повторный
+запуск гасит старый инстанс, SIGTERM — чистое завершение.
+
+**Правки по находкам:**
+- [MINOR] AppleScript закрывал вкладку, поднимая не запущенный браузер —
+  обёрнуто в `if application ... is running then`
+- [MINOR] pidfile переживал перезагрузку, substring-эвристика по comm могла
+  убить чужой python — в pidfile пишется `ps -o lstart=`, kill только при
+  точном совпадении; пустой/битый pidfile убивать не может
+- [MINOR] ошибка верификации токена прерывала мастер — PAT/токен переспрашиваются
+  в цикле, Keychain пишется только после успешной проверки
+- [MINOR] битый конфиг после мастера давал traceback — ConfigError перехвачен
+  с подсказкой `--setup`; Ctrl+C до старта uvicorn больше не traceback
+  (exit 130)
+- [MINOR] версия pyinstaller зафиксирована (воспроизводимость sha256);
+  INSTALL.md — обновление заменой папки, не «поверх»
+- [NIT] `--port` валидируется (`validate_port`), atexit-закрытие вкладок
+  регистрируется только при открытом браузере, pidfile пишется сразу с 0600
+- Не исправлено (осознанно): секрет в argv `security -w` (нет скриптуемого
+  способа у CLI, компромисс задокументирован в INSTALL.md); TOCTOU между
+  проверкой порта и bind — uvicorn корректно выходит с кодом 1.

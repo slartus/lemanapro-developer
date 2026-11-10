@@ -25,7 +25,7 @@ rm -rf "$BUILD_DIR" "$STAGE_DIR"
 mkdir -p "$BUILD_DIR" "$STAGE_DIR" "$OUT_DIR"
 
 /opt/homebrew/bin/python3.12 -m venv "$BUILD_DIR/venv"
-"$BUILD_DIR/venv/bin/pip" install -q -e . pyinstaller
+"$BUILD_DIR/venv/bin/pip" install -q -e . "pyinstaller==6.22.3"
 "$BUILD_DIR/venv/bin/pyinstaller" --noconfirm --clean \
   --workpath "$BUILD_DIR/work" --specpath "$BUILD_DIR/work" --distpath "$STAGE_DIR" \
   --name lpdev-qa \
