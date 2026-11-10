@@ -148,9 +148,26 @@ async function api(method, url, payload) {
   return body;
 }
 
-async function load(week = state.week) {
+function setLoading(on, text) {
+  const wrap = $('ts-wrap');
+  const indicator = $('ts-loading');
+  if (!on) {
+    wrap.removeAttribute('aria-busy');
+    indicator.hidden = true;
+    return;
+  }
+  const hasTable = Boolean(state.data) && !state.loadError;
+  wrap.setAttribute('aria-busy', 'true');
+  indicator.classList.toggle('over', hasTable);
+  $('ts-loading-text').textContent = text;
+  indicator.hidden = false;
+}
+
+async function load(week = state.week, { busy } = {}) {
   const seq = ++state.loadSeq;
   const query = week ? `?week=${encodeURIComponent(week)}` : '';
+  const switching = !state.data || week !== state.data.week;
+  if (busy || switching) setLoading(true, switching && state.data ? 'Загружаю неделю…' : busy ? 'Обновляю…' : 'Загружаю неделю…');
   try {
     const data = await api('GET', `/api/timesheet${query}`);
     if (seq !== state.loadSeq) return;
@@ -169,6 +186,7 @@ async function load(week = state.week) {
     if (seq !== state.loadSeq) return;
     state.loadError = error.message || String(error);
   }
+  setLoading(false);
   render();
 }
 
@@ -198,7 +216,7 @@ function renderBanners() {
     banners.push(
       el('div', { className: 'flash err', attrs: { role: 'alert' } }, [
         el('span', { text: `Не удалось загрузить таймшит: ${state.loadError} ` }),
-        button('Повторить', { onClick: () => load() }),
+        button('Повторить', { onClick: () => load(state.week, { busy: true }) }),
       ]),
     );
   }
@@ -383,6 +401,17 @@ function dataCell(row, day) {
       }),
     );
   }
+  const tracker = trackerState();
+  if (editable && tracker.enabled && cellValue(cell) > 0 && !isUncertain(cell)) {
+    box.append(
+      button('✓', {
+        className: 'submit-cell-btn',
+        title: tracker.submitEnabled ? `Списать ${formatHours(cellValue(cell))} ч` : SUBMIT_DISABLED_TITLE,
+        attrs: { 'aria-label': `${row.key}, ${dayLabel(day.date)}: списать`, disabled: !tracker.submitEnabled },
+        onClick: () => openSubmitDialog({ type: 'cell', key: row.key, date: day.date }),
+      }),
+    );
+  }
   if (cell?.submission && SUBMISSION_TITLES[cell.submission]) {
     box.append(
       el('span', {
@@ -403,7 +432,7 @@ function dataCell(row, day) {
             className: 'refresh-btn',
             title: SUBMISSION_TITLES[cell.submission],
             attrs: { 'aria-label': `${row.key}, ${dayLabel(day.date)}: ${SUBMISSION_TITLES[cell.submission]}. Обновить` },
-            onClick: () => load(),
+            onClick: () => load(state.week, { busy: true }),
           })
         : null,
     ]),
@@ -758,6 +787,7 @@ async function addTask(event) {
 }
 
 function dialogTitle(scope) {
+  if (scope.type === 'cell') return `Списать ${scope.key} · ${dayLabel(scope.date)}`;
   if (scope.type === 'day') return `Списать ${dayLabel(scope.date)}`;
   return `Списать: ${weekLabel(state.data)}`;
 }
@@ -783,7 +813,68 @@ function dayWarning(group) {
   return null;
 }
 
+function cellConfirmView(scope) {
+  const title = dialogTitle(scope);
+  const row = state.data.rows.find((item) => item.key === scope.key);
+  const day = state.data.days.find((item) => item.date === scope.date);
+  const cell = row?.cells?.[scope.date];
+  if (!row || !day || cellValue(cell) <= 0 || isUncertain(cell)) {
+    setDialog(title, [el('p', { text: 'Нечего списывать: значение изменилось, проверьте ячейку.' })], [
+      button('Закрыть', { onClick: closeDialog }),
+    ]);
+    return null;
+  }
+  const step = stepOf(state.data);
+  const input = el('input', {
+    className: 'dlg-hours',
+    attrs: { id: 'dlg-hours', type: 'text', inputmode: 'decimal', autocomplete: 'off', 'aria-describedby': 'dlg-hours-error' },
+  });
+  input.value = formatHours(cellValue(cell));
+  const error = el('p', { className: 'dlg-errors', attrs: { id: 'dlg-hours-error', 'aria-live': 'polite' } });
+  const otherPlanned = dayTotals(state.data).find((total) => total.date === scope.date);
+  const logged = cell?.logged ?? 0;
+  const body = [
+    displayTitle(row) ? el('p', { className: 'dlg-task', text: displayTitle(row) }) : null,
+    el('label', { className: 'dlg-field', attrs: { for: 'dlg-hours' } }, [el('span', { text: 'Часы к списанию' }), input]),
+    error,
+    el('p', {
+      className: 'dlg-note',
+      text: `${logged > 0 ? `Уже списано на задачу в этот день: ${formatHours(logged)} ч. ` : ''}За день списано ${formatHours(day.logged)} из ${formatHours(day.norm)} ч.`,
+    }),
+    otherPlanned && otherPlanned.over > 0 ? el('p', { className: 'dlg-note', text: `В таблице на этот день перебор +${formatHours(otherPlanned.over)} ч` }) : null,
+  ].filter(Boolean);
+  const submit = () => {
+    const minutes = parseHours(input.value, step);
+    if (minutes == null || minutes <= 0) {
+      error.textContent = `Укажите часы больше нуля с шагом ${formatHours(step)}`;
+      input.setAttribute('aria-invalid', 'true');
+      input.focus();
+      return;
+    }
+    if (day.logged + minutes > day.norm) {
+      error.textContent = `Вместе с уже списанным выйдет ${formatHours(day.logged + minutes)} ч — больше нормы дня ${formatHours(day.norm)} ч`;
+      input.setAttribute('aria-invalid', 'true');
+      input.focus();
+      return;
+    }
+    send(title, [{ key: scope.key, date: scope.date, minutes }]);
+  };
+  input.addEventListener('input', () => {
+    error.textContent = '';
+    input.removeAttribute('aria-invalid');
+  });
+  input.addEventListener('keydown', (event) => {
+    if (event.key === 'Enter') {
+      event.preventDefault();
+      submit();
+    }
+  });
+  setDialog(title, body, [button('Отменить', { onClick: closeDialog }), button('Отправить', { className: 'primary', onClick: submit })]);
+  return input;
+}
+
 function confirmView(scope) {
+  if (scope.type === 'cell') return cellConfirmView(scope);
   const entries = buildSubmitEntries(state.data, scope);
   const title = dialogTitle(scope);
   if (entries.length === 0) {
@@ -840,6 +931,13 @@ async function send(title, entries) {
   }
   state.dialog.sending = false;
   state.dialog.changed = true;
+  const single = entries.length === 1 && results?.length === 1 ? results[0] : null;
+  if (single && (single.status === 'done' || single.status === 'skipped')) {
+    const verb = single.status === 'done' ? 'Списано' : 'Уже было списано';
+    $('submit-dialog').close();
+    setStatus(`${verb}: ${single.key} · ${dayLabel(single.date)} · ${formatHours(single.minutes)} ч`);
+    return;
+  }
   if (failure) {
     setDialog(title, [el('p', { className: 'dlg-errors', text: `Не удалось отправить: ${failure.message}` })], [
       button('Закрыть', { onClick: closeDialog }),
@@ -920,6 +1018,7 @@ async function openSubmitDialog(scope) {
   const confirmButton = confirmView(scope);
   dialog.showModal();
   (confirmButton ?? $('dlg-actions').querySelector('button'))?.focus();
+  if (confirmButton?.tagName === 'INPUT') confirmButton.select();
 }
 
 function init() {
@@ -961,7 +1060,7 @@ function init() {
     if (state.dialog.sending) event.preventDefault();
   });
   dialog.addEventListener('close', () => {
-    if (state.dialog.changed) load();
+    if (state.dialog.changed) load(state.week, { busy: true });
   });
 
   window.addEventListener('beforeunload', (event) => {

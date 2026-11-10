@@ -67,6 +67,8 @@
   .reset-btn { padding: 0 0.3rem; border: 0; background: none; color: var(--muted); opacity: 0; line-height: 1.6; }
   .ts td.day:hover .reset-btn, .cell-box:focus-within .reset-btn, .reset-btn:focus-visible { opacity: 1; }
   .step-btn { display: none; }
+  .submit-cell-btn { padding: 0 0.35rem; line-height: 1.5; font-size: 0.8rem; background: var(--surface); color: var(--ok-fg); border-color: var(--border); }
+  .submit-cell-btn:hover:not(:disabled) { background: var(--ok-bg); border-color: var(--ok-fg); }
   .refresh-btn { padding: 0.05rem 0.45rem; font-size: 0.72rem; background: var(--surface); color: var(--warn-fg); border-color: var(--warn-fg); }
   .under-note { display: block; font-size: 0.72rem; font-weight: 500; color: var(--muted); white-space: normal; max-width: 9rem; margin: 0 auto; }
   tr.quiet-toggle td { padding: 0; background: var(--surface); }
@@ -87,6 +89,15 @@
   tr.unkeyed li { overflow-wrap: anywhere; }
   .unkeyed-value { font-style: italic; font-variant-numeric: tabular-nums; }
   .empty { padding: 1.5rem; text-align: center; color: var(--muted); }
+  .ts-wrap { position: relative; }
+  .ts-wrap[aria-busy="true"] table { opacity: 0.4; pointer-events: none; transition: opacity 0.15s ease; }
+  .ts-loading { display: flex; align-items: center; justify-content: center; gap: 0.6rem; padding: 1.5rem; color: var(--muted); }
+  .ts-loading.over { position: absolute; inset: 0 0 auto 0; z-index: 3; padding-top: 3rem; color: var(--text); font-weight: 600; }
+  .ts-loading[hidden] { display: none; }
+  .spinner { width: 1.1rem; height: 1.1rem; border: 2px solid var(--border); border-top-color: var(--link); border-radius: 50%;
+             animation: ts-spin 0.8s linear infinite; }
+  @keyframes ts-spin { to { transform: rotate(360deg); } }
+  @media (prefers-reduced-motion: reduce) { .spinner { animation: none; } }
   .ts-foot-tools { display: flex; flex-wrap: wrap; gap: 0.6rem 1rem; align-items: flex-start; margin-top: 0.8rem; }
   .add-task { display: flex; gap: 0.5rem; flex-wrap: wrap; align-items: center; }
   .add-task input { width: 14em; font-family: var(--mono); text-transform: uppercase; }
@@ -112,13 +123,18 @@
   .dlg-warn.under { background: var(--warn-bg); color: var(--warn-fg); }
   .dlg-note { font-size: 0.85rem; color: var(--muted); margin: 0.3rem 0 0; }
   .dlg-summary { font-weight: 600; margin: 0.4rem 0; }
-  .dlg-errors li { color: var(--err-fg); }
+  .dlg-errors li, p.dlg-errors { color: var(--err-fg); }
+  p.dlg-errors:empty { display: none; }
+  .dlg-task { margin: 0.2rem 0 0.6rem; overflow-wrap: anywhere; }
+  .dlg-field { display: flex; align-items: center; gap: 0.6rem; flex-wrap: wrap; }
+  .dlg-hours { width: 6em; font-variant-numeric: tabular-nums; text-align: center; }
   .dlg-actions { display: flex; justify-content: flex-end; gap: 0.5rem; flex-wrap: wrap; padding: 0.8rem 1.2rem; border-top: 1px solid var(--border); }
   .visually-hidden { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
   @media (hover: none) {
     .step-btn { display: inline-grid; place-items: center; min-width: 40px; min-height: 40px; padding: 0; }
     .cell-input { min-height: 40px; }
     .reset-btn { opacity: 1; min-width: 40px; min-height: 40px; }
+    .submit-cell-btn { min-width: 40px; min-height: 40px; }
     .day-menu-btn { min-width: 40px; min-height: 40px; }
     .menu button { min-height: 40px; }
   }
@@ -152,7 +168,8 @@
   </div>
 </div>
 <div id="banners"></div>
-<div class="table-wrap ts-wrap">
+<div class="table-wrap ts-wrap" id="ts-wrap">
+  <div class="ts-loading" id="ts-loading" role="status" aria-live="polite" hidden><span class="spinner" aria-hidden="true"></span><span id="ts-loading-text">Загружаю неделю…</span></div>
   <table class="ts" aria-describedby="ts-legend">
     <thead id="ts-head"></thead>
     <tbody id="ts-body"></tbody>
