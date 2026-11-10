@@ -25,7 +25,7 @@ describe('mergeProjects', () => {
     );
     const byId = Object.fromEntries(projects.map((project) => [project.id, project]));
     assert.equal(byId[1].radar, true);
-    assert.deepEqual(byId[2].review, { agent: 'a', push: true });
+    assert.deepEqual(byId[2].review, { agent: 'a' });
     assert.equal(byId[9].known, false);
     assert.equal(byId[9].path, 'old/x');
     assert.equal(byId[7].path, '#7');
@@ -66,9 +66,9 @@ describe('matchesQuery', () => {
 
 describe('settingsPayloadProjects', () => {
   it('builds review projects and sorted radar ids', () => {
-    const projects = mergeProjects(gitlab, [{ gitlab_project_id: 3, slug: 'tools/ci', agent: '', re_review_on_push: false }], [3, 1]);
+    const projects = mergeProjects(gitlab, [{ gitlab_project_id: 3, slug: 'tools/ci', agent: '', }], [3, 1]);
     assert.deepEqual(settingsPayloadProjects(projects, 'default-agent'), {
-      review: [{ gitlab_project_id: 3, slug: 'tools/ci', agent: 'default-agent', re_review_on_push: false }],
+      review: [{ gitlab_project_id: 3, slug: 'tools/ci', agent: 'default-agent' }],
       radarIds: [1, 3],
     });
   });
@@ -91,13 +91,13 @@ describe('adding a project by link or path', async () => {
     const projects = mergeProjects(gitlab, [], []);
     const added = addProjectByPath(projects, 'other/team/app', 'agent-x');
     const fresh = added.find((project) => project.key === 'new:other/team/app');
-    assert.deepEqual(fresh.review, { agent: 'agent-x', push: false });
+    assert.deepEqual(fresh.review, { agent: 'agent-x' });
     assert.equal(fresh.id, null);
     const reused = addProjectByPath(projects, 'TOOLS/ci', 'agent-x');
     assert.equal(reused.length, projects.length);
-    assert.deepEqual(reused.find((project) => project.id === 3).review, { agent: 'agent-x', push: false });
+    assert.deepEqual(reused.find((project) => project.id === 3).review, { agent: 'agent-x' });
     assert.deepEqual(settingsPayloadProjects(added, 'd').review, [
-      { gitlab_project_id: null, slug: 'other/team/app', agent: 'agent-x', re_review_on_push: false },
+      { gitlab_project_id: null, slug: 'other/team/app', agent: 'agent-x' },
     ]);
   });
 });
@@ -105,15 +105,15 @@ describe('adding a project by link or path', async () => {
 describe('projects added by link survive reloading the list', () => {
   it('keeps every unresolved project and folds a listed path into the known project', () => {
     const pending = [
-      { gitlab_project_id: null, slug: 'other/one', agent: 'a', re_review_on_push: false },
-      { gitlab_project_id: null, slug: 'other/two', agent: 'b', re_review_on_push: true },
-      { gitlab_project_id: null, slug: 'TOOLS/ci', agent: 'c', re_review_on_push: false },
+      { gitlab_project_id: null, slug: 'other/one', agent: 'a', },
+      { gitlab_project_id: null, slug: 'other/two', agent: 'b', },
+      { gitlab_project_id: null, slug: 'TOOLS/ci', agent: 'c', },
     ];
     const projects = mergeProjects(gitlab, pending, []);
     const keys = projects.map((project) => project.key);
     assert.ok(keys.includes('new:other/one') && keys.includes('new:other/two'));
     assert.equal(projects.filter((project) => project.path.toLowerCase() === 'tools/ci').length, 1);
-    assert.deepEqual(projects.find((project) => project.id === 3).review, { agent: 'c', push: false });
+    assert.deepEqual(projects.find((project) => project.id === 3).review, { agent: 'c' });
     assert.deepEqual(settingsPayloadProjects(projects, 'd').review.map((project) => project.gitlab_project_id ?? project.slug), [
       'other/one',
       'other/two',

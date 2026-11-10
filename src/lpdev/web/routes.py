@@ -22,6 +22,7 @@ from lpdev.config import Config, default_config_path, load_config
 from lpdev.db import (
     create_question,
     create_review,
+    finish_review,
     get_review,
     has_active_question,
     list_mrs,
@@ -313,6 +314,23 @@ async def start_mr_review(request: Request, gitlab_project_id: int, iid: int):
         review_id = existing["id"]
     _wake_workers(request)
     return JSONResponse({"review_id": review_id}, status_code=201)
+
+
+@router.post("/reviews/{review_id}/cancel")
+async def review_cancel(request: Request, review_id: int):
+    if request.headers.get("x-requested-with") != "lpdev":
+        return PlainTextResponse("forbidden", status_code=403)
+    ctx = _ctx(request)
+    review = get_review(ctx.conn, review_id)
+    if review is None:
+        return PlainTextResponse("not found", status_code=404)
+    if review["status"] not in ACTIVE_STATUSES:
+        return PlainTextResponse("ревью не выполняется", status_code=409)
+    finish_review(ctx.conn, review_id, "cancelled", error="отменено вручную")
+    registry = getattr(request.app.state, "review_registry", None)
+    if registry is not None:
+        registry.cancel(review_id)
+    return JSONResponse({"review_id": review_id, "status": "cancelled"})
 
 
 MR_ROW_FIELDS = (

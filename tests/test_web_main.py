@@ -103,6 +103,34 @@ async def test_retry_requires_header(ctx):
     assert get_review(ctx_obj.conn, review_id)["status"] == "queued"
 
 
+async def test_cancel_review_requires_header(ctx):
+    ctx_obj, review_id = ctx
+    async with _client(ctx_obj) as client:
+        forbidden = await client.post(f"/reviews/{review_id}/cancel")
+        ok = await client.post(
+            f"/reviews/{review_id}/cancel", headers={"X-Requested-With": "lpdev"}
+        )
+    assert forbidden.status_code == 403
+    assert ok.status_code == 200
+    assert ok.json() == {"review_id": review_id, "status": "cancelled"}
+    from lpdev.db import get_review
+
+    row = get_review(ctx_obj.conn, review_id)
+    assert row["status"] == "cancelled"
+    assert row["error"] == "отменено вручную"
+    assert row["finished_at"] is not None
+
+
+async def test_cancel_review_rejects_finished(ctx):
+    ctx_obj, review_id = ctx
+    finish_review(ctx_obj.conn, review_id, "done", review_md="ok")
+    async with _client(ctx_obj) as client:
+        response = await client.post(
+            f"/reviews/{review_id}/cancel", headers={"X-Requested-With": "lpdev"}
+        )
+    assert response.status_code == 409
+
+
 async def test_index_embeds_severity_counts(ctx):
     ctx_obj, review_id = ctx
     from lpdev.db import finish_review

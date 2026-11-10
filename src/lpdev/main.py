@@ -225,6 +225,7 @@ def create_app(ctx: AppContext, port: int = DEFAULT_PORT, timesheet_only: bool =
         app.state.radar = radar
         poller = Poller(ctx.conn, ctx.api, ctx.config, ctx.project_ids)
         app.state.poller = poller
+        app.state.review_registry = registry
         app.state.work_event = work_event
         worker_count = ctx.config.review.max_parallel
         app.state.worker_count = worker_count

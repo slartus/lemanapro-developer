@@ -312,13 +312,44 @@ async function startReview(row, button) {
   }
 }
 
+async function cancelReview(row, button) {
+  button.disabled = true;
+  const reviewId = row.watch?.latest_review_id;
+  try {
+    const response = await fetch(`/reviews/${Number(reviewId)}/cancel`, {
+      method: 'POST',
+      headers: { 'X-Requested-With': 'lpdev' },
+    });
+    showStatus(response.ok ? { text: 'ревью остановлено' } : { text: (await response.text()) || `ошибка ${response.status}`, error: true });
+    refresh();
+  } catch {
+    showStatus({ text: 'сервис не отвечает', error: true });
+  } finally {
+    button.disabled = false;
+  }
+}
+
 function reviewButton(row) {
   const watch = row.watch;
   const projectId = Number(row.key.split('!')[0]);
-  if (ACTIVE_REVIEW_STATUSES.has(watch?.latest_review_status)) return null;
+  const title = row.radar?.title ?? watch?.title ?? row.key;
+  if (ACTIVE_REVIEW_STATUSES.has(watch?.latest_review_status)) {
+    if (!watch?.latest_review_id) return null;
+    const stop = el('button', {
+      className: 'icon-btn review-btn',
+      text: '■ Стоп',
+      attrs: {
+        type: 'button',
+        title: 'Остановить ревью',
+        'aria-label': `Остановить ревью: ${title}`,
+        'data-focus-id': `review:${row.key}`,
+      },
+    });
+    stop.addEventListener('click', () => cancelReview(row, stop));
+    return stop;
+  }
   if (!watch?.latest_review_id && !state.reviewProjects.has(projectId)) return null;
   const rerun = Boolean(watch?.latest_review_id);
-  const title = row.radar?.title ?? watch?.title ?? row.key;
   const button = el('button', {
     className: 'icon-btn review-btn',
     text: rerun ? '↻' : '▶ Ревью',

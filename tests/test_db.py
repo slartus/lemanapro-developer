@@ -23,7 +23,6 @@ from lpdev.db import (
     list_questions,
     question_rejection_reason,
     mark_reviewing,
-    mr_wants_review,
     poll_state_get,
     poll_state_set,
     rebase_and_defer_review,
@@ -738,59 +737,6 @@ def test_list_mrs_ignores_cancelled_for_verdict(conn):
     assert row["latest_review_status"] == "cancelled"
 
 
-
-def _upsert_draft(conn, project_db_id, is_draft):
-    return upsert_mr(
-        conn,
-        project_db_id=project_db_id,
-        iid=1,
-        title="MR title",
-        author_username="alice",
-        source_branch="feature",
-        web_url="https://gitlab.example.com/group/proj/-/merge_requests/1",
-        state="opened",
-        head_sha="a" * 40,
-        updated_at="2026-01-01T00:00:00Z",
-        is_draft=is_draft,
-    )
-
-
-def test_upsert_reports_draft_transitions(conn):
-    project_id = _sync_projects(conn)[10]
-    inserted = _upsert_draft(conn, project_id, True)
-    assert not inserted.became_ready and not inserted.became_draft
-
-    unknown = _upsert_draft(conn, project_id, None)
-    assert not unknown.became_ready and not unknown.became_draft
-
-    ready = _upsert_draft(conn, project_id, False)
-    assert ready.became_ready and not ready.became_draft
-
-    still_ready = _upsert_draft(conn, project_id, None)
-    assert not still_ready.became_ready and not still_ready.became_draft
-
-    drafted = _upsert_draft(conn, project_id, True)
-    assert drafted.became_draft and not drafted.became_ready
-
-    still_draft = _upsert_draft(conn, project_id, True)
-    assert not still_draft.became_ready and not still_draft.became_draft
-
-
-def test_mr_wants_review_by_roles_or_history(conn):
-    project_id = _sync_projects(conn)[10]
-    mr_id = _upsert_mr(conn, project_id).mr_id
-    assert not mr_wants_review(conn, mr_id)
-    assert not mr_wants_review(conn, mr_id + 100)
-
-    conn.execute("UPDATE mr SET my_roles = 'assignee' WHERE id = ?", (mr_id,))
-    assert not mr_wants_review(conn, mr_id)
-    for roles in ("reviewer", "author", "assignee,mentioned"):
-        conn.execute("UPDATE mr SET my_roles = ? WHERE id = ?", (roles, mr_id))
-        assert mr_wants_review(conn, mr_id)
-
-    conn.execute("UPDATE mr SET my_roles = '' WHERE id = ?", (mr_id,))
-    create_review(conn, mr_id, "manual", "a" * 40, "agent-a")
-    assert mr_wants_review(conn, mr_id)
 
 
 def _done_review(conn, session_id="ses_root1", head_sha="a" * 40, trigger="new"):

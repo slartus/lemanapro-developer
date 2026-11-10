@@ -116,7 +116,9 @@
 {% endif %}
 <div class="review-text" id="rt">{{ render_rows(rows) }}</div>
 {% elif review["status"] in ("queued", "cloning", "reviewing") %}
-<p class="muted">ревью выполняется… страница обновится автоматически</p>
+<p class="muted">ревью выполняется… страница обновится автоматически
+<button id="cancel-btn" type="button" onclick="cancelReview()">Остановить</button>
+<span id="cancel-msg" class="small muted" role="status"></span></p>
 {% else %}
 <p class="muted">результата нет</p>
 {% endif %}
@@ -150,6 +152,34 @@ function toggleSnippets(btn) {
 
 const ACTIVE_STATUS = ["queued", "cloning", "reviewing"];
 const CURRENT = {{ review["status"] | tojson }};
+
+async function cancelReview() {
+  const btn = document.getElementById("cancel-btn");
+  const msg = document.getElementById("cancel-msg");
+  if (btn.disabled) return;
+  btn.disabled = true;
+  msg.className = "small muted";
+  msg.textContent = "останавливаю…";
+  try {
+    const r = await fetch("/reviews/{{ review["id"] }}/cancel", {
+      method: "POST",
+      headers: {"X-Requested-With": "lpdev"},
+    });
+    if (!r.ok) {
+      msg.className = "small";
+      msg.style.color = "var(--err-fg)";
+      msg.textContent = "ошибка " + r.status + ": " + (await r.text());
+      btn.disabled = false;
+      return;
+    }
+    location.reload();
+  } catch (e) {
+    msg.className = "small";
+    msg.style.color = "var(--err-fg)";
+    msg.textContent = "ошибка сети";
+    btn.disabled = false;
+  }
+}
 
 async function retry() {
   const btn = document.getElementById("retry-btn");

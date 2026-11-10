@@ -150,6 +150,7 @@ async def test_clone_failure_error_text_masks_token(tmp_path):
 MUTATING_ROUTES = [
     "/force-check",
     "/reviews/1/retry",
+    "/reviews/1/cancel",
     "/reviews/1/questions",
     "/settings",
     "/api/mr/1/1/review",

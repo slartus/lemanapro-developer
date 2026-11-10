@@ -13,7 +13,6 @@ SCHEMA_VERSION = 14
 
 DERIVED_ROLES = frozenset({"reviewer", "assignee", "author"})
 MENTIONED_ROLE = "mentioned"
-READY_REVIEW_ROLES = frozenset({"reviewer", "author", MENTIONED_ROLE})
 
 
 DRAFT_CANCEL_ERROR = "отменено: MR переведён в draft"
@@ -46,8 +45,6 @@ class MrUpsertResult:
     mr_id: int
     inserted: bool
     head_sha_changed: bool
-    became_ready: bool = False
-    became_draft: bool = False
 
 
 def connect(db_path: Path) -> sqlite3.Connection:
@@ -408,7 +405,6 @@ def upsert_mr(
             head_sha_changed=True,
         )
     head_sha_changed = head_sha is not None and row["head_sha"] != head_sha
-    was_draft = bool(row["is_draft"])
     conn.execute(
         """
         UPDATE mr
@@ -440,8 +436,6 @@ def upsert_mr(
         mr_id=int(row["id"]),
         inserted=False,
         head_sha_changed=head_sha_changed,
-        became_ready=was_draft and is_draft is False,
-        became_draft=not was_draft and is_draft is True,
     )
 
 
@@ -465,17 +459,6 @@ def create_review(
     if cursor.rowcount == 0:
         return None
     return int(cursor.lastrowid)
-
-
-def mr_wants_review(conn: sqlite3.Connection, mr_id: int) -> bool:
-    row = conn.execute("SELECT my_roles FROM mr WHERE id = ?", (mr_id,)).fetchone()
-    if row is None:
-        return False
-    if _parse_roles(row["my_roles"]) & READY_REVIEW_ROLES:
-        return True
-    return conn.execute(
-        "SELECT 1 FROM review WHERE mr_id = ? LIMIT 1", (mr_id,)
-    ).fetchone() is not None
 
 
 def claim_next_review(conn: sqlite3.Connection) -> sqlite3.Row | None:
