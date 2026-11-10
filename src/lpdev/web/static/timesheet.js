@@ -54,6 +54,7 @@ const state = {
   showQuiet: false,
   rowOrder: [],
   opening: false,
+  saveErrors: new Map(),
   loadSeq: 0,
   loadError: null,
   inputs: new Map(),
@@ -153,6 +154,7 @@ async function load(week = state.week) {
     const data = await api('GET', `/api/timesheet${query}`);
     if (seq !== state.loadSeq) return;
     if (data.week !== state.data?.week) {
+      state.saveErrors.clear();
       state.showWeekend = false;
       state.showQuiet = false;
     }
@@ -180,9 +182,6 @@ function applySubmitAvailability(node, entriesCount) {
   if (!tracker.submitEnabled) {
     node.disabled = true;
     node.title = SUBMIT_DISABLED_TITLE;
-  } else if (state.saving > 0 || state.opening) {
-    node.disabled = true;
-    node.title = 'Дождитесь сохранения правок';
   } else if (entriesCount === 0) {
     node.disabled = true;
     node.title = 'Нечего списывать';
@@ -327,6 +326,12 @@ function dataCell(row, day) {
   input.dataset.key = row.key;
   input.dataset.date = day.date;
   input.dataset.original = input.value;
+  const saveError = state.saveErrors.get(`${row.key}|${day.date}`);
+  if (saveError) {
+    input.classList.add('invalid');
+    input.setAttribute('aria-invalid', 'true');
+    input.title = saveError;
+  }
   if (editable) {
     bindInput(input);
     state.inputs.set(`${row.key}|${day.date}`, input);
@@ -554,19 +559,32 @@ function render() {
   renderTable();
 }
 
+function saveErrorText() {
+  const [first] = state.saveErrors.values();
+  if (!first) return '';
+  const more = state.saveErrors.size > 1 ? ` (и ещё ${state.saveErrors.size - 1})` : '';
+  return `${first}${more}`;
+}
+
 function save(payload) {
+  const cellKey = `${payload.key}|${payload.date}`;
   state.saving += 1;
-  refreshSubmitButtons();
   setStatus('Сохраняю…');
   state.saveChain = state.saveChain
     .then(() => api('PUT', '/api/timesheet/cell', payload))
     .then(
-      () => setStatus('Сохранено', 'ok'),
-      (error) => setStatus(`Не сохранилось (${payload.key}, ${shortDate(payload.date)}): ${error.message}`, 'err'),
+      () => {
+        state.saveErrors.delete(cellKey);
+        if (state.saveErrors.size) setStatus(saveErrorText(), 'err');
+        else setStatus('Сохранено', 'ok');
+      },
+      (error) => {
+        state.saveErrors.set(cellKey, `Не сохранилось (${payload.key}, ${shortDate(payload.date)}): ${error.message}`);
+        setStatus(saveErrorText(), 'err');
+      },
     )
     .finally(() => {
       state.saving -= 1;
-      refreshSubmitButtons();
       if (state.saving === 0) return load();
     });
   return state.saveChain;
@@ -628,7 +646,9 @@ function bindInput(input) {
       input.value = input.dataset.original;
       input.classList.remove('invalid');
       input.removeAttribute('aria-invalid');
-      setStatus('');
+      input.removeAttribute('title');
+      state.saveErrors.delete(`${input.dataset.key}|${input.dataset.date}`);
+      setStatus(saveErrorText(), state.saveErrors.size ? 'err' : undefined);
       input.select();
     } else if (event.key === 'ArrowUp' || event.key === 'ArrowDown') {
       event.preventDefault();
@@ -677,6 +697,9 @@ async function resetCells(date) {
   setStatus('Сбрасываю…');
   try {
     await api('DELETE', `/api/timesheet/cells?${params}`);
+    [...state.saveErrors.keys()]
+      .filter((cellKey) => !date || cellKey.endsWith(`|${date}`))
+      .forEach((cellKey) => state.saveErrors.delete(cellKey));
     setStatus('Правки сброшены', 'ok');
   } catch (error) {
     setStatus(`Не удалось сбросить: ${error.message}`, 'err');
@@ -860,14 +883,16 @@ async function openSubmitDialog(scope) {
   if (menu.matches(':popover-open')) menu.hidePopover();
   if (document.activeElement?.classList?.contains('cell-input')) document.activeElement.blur();
   state.opening = true;
-  refreshSubmitButtons();
   setStatus('Сохраняю правки и обновляю неделю…');
   try {
     await state.saveChain;
+    if (state.saveErrors.size) {
+      setStatus(`${saveErrorText()} — исправьте или сбросьте правку перед списанием`, 'err');
+      return;
+    }
     await load();
   } finally {
     state.opening = false;
-    refreshSubmitButtons();
   }
   if (state.loadError || !state.data || !trackerState().submitEnabled) {
     setStatus('Не удалось обновить неделю перед списанием', 'err');
