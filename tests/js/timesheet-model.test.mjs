@@ -11,12 +11,16 @@ import {
   hiddenDays,
   isEditableDay,
   isSafeUrl,
+  isUncertain,
   isValidIssueKey,
   parseHours,
   retryEntries,
   roundToStep,
+  rowHasHours,
   rowTotals,
+  splitRows,
   stepMinutes,
+  stepOf,
   summarizeResults,
   visibleDays,
 } from '../../src/lpdev/web/static/timesheet-model.js';
@@ -153,9 +157,9 @@ describe('dayTotals', () => {
         unkeyed: { items: [{ title: 'x', url: 'https://x' }], cells: { '2026-11-09': { suggested: 600 } } },
       }),
     );
-    assert.deepEqual(totals[0], { date: '2026-11-09', logged: 120, planned: 420, total: 540, norm: 480, over: 60, under: 0 });
-    assert.deepEqual(totals[1], { date: '2026-11-10', logged: 0, planned: 300, total: 300, norm: 480, over: 0, under: 180 });
-    assert.deepEqual(totals[5], { date: '2026-11-14', logged: 30, planned: 0, total: 30, norm: 0, over: 30, under: 0 });
+    assert.deepEqual(totals[0], { date: '2026-11-09', logged: 120, planned: 420, total: 540, norm: 480, over: 60, under: 0, unkeyed: 600 });
+    assert.deepEqual(totals[1], { date: '2026-11-10', logged: 0, planned: 300, total: 300, norm: 480, over: 0, under: 180, unkeyed: 0 });
+    assert.deepEqual(totals[5], { date: '2026-11-14', logged: 30, planned: 0, total: 30, norm: 0, over: 30, under: 0, unkeyed: 0 });
   });
 });
 
@@ -292,6 +296,7 @@ describe('groupEntriesByDay', () => {
       total: 540,
       over: 60,
       under: 0,
+      unkeyed: 0,
       minutes: 480,
       entries: [{ key: 'A-1', date: '2026-11-10', minutes: 480, title: 'Title A-1' }],
     });
@@ -331,5 +336,71 @@ describe('isSafeUrl', () => {
     assert.equal(isSafeUrl('http://x'), true);
     assert.equal(isSafeUrl('javascript:alert(1)'), false);
     assert.equal(isSafeUrl(null), false);
+  });
+});
+
+describe('custom step', () => {
+  it('takes the step from data and falls back to 30', () => {
+    assert.equal(stepOf({ step: 60 }), 60);
+    assert.equal(stepOf({ step: 15 }), 15);
+    assert.equal(stepOf({}), 30);
+    assert.equal(stepOf({ step: 0 }), 30);
+    assert.equal(stepOf({ step: 'x' }), 30);
+    assert.equal(stepOf(null), 30);
+  });
+
+  it('parses and rounds with a 60-minute step', () => {
+    assert.equal(parseHours('1.4', 60), 60);
+    assert.equal(parseHours('1.5', 60), 120);
+    assert.equal(parseHours('0.4', 60), 0);
+    assert.equal(roundToStep(89, 60), 60);
+    assert.equal(stepMinutes(60, 1, 60), 120);
+    assert.equal(stepMinutes(90, -1, 60), 60);
+    assert.equal(stepMinutes(90, 1, 60), 120);
+  });
+
+  it('parses and rounds with a 15-minute step', () => {
+    assert.equal(parseHours('0.25', 15), 15);
+    assert.equal(parseHours('1,1', 15), 60);
+    assert.equal(parseHours('1.2', 15), 75);
+    assert.equal(stepMinutes(60, 1, 15), 75);
+    assert.equal(stepMinutes(60, -1, 15), 45);
+    assert.equal(stepMinutes(50, -1, 15), 45);
+    assert.equal(stepMinutes(0, -1, 15), 0);
+  });
+});
+
+describe('splitRows', () => {
+  it('moves rows without any hours to the quiet group, keeping manual ones active', () => {
+    const sample = data({
+      rows: [
+        row('A-1', { '2026-11-09': cell({ suggested: 30 }) }),
+        row('B-2', { '2026-11-09': cell() }, { sources: ['review'] }),
+        row('C-3', {}, { sources: ['comment', 'review'] }),
+        row('D-4', {}, { sources: ['manual'] }),
+        row('E-5', { '2026-11-10': cell({ edited: 0 }) }, { sources: ['review'] }),
+        row('F-6', { '2026-11-10': cell({ logged: 60 }) }, { sources: ['comment'] }),
+      ],
+    });
+    const { active, quiet } = splitRows(sample);
+    assert.deepEqual(
+      active.map((item) => item.key),
+      ['A-1', 'D-4', 'E-5', 'F-6'],
+    );
+    assert.deepEqual(
+      quiet.map((item) => item.key),
+      ['B-2', 'C-3'],
+    );
+    assert.equal(rowHasHours(row('X-1', {})), false);
+    assert.deepEqual(splitRows({}), { active: [], quiet: [] });
+  });
+});
+
+describe('isUncertain', () => {
+  it('flags pending and unknown submissions', () => {
+    assert.equal(isUncertain(cell({ submission: 'pending' })), true);
+    assert.equal(isUncertain(cell({ submission: 'unknown' })), true);
+    assert.equal(isUncertain(cell({ submission: 'failed' })), false);
+    assert.equal(isUncertain(undefined), false);
   });
 });

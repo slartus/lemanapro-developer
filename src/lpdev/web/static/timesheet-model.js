@@ -1,4 +1,4 @@
-export const STEP_MINUTES = 30;
+export const DEFAULT_STEP_MINUTES = 30;
 export const MAX_CELL_MINUTES = 24 * 60;
 export const ISSUE_KEY_RE = /^[A-Z][A-Z0-9_]+-\d+$/;
 
@@ -6,12 +6,17 @@ const HOURS_RE = /^(?:\d+(?:\.\d*)?|\.\d+)$/;
 const WORKING_KINDS = new Set(['work', 'short']);
 const BLOCKING_SUBMISSIONS = new Set(['pending', 'unknown']);
 
-export function roundToStep(minutes, step = STEP_MINUTES) {
+export function stepOf(data) {
+  const step = data?.step;
+  return Number.isInteger(step) && step > 0 ? step : DEFAULT_STEP_MINUTES;
+}
+
+export function roundToStep(minutes, step = DEFAULT_STEP_MINUTES) {
   if (!Number.isFinite(minutes) || minutes <= 0) return 0;
   return Math.round(minutes / step) * step;
 }
 
-export function parseHours(input) {
+export function parseHours(input, step = DEFAULT_STEP_MINUTES) {
   const text = String(input ?? '')
     .trim()
     .replace(/\s+/g, '')
@@ -19,7 +24,7 @@ export function parseHours(input) {
     .replace(',', '.');
   if (text === '') return 0;
   if (!HOURS_RE.test(text)) return null;
-  const minutes = roundToStep(Number(text) * 60);
+  const minutes = roundToStep(Number(text) * 60, step);
   return minutes > MAX_CELL_MINUTES ? null : minutes;
 }
 
@@ -40,6 +45,7 @@ export function cellValue(cell) {
 export function dayTotals(data) {
   return (data.days ?? []).map((day) => {
     const planned = (data.rows ?? []).reduce((sum, row) => sum + cellValue(row.cells?.[day.date]), 0);
+    const unkeyed = data.unkeyed?.cells?.[day.date]?.suggested ?? 0;
     const logged = day.logged ?? 0;
     const total = logged + planned;
     const norm = day.norm ?? 0;
@@ -51,8 +57,25 @@ export function dayTotals(data) {
       norm,
       over: Math.max(0, total - norm),
       under: Math.max(0, norm - total),
+      unkeyed,
     };
   });
+}
+
+export function rowHasHours(row) {
+  return Object.values(row.cells ?? {}).some(
+    (cell) => (cell?.suggested ?? 0) > 0 || cell?.edited != null || (cell?.logged ?? 0) > 0,
+  );
+}
+
+export function splitRows(data) {
+  const rows = data.rows ?? [];
+  const isQuiet = (row) => !rowHasHours(row) && !(row.sources ?? []).includes('manual');
+  return { active: rows.filter((row) => !isQuiet(row)), quiet: rows.filter(isQuiet) };
+}
+
+export function isUncertain(cell) {
+  return BLOCKING_SUBMISSIONS.has(cell?.submission);
 }
 
 export function rowTotals(row) {
@@ -136,6 +159,7 @@ export function groupEntriesByDay(data, entries) {
         total: total.total,
         over: total.over,
         under: total.under,
+        unkeyed: total.unkeyed,
         minutes: dayEntries.reduce((sum, entry) => sum + entry.minutes, 0),
         entries: dayEntries,
       };
@@ -161,12 +185,12 @@ export function retryEntries(results) {
     .map(({ key, date, minutes }) => ({ key, date, minutes }));
 }
 
-export function stepMinutes(minutes, direction) {
+export function stepMinutes(minutes, direction, step = DEFAULT_STEP_MINUTES) {
   const base = Math.max(0, minutes ?? 0);
   const next =
     direction > 0
-      ? Math.floor(base / STEP_MINUTES) * STEP_MINUTES + STEP_MINUTES
-      : Math.ceil(base / STEP_MINUTES) * STEP_MINUTES - STEP_MINUTES;
+      ? Math.floor(base / step) * step + step
+      : Math.ceil(base / step) * step - step;
   return Math.min(MAX_CELL_MINUTES, Math.max(0, next));
 }
 

@@ -3,12 +3,15 @@
 {% block title %}Таймшит — lemanapro-developer{% endblock %}
 {% block style %}
   .ts-head { display: flex; flex-wrap: wrap; align-items: center; gap: 0.6rem 1rem; margin-bottom: 0.8rem; }
+  .ts-head > * { min-width: 0; }
   .ts-head h1 { margin: 0; }
-  .week-nav { display: flex; align-items: center; gap: 0.35rem; flex-wrap: wrap; }
+  .week-nav { display: flex; align-items: center; gap: 0.35rem; flex-wrap: wrap; max-width: 100%; }
   .week-nav .nav-arrow { padding: 0.42rem 0.7rem; }
   .week-label { font-weight: 600; min-width: 13em; text-align: center; }
   .ts-tools { margin-left: auto; display: flex; gap: 0.5rem; align-items: center; flex-wrap: wrap; }
-  #banners .flash { margin-bottom: 0.6rem; }
+  #banners .flash { margin-bottom: 0.6rem; max-width: 100%; overflow-wrap: anywhere; }
+  main { min-width: 0; }
+  .ts-wrap { max-width: 100%; }
   .ts-wrap { position: relative; }
   .ts th, .ts td { padding: 0.45rem 0.5rem; }
   .ts th { text-transform: none; letter-spacing: 0; }
@@ -60,6 +63,14 @@
   .reset-btn { padding: 0 0.3rem; border: 0; background: none; color: var(--muted); opacity: 0; line-height: 1.6; }
   .ts td.day:hover .reset-btn, .cell-box:focus-within .reset-btn, .reset-btn:focus-visible { opacity: 1; }
   .step-btn { display: none; }
+  .refresh-btn { padding: 0.05rem 0.45rem; font-size: 0.72rem; background: var(--surface); color: var(--warn-fg); border-color: var(--warn-fg); }
+  .under-note { display: block; font-size: 0.72rem; font-weight: 500; color: var(--muted); white-space: normal; max-width: 9rem; margin: 0 auto; }
+  tr.quiet-toggle td { padding: 0; background: var(--surface); }
+  .quiet-btn { position: sticky; left: 0; border: 0; border-radius: 0; background: none; color: var(--link); padding: 0.55rem 0.85rem; text-align: left; }
+  .quiet-btn::before { content: "▸"; display: inline-block; margin-right: 0.4rem; transition: transform 0.15s ease; }
+  .quiet-btn[aria-expanded="true"]::before { transform: rotate(90deg); }
+  tr.quiet th.task, tr.quiet td { background: var(--surface); }
+  tr.quiet .task-key, tr.quiet .task-title { opacity: 0.8; }
   .ts td.sum { font-variant-numeric: tabular-nums; white-space: nowrap; }
   .sum-sub { display: block; font-size: 0.72rem; font-weight: 500; color: var(--ok-fg); }
   .total { white-space: nowrap; font-variant-numeric: tabular-nums; }
@@ -108,8 +119,11 @@
     .menu button { min-height: 40px; }
   }
   @media (max-width: 760px) {
+    .ts-head { gap: 0.5rem; }
+    .ts-head h1 { flex: 1 1 100%; }
     .ts-tools { margin-left: 0; width: 100%; }
-    .week-label { min-width: 0; }
+    .week-nav { width: 100%; }
+    .week-label { min-width: 0; flex: 1 1 0; font-size: 0.9rem; }
     .ts .task { min-width: 140px; max-width: 180px; padding-left: 0.6rem; }
     .ts .sources { display: none; }
     .ts-tools button, .week-nav button, .add-task button, .add-task input { min-height: 40px; }
@@ -147,7 +161,7 @@
   <span><span class="st-suggested-sample">1.5</span> предложение</span>
   <span class="st-edited-sample">ручная правка</span>
   <span><span class="logged-line">✓ 1</span> уже списано</span>
-  <span>Ввод: часы с шагом 0.5, ↑/↓ — ±0.5, Enter — вниз, Esc — откат</span>
+  <span id="step-hint">Ввод: часы с шагом 0.5, ↑/↓ — ±0.5, Enter — вниз, Esc — откат</span>
 </div>
 <div class="ts-foot-tools">
   <form id="add-task" class="add-task" novalidate>

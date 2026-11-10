@@ -8,11 +8,14 @@ import {
   hiddenDays,
   isEditableDay,
   isSafeUrl,
+  isUncertain,
   isValidIssueKey,
   parseHours,
   retryEntries,
   rowTotals,
+  splitRows,
   stepMinutes,
+  stepOf,
   summarizeResults,
   visibleDays,
 } from '/static/timesheet-model.js';
@@ -37,8 +40,8 @@ const SOURCE_TITLES = {
 const KIND_LABELS = { holiday: 'праздник', weekend: 'выходной' };
 const SUBMISSION_TITLES = {
   failed: 'Прошлое списание не удалось — можно повторить',
-  unknown: 'Статус прошлого списания неизвестен — проверьте в Tracker, прежде чем списывать снова',
-  pending: 'Списание выполняется',
+  unknown: 'Статус неизвестен — проверяется при обновлении',
+  pending: 'Статус неизвестен — проверяется при обновлении',
 };
 const SUBMIT_DISABLED_TITLE = 'Запись в Tracker выключена (tracker.submit_enabled)';
 const JSON_HEADERS = { 'Content-Type': 'application/json', 'X-Requested-With': 'lpdev' };
@@ -48,6 +51,9 @@ const state = {
   data: null,
   week: new URLSearchParams(location.search).get('week'),
   showWeekend: false,
+  showQuiet: false,
+  rowOrder: [],
+  opening: false,
   loadSeq: 0,
   loadError: null,
   inputs: new Map(),
@@ -146,7 +152,10 @@ async function load(week = state.week) {
   try {
     const data = await api('GET', `/api/timesheet${query}`);
     if (seq !== state.loadSeq) return;
-    if (data.week !== state.data?.week) state.showWeekend = false;
+    if (data.week !== state.data?.week) {
+      state.showWeekend = false;
+      state.showQuiet = false;
+    }
     state.data = data;
     state.week = data.week;
     state.loadError = null;
@@ -171,6 +180,9 @@ function applySubmitAvailability(node, entriesCount) {
   if (!tracker.submitEnabled) {
     node.disabled = true;
     node.title = SUBMIT_DISABLED_TITLE;
+  } else if (state.saving > 0 || state.opening) {
+    node.disabled = true;
+    node.title = 'Дождитесь сохранения правок';
   } else if (entriesCount === 0) {
     node.disabled = true;
     node.title = 'Нечего списывать';
@@ -219,7 +231,16 @@ function renderToolbar() {
   toggle.setAttribute('aria-pressed', String(state.showWeekend));
   toggle.textContent = state.showWeekend ? 'Скрыть Сб/Вс' : `Показать ${hidden.map((day) => WEEKDAYS[dayIndex(day.date)]).join('/')}`;
   $('reset-week').disabled = !data;
+  const step = formatHours(stepOf(data));
+  $('step-hint').textContent = `Ввод: часы с шагом ${step}, ↑/↓ — ±${step}, Enter — вниз, Esc — откат`;
+  refreshSubmitButtons();
+}
+
+function refreshSubmitButtons() {
+  const data = state.data;
   applySubmitAvailability($('submit-week'), data ? buildSubmitEntries(data, { type: 'week' }).length : 0);
+  const menu = $('day-menu');
+  if (data && state.menuDate && menu.matches(':popover-open')) updateDayMenu(state.menuDate);
 }
 
 function normText(day) {
@@ -258,6 +279,11 @@ function renderHead(days) {
   );
 }
 
+function displayTitle(row) {
+  const title = row.title ?? '';
+  return title.startsWith(row.key) ? title.slice(row.key.length).replace(/^[\s:·—-]+/, '') : title;
+}
+
 function taskCell(row) {
   const key = isSafeUrl(row.url)
     ? el('a', { className: 'task-key', text: row.key, attrs: { href: row.url, target: '_blank', rel: 'noopener noreferrer' } })
@@ -267,7 +293,7 @@ function taskCell(row) {
   );
   return el('th', { className: 'task', attrs: { scope: 'row' } }, [
     key,
-    row.title ? el('div', { className: 'task-title', text: row.title, attrs: { title: row.title } }) : null,
+    displayTitle(row) ? el('div', { className: 'task-title', text: displayTitle(row), attrs: { title: row.title } }) : null,
     sources.length ? el('div', { className: 'sources' }, sources) : null,
   ]);
 }
@@ -284,6 +310,7 @@ function dataCell(row, day) {
   const editable = isEditableDay(day, state.data.today);
   const isToday = day.date === state.data.today;
   const label = `${row.key}, ${dayLabel(day.date)}: часов к списанию`;
+  const step = formatHours(stepOf(state.data));
   const input = el('input', {
     className: 'cell-input',
     attrs: {
@@ -310,7 +337,7 @@ function dataCell(row, day) {
     box.append(
       button('−', {
         className: 'step-btn',
-        attrs: { 'aria-label': `${label}: −0.5`, tabindex: '-1' },
+        attrs: { 'aria-label': `${label}: −${step}`, tabindex: '-1' },
         onClick: () => stepAndSave(input, -1),
       }),
     );
@@ -320,7 +347,7 @@ function dataCell(row, day) {
     box.append(
       button('+', {
         className: 'step-btn',
-        attrs: { 'aria-label': `${label}: +0.5`, tabindex: '-1' },
+        attrs: { 'aria-label': `${label}: +${step}`, tabindex: '-1' },
         onClick: () => stepAndSave(input, 1),
       }),
     );
@@ -345,10 +372,19 @@ function dataCell(row, day) {
     );
   }
   const logged = cell?.logged ?? 0;
+  const uncertain = isUncertain(cell);
   return el('td', { className: `day st-${stateName}${isToday ? ' today' : ''}` }, [
     el('div', { className: 'cell' }, [
       logged > 0 ? el('span', { className: 'logged-line', text: `✓ ${formatHours(logged)}`, attrs: { title: 'Уже списано в Tracker' } }) : null,
       box,
+      uncertain
+        ? button('Обновить', {
+            className: 'refresh-btn',
+            title: SUBMISSION_TITLES[cell.submission],
+            attrs: { 'aria-label': `${row.key}, ${dayLabel(day.date)}: ${SUBMISSION_TITLES[cell.submission]}. Обновить` },
+            onClick: () => load(),
+          })
+        : null,
     ]),
   ]);
 }
@@ -390,6 +426,11 @@ function unkeyedRow(days) {
   ]);
 }
 
+function unkeyedNote(total) {
+  if (total.under <= 0 || total.unkeyed <= 0) return '';
+  return `недобор ${formatHours(total.under)}, из них ${formatHours(Math.min(total.unkeyed, total.under))} ч — без задачи`;
+}
+
 function totalText(day, total) {
   if (day.norm > 0) return `${formatHours(total.total)} / ${formatHours(day.norm)}`;
   const label = KIND_LABELS[day.kind] ?? '';
@@ -415,6 +456,7 @@ function renderFoot(days) {
         el('span', { className: 'total', text: totalText(day, total) }),
         over ? el('span', { className: 'over-tag', text: `+${formatHours(total.over)}`, attrs: { 'aria-label': `перебор ${formatHours(total.over)} ч` } }) : null,
         total.logged > 0 ? el('span', { className: 'sum-sub', text: `✓ ${formatHours(total.logged)}` }) : null,
+        unkeyedNote(total) ? el('span', { className: 'under-note', text: unkeyedNote(total) }) : null,
       ],
     );
   });
@@ -432,6 +474,23 @@ function renderFoot(days) {
       ]),
     ]),
   );
+}
+
+function quietToggleRow(count, span) {
+  if (count === 0) return null;
+  const toggle = button(
+    state.showQuiet ? `Скрыть ${count} ${plural(count, ['задачу', 'задачи', 'задач'])} без часов` : `Ещё ${count} ${plural(count, ['задача', 'задачи', 'задач'])} с активностью без часов`,
+    {
+      className: 'quiet-btn',
+      title: 'Ревью, комментарии и прочая активность, по которой не предложено часов',
+      attrs: { 'aria-expanded': String(state.showQuiet) },
+      onClick: () => {
+        state.showQuiet = !state.showQuiet;
+        renderTable();
+      },
+    },
+  );
+  return el('tr', { className: 'quiet-toggle' }, [el('td', { attrs: { colspan: String(span) } }, [toggle])]);
 }
 
 function captureFocus() {
@@ -472,11 +531,18 @@ function renderTable() {
   state.inputs = new Map();
   const days = visibleDays(data, { showWeekend: state.showWeekend });
   renderHead(days);
-  const rows = (data.rows ?? []).map((row) =>
-    el('tr', {}, [taskCell(row), ...days.map((day) => dataCell(row, day)), sumCell(rowTotals(row))]),
+  const { active, quiet } = splitRows(data);
+  const shownQuiet = state.showQuiet ? quiet : [];
+  state.rowOrder = [...active, ...shownQuiet].map((row) => row.key);
+  const rowNode = (row, className) =>
+    el('tr', { className }, [taskCell(row), ...days.map((day) => dataCell(row, day)), sumCell(rowTotals(row))]);
+  $('ts-body').replaceChildren(
+    ...active.map((row) => rowNode(row)),
+    unkeyedRow(days) ?? '',
+    quietToggleRow(quiet.length, days.length + 2) ?? '',
+    ...shownQuiet.map((row) => rowNode(row, 'quiet')),
   );
-  $('ts-body').replaceChildren(...rows, unkeyedRow(days) ?? '');
-  $('ts-empty').hidden = rows.length > 0 || Boolean(data.unkeyed);
+  $('ts-empty').hidden = (data.rows ?? []).length > 0 || Boolean(data.unkeyed);
   renderFoot(days);
   state.rendering = false;
   restoreFocus(snapshot);
@@ -490,6 +556,7 @@ function render() {
 
 function save(payload) {
   state.saving += 1;
+  refreshSubmitButtons();
   setStatus('Сохраняю…');
   state.saveChain = state.saveChain
     .then(() => api('PUT', '/api/timesheet/cell', payload))
@@ -499,13 +566,14 @@ function save(payload) {
     )
     .finally(() => {
       state.saving -= 1;
-      if (state.saving === 0) load();
+      refreshSubmitButtons();
+      if (state.saving === 0) return load();
     });
   return state.saveChain;
 }
 
 function commitInput(input) {
-  const minutes = parseHours(input.value);
+  const minutes = parseHours(input.value, stepOf(state.data));
   if (minutes === null) {
     input.classList.add('invalid');
     input.setAttribute('aria-invalid', 'true');
@@ -523,7 +591,7 @@ function commitInput(input) {
 }
 
 function columnNeighbour(input, direction) {
-  const keys = (state.data?.rows ?? []).map((row) => row.key);
+  const keys = state.rowOrder;
   let index = keys.indexOf(input.dataset.key) + direction;
   while (index >= 0 && index < keys.length) {
     const next = state.inputs.get(`${keys[index]}|${input.dataset.date}`);
@@ -533,9 +601,14 @@ function columnNeighbour(input, direction) {
   return null;
 }
 
+function steppedValue(input, direction) {
+  const step = stepOf(state.data);
+  const base = parseHours(input.value, step) ?? parseHours(input.dataset.original, step) ?? 0;
+  return formatHours(stepMinutes(base, direction, step));
+}
+
 function stepAndSave(input, direction) {
-  const base = parseHours(input.value) ?? parseHours(input.dataset.original) ?? 0;
-  input.value = formatHours(stepMinutes(base, direction));
+  input.value = steppedValue(input, direction);
   commitInput(input);
 }
 
@@ -559,8 +632,7 @@ function bindInput(input) {
       input.select();
     } else if (event.key === 'ArrowUp' || event.key === 'ArrowDown') {
       event.preventDefault();
-      const base = parseHours(input.value) ?? parseHours(input.dataset.original) ?? 0;
-      input.value = formatHours(stepMinutes(base, event.key === 'ArrowUp' ? 1 : -1));
+      input.value = steppedValue(input, event.key === 'ArrowUp' ? 1 : -1);
       input.classList.remove('invalid');
     }
   });
@@ -574,14 +646,7 @@ function openDayMenu(anchor, date) {
   }
   state.menuDate = date;
   state.menuAnchor = anchor;
-  const day = state.data.days.find((item) => item.date === date);
-  const submitItem = menu.querySelector('[data-action="submit-day"]');
-  const entries = buildSubmitEntries(state.data, { type: 'day', date });
-  applySubmitAvailability(submitItem, entries.length);
-  if (!isEditableDay(day, state.data.today)) {
-    submitItem.disabled = true;
-    submitItem.title = 'День недоступен для списания';
-  }
+  updateDayMenu(date);
   menu.setAttribute('aria-label', `Действия: ${dayLabel(date)}`);
   menu.showPopover();
   const rect = anchor.getBoundingClientRect();
@@ -590,6 +655,16 @@ function openDayMenu(anchor, date) {
   menu.style.left = `${Math.max(8, Math.min(rect.right - width, window.innerWidth - width - 8))}px`;
   anchor.setAttribute('aria-expanded', 'true');
   menu.querySelector('button:not([hidden]):not(:disabled)')?.focus();
+}
+
+function updateDayMenu(date) {
+  const day = state.data.days.find((item) => item.date === date);
+  const submitItem = $('day-menu').querySelector('[data-action="submit-day"]');
+  applySubmitAvailability(submitItem, buildSubmitEntries(state.data, { type: 'day', date }).length);
+  if (!isEditableDay(day, state.data.today)) {
+    submitItem.disabled = true;
+    submitItem.title = 'День недоступен для списания';
+  }
 }
 
 async function resetCells(date) {
@@ -662,7 +737,10 @@ function closeDialog() {
 
 function dayWarning(group) {
   if (group.over > 0) return el('span', { className: 'dlg-warn', text: `перебор +${formatHours(group.over)} ч` });
-  if (group.under > 0) return el('span', { className: 'dlg-warn under', text: `недобор ${formatHours(group.under)} ч` });
+  if (group.under > 0) {
+    const note = group.unkeyed > 0 ? `, из них ${formatHours(Math.min(group.unkeyed, group.under))} ч — без задачи` : '';
+    return el('span', { className: 'dlg-warn under', text: `недобор ${formatHours(group.under)} ч${note}` });
+  }
   return null;
 }
 
@@ -776,10 +854,26 @@ function resultView(title, results) {
   setDialog(title, body, actions);
 }
 
-function openSubmitDialog(scope) {
-  if (!state.data || !trackerState().submitEnabled) return;
+async function openSubmitDialog(scope) {
+  if (!state.data || !trackerState().submitEnabled || state.opening) return;
   const menu = $('day-menu');
   if (menu.matches(':popover-open')) menu.hidePopover();
+  if (document.activeElement?.classList?.contains('cell-input')) document.activeElement.blur();
+  state.opening = true;
+  refreshSubmitButtons();
+  setStatus('Сохраняю правки и обновляю неделю…');
+  try {
+    await state.saveChain;
+    await load();
+  } finally {
+    state.opening = false;
+    refreshSubmitButtons();
+  }
+  if (state.loadError || !state.data || !trackerState().submitEnabled) {
+    setStatus('Не удалось обновить неделю перед списанием', 'err');
+    return;
+  }
+  setStatus('');
   const dialog = $('submit-dialog');
   state.dialog = { sending: false, changed: false };
   const confirmButton = confirmView(scope);
