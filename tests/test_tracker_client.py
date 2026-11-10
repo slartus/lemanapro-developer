@@ -187,6 +187,26 @@ async def test_search_worklogs_filters_by_local_start_day():
     assert body["createdAt"]["from"] == "2026-10-26T00:00:00.000+0300"
 
 
+async def test_search_worklogs_paginates():
+    pages = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        page = int(request.url.params["page"])
+        pages.append((page, request.url.params["perPage"]))
+        assert json.loads(request.content)["createdBy"] == "me"
+        return httpx.Response(200, headers={"X-Total-Pages": "2"}, json=[
+            {"id": page, "issue": {"key": f"SUPERAPP-{page}"}, "start": "2026-11-09T10:00:00.000+0300", "duration": "PT1H"},
+        ])
+
+    client = _client(handler)
+    try:
+        worklogs = await client.search_worklogs("me", date(2026, 11, 9), date(2026, 11, 15))
+    finally:
+        await client.aclose()
+    assert [w.key for w in worklogs] == ["SUPERAPP-1", "SUPERAPP-2"]
+    assert pages == [(1, "100"), (2, "100")]
+
+
 async def test_issue_worklogs_filters_by_author_and_quotes_key():
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.url.raw_path == b"/v3/issues/SUPERAPP-1/worklog"

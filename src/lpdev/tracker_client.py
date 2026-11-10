@@ -270,13 +270,9 @@ class TrackerClient:
             "createdBy": created_by,
             "createdAt": {"from": format_start(created_from), "to": format_start(created_to)},
         }
-        response = await self._read("POST", "/worklog/_search", json=body)
-        payload = response.json()
-        if not isinstance(payload, list):
-            raise TrackerApiError("Tracker: неожиданный ответ")
         result = []
-        for item in payload:
-            worklog = self._worklog(item) if isinstance(item, dict) else None
+        for item in await self._read_pages("/worklog/_search", body):
+            worklog = self._worklog(item)
             if worklog is not None and start_from <= worklog.day <= start_to:
                 result.append(worklog)
         return result
