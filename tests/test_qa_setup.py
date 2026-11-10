@@ -151,7 +151,7 @@ def _wizard_with(answers, prompts, gitlab_verify, tracker_verify, tmp_path, keyc
 
 
 def test_wizard_writes_config_and_keychain(tmp_path):
-    answers = ["", "123", "", "y", "8124"]
+    answers = ["", "", "", "y", "8124"]
     prompts = ["glpat-abc", "y0_tok"]
     keychain_calls = []
     wizard = _wizard_with(answers, prompts, ["qa-user"], ["QA User"], tmp_path, keychain_calls)
