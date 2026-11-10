@@ -191,7 +191,6 @@ def test_wizard_reasks_on_invalid_queue(tmp_path):
 def test_run_wizard_if_needed_skips_existing_config(tmp_path, monkeypatch):
     config_path = tmp_path / "config.yaml"
     config_path.write_text("gitlab:\n  url: https://gitlab.lmru.tech\n", encoding="utf-8")
-    monkeypatch.setattr("lpdev.qa_setup.QA_CONFIG_PATH", config_path)
     called = []
 
     def fail_run(self):
@@ -199,16 +198,15 @@ def test_run_wizard_if_needed_skips_existing_config(tmp_path, monkeypatch):
         raise AssertionError("wizard must not run")
 
     monkeypatch.setattr(Wizard, "run", fail_run)
-    assert run_wizard_if_needed() == config_path
+    assert run_wizard_if_needed(config_path=config_path) == config_path
     assert called == []
 
 
 def test_run_wizard_if_needed_requires_tty(tmp_path, monkeypatch):
     config_path = tmp_path / "missing.yaml"
-    monkeypatch.setattr("lpdev.qa_setup.QA_CONFIG_PATH", config_path)
     monkeypatch.setattr("sys.stdin", type("Stdin", (), {"isatty": lambda self: False})())
     with pytest.raises(Exception, match="Terminal"):
-        run_wizard_if_needed()
+        run_wizard_if_needed(config_path=config_path)
 
 
 def test_wizard_config_is_loadable_and_qa_default_paths_used(tmp_path):

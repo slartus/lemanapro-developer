@@ -121,18 +121,23 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
+def resolve_config_path() -> Path:
+    return Path(os.environ.get("LPDEV_CONFIG") or QA_CONFIG_PATH).expanduser()
+
+
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
 
-    os.environ.setdefault("LPDEV_CONFIG", str(QA_CONFIG_PATH))
+    config_path = resolve_config_path()
+    os.environ.setdefault("LPDEV_CONFIG", str(config_path))
     try:
-        run_wizard_if_needed(force=args.setup)
+        run_wizard_if_needed(force=args.setup, config_path=config_path)
     except Exception as exc:
         print(f"Настройка не завершена: {exc}", file=sys.stderr)
         return 2
 
-    port = args.port or read_port(QA_CONFIG_PATH)
-    config = load_config(QA_CONFIG_PATH, timesheet_only=True)
+    port = args.port or read_port(config_path)
+    config = load_config(config_path, timesheet_only=True)
     paths = resolve_paths(config)
 
     pid_path = qa_pid_path(paths.db)

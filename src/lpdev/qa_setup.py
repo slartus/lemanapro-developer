@@ -241,12 +241,12 @@ class Wizard:
         return self.config_path
 
 
-def run_wizard_if_needed(force: bool = False) -> Path:
-    if not force and QA_CONFIG_PATH.is_file():
-        return QA_CONFIG_PATH
+def run_wizard_if_needed(force: bool = False, config_path: Path = QA_CONFIG_PATH) -> Path:
+    if not force and config_path.is_file():
+        return config_path
     if not sys.stdin.isatty():
         raise WizardError(
-            f"конфиг не найден: {QA_CONFIG_PATH}\n"
+            f"конфиг не найден: {config_path}\n"
             "Запустите setup в Terminal для первичной настройки (или заново с --setup)."
         )
-    return Wizard().run()
+    return Wizard(config_path=config_path).run()
