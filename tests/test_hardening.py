@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 from pathlib import Path
 
 import httpx
@@ -317,3 +318,95 @@ async def test_cross_site_get_of_settings_is_allowed(ctx, monkeypatch):
     ) as client:
         response = await client.get("/settings", headers={"Sec-Fetch-Site": "cross-site"})
     assert response.status_code == 200
+
+
+@pytest.mark.parametrize(
+    ("raw", "leaked"),
+    [
+        ("Authorization: OAuth y0_AgAAAAB-secret_value", "y0_AgAAAAB"),
+        ("authorization: oauth abc.def-123", "abc.def-123"),
+        ("token=y0_AQAAAAAAbcdEFG-_xyz in body", "AQAAAAAAbcdEFG"),
+        ("Bearer glpat-FAKEtoken1234567890", "FAKEtoken"),
+    ],
+)
+def test_mask_secrets_hides_tracker_and_gitlab_tokens(raw, leaked):
+    from lpdev.procutil import mask_secrets
+
+    masked = mask_secrets(raw)
+    assert leaked not in masked
+    assert "***" in masked
+
+
+def _non_safe_routes(app) -> list[tuple[str, str]]:
+    from lpdev.web.gitlab_proxy import PROXY_PREFIX
+
+    routes = []
+    for path, operations in app.openapi()["paths"].items():
+        if path.startswith(PROXY_PREFIX + "/"):
+            continue
+        concrete = re.sub(r"\{[^}]+\}", "1", path)
+        for method in operations:
+            if method.upper() not in {"GET", "HEAD", "OPTIONS"}:
+                routes.append((method.upper(), concrete))
+    return sorted(routes)
+
+
+async def test_every_non_safe_route_requires_requested_with_header(ctx):
+    ctx_obj, _ = ctx
+    app = create_app(ctx_obj)
+    routes = _non_safe_routes(app)
+    assert routes
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://127.0.0.1:8123"
+    ) as client:
+        for method, path in routes:
+            response = await client.request(method, path, json={})
+            assert (method, path, response.status_code) == (method, path, 403)
+            assert response.text == "forbidden"
+
+
+async def test_requested_with_middleware_rejects_unknown_paths_too(ctx):
+    ctx_obj, _ = ctx
+    app = create_app(ctx_obj)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://127.0.0.1:8123"
+    ) as client:
+        response = await client.request("PATCH", "/api/anything", json={})
+    assert response.status_code == 403
+
+
+async def test_every_non_safe_route_rejects_foreign_origin_even_with_header(ctx):
+    ctx_obj, _ = ctx
+    app = create_app(ctx_obj)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://127.0.0.1:8123"
+    ) as client:
+        for method, path in _non_safe_routes(app):
+            response = await client.request(
+                method, path, json={}, headers={"X-Requested-With": "lpdev", "Origin": "https://evil.example.com"}
+            )
+            assert (method, path, response.status_code) == (method, path, 403)
+
+
+async def test_proxy_graphql_with_secret_does_not_need_requested_with(ctx):
+    ctx_obj, _ = ctx
+    sent = []
+
+    def upstream(request: httpx.Request) -> httpx.Response:
+        sent.append(request)
+        return httpx.Response(200, json={"data": {}})
+
+    from lpdev.gitlab_client import GitLabClient
+
+    ctx_obj.api = GitLabClient("https://gitlab.example.com", "real-token", transport=httpx.MockTransport(upstream))
+    app = create_app(ctx_obj)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://127.0.0.1:8123"
+    ) as client:
+        response = await client.post(
+            "/gl/api/graphql",
+            headers={"Authorization": f"Bearer {app.state.proxy_secret}"},
+            json={"query": "{ currentUser { id } }"},
+        )
+    assert response.status_code == 200
+    assert len(sent) == 1

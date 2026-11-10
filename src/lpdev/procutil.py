@@ -9,10 +9,15 @@ KILL_GRACE_SEC = 5.0
 READ_CHUNK_BYTES = 65536
 _GLPAT_RE = re.compile(r"glpat-[A-Za-z0-9_\-]+")
 _BEARER_RE = re.compile(r"Bearer\s+\S+", re.IGNORECASE)
+_OAUTH_RE = re.compile(r"OAuth\s+\S+", re.IGNORECASE)
+_YANDEX_TOKEN_RE = re.compile(r"y0_[A-Za-z0-9_\-]+")
 
 
 def mask_secrets(text: str) -> str:
-    return _BEARER_RE.sub("Bearer ***", _GLPAT_RE.sub("glpat-***", text))
+    text = _GLPAT_RE.sub("glpat-***", text)
+    text = _YANDEX_TOKEN_RE.sub("y0_***", text)
+    text = _BEARER_RE.sub("Bearer ***", text)
+    return _OAUTH_RE.sub("OAuth ***", text)
 
 
 class OutputLimitExceeded(Exception):

@@ -109,6 +109,24 @@ class SameOriginMiddleware:
         await self.app(scope, receive, send)
 
 
+class RequestedWithMiddleware:
+    def __init__(self, app, exempt_prefixes: tuple[str, ...] = ()) -> None:
+        self.app = app
+        self.exempt_prefixes = exempt_prefixes
+
+    def _is_allowed(self, scope) -> bool:
+        if scope["method"] in SAFE_METHODS or scope["path"].startswith(self.exempt_prefixes):
+            return True
+        return any(key == b"x-requested-with" and value == b"lpdev" for key, value in scope["headers"])
+
+    async def __call__(self, scope, receive, send) -> None:
+        if scope["type"] == "http" and not self._is_allowed(scope):
+            response = PlainTextResponse("forbidden", status_code=403)
+            await response(scope, receive, send)
+            return
+        await self.app(scope, receive, send)
+
+
 def setup_logging(logs_dir: Path) -> None:
     logs_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
     root = logging.getLogger()
@@ -254,6 +272,7 @@ def create_app(ctx: AppContext, port: int = DEFAULT_PORT) -> FastAPI:
 
     allowed_hosts = {f"127.0.0.1:{port}", f"localhost:{port}"}
     app.add_middleware(NoStoreHtmlMiddleware)
+    app.add_middleware(RequestedWithMiddleware, exempt_prefixes=(PROXY_PREFIX + "/",))
     app.add_middleware(SameOriginMiddleware, allowed_hosts=allowed_hosts, protected_prefixes=(PROXY_PREFIX + "/",))
     app.add_middleware(HostCheckMiddleware, allowed_hosts=allowed_hosts)
     return app
