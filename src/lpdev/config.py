@@ -140,6 +140,7 @@ class RadarConfig(BaseModel):
 
 
 TRACKER_QUEUE_RE = re.compile(r"[A-Z][A-Z0-9_]+")
+TRACKER_STATUS_RE = re.compile(r"[A-Za-z][A-Za-z0-9_]*")
 SHORT_DAY_REDUCTION_MINUTES = 60
 
 
@@ -158,6 +159,7 @@ class TrackerConfig(BaseModel):
     timezone: str = "Europe/Moscow"
     ignored_push_branches: list[str] = ["develop", "main", "master", "release/*", "rc/*"]
     pr_link_bots: list[str] = ["ya360-pr-check"]
+    in_progress_statuses: list[str] = ["development", "codereview"]
 
     @field_validator("url")
     @classmethod
@@ -170,6 +172,14 @@ class TrackerConfig(BaseModel):
         for pattern in value:
             if not pattern.strip() or any(c.isspace() or not c.isprintable() for c in pattern):
                 raise ValueError(f"invalid branch pattern: {pattern!r}")
+        return list(dict.fromkeys(value))
+
+    @field_validator("in_progress_statuses")
+    @classmethod
+    def valid_statuses(cls, value: list[str]) -> list[str]:
+        for status in value:
+            if not TRACKER_STATUS_RE.fullmatch(status):
+                raise ValueError(f"invalid status key: {status!r}")
         return list(dict.fromkeys(value))
 
     @field_validator("pr_link_bots")

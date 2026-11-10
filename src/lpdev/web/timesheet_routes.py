@@ -51,6 +51,7 @@ from lpdev.tracker_client import (
     TrackerUncertain,
     Worklog,
     user_identities,
+    worklog_author,
     valid_issue_key,
 )
 from lpdev.web.routes import templates
@@ -71,7 +72,6 @@ MAX_RECONCILE_ON_READ = 20
 RECONCILE_ON_READ_TIMEOUT_SEC = 10.0
 PERMANENT_RECONCILE_STATUSES = frozenset({403, 404})
 MAX_IN_PROGRESS = 5
-IN_PROGRESS_STATUSES = frozenset({"inProgress", "inReview", "testing"})
 WORKLOG_START = dt_time(9, 0)
 OPEN_SUBMISSION_STATUSES = ("pending", "unknown")
 MAX_GITLAB_LOOKUPS = 50
@@ -447,12 +447,9 @@ def _in_progress(issues: list[dict[str, Any]], cfg: TrackerConfig) -> dict[str, 
     result: dict[str, str] = {}
     for issue in issues:
         key = issue.get("key")
-        status = issue.get("status") if isinstance(issue.get("status"), dict) else {}
-        status_type = issue.get("statusType") if isinstance(issue.get("statusType"), dict) else {}
         if not valid_issue_key(key) or (cfg.queues and queue_of(key) not in cfg.queues):
             continue
-        if status.get("key") in IN_PROGRESS_STATUSES or status_type.get("key") == "inProgress":
-            result[key] = str(issue.get("summary") or "")
+        result[key] = str(issue.get("summary") or "")
         if len(result) >= MAX_IN_PROGRESS:
             break
     return result
@@ -491,8 +488,9 @@ async def _tracker_data(state: TimesheetState, tracker: TrackerClient, cfg: Trac
     data = TrackerData()
     try:
         me = await state.myself(tracker)
-        data.in_progress = _in_progress(await tracker.search_my_issues(), cfg)
-        data.worklogs = await tracker.search_worklogs(str(me.get("login") or ""), days[0], days[-1])
+        issues = await tracker.search_my_issues(cfg.in_progress_statuses, cfg.queues, MAX_IN_PROGRESS)
+        data.in_progress = _in_progress(issues, cfg)
+        data.worklogs = await tracker.search_worklogs(worklog_author(me), days[0], days[-1])
         wanted = (keys | {worklog.key for worklog in data.worklogs}) - set(data.in_progress)
         issues = await tracker.get_issues(sorted(wanted)) if wanted else {}
         data.titles = {key: str(issue.get("summary") or "") for key, issue in issues.items()}
@@ -754,7 +752,7 @@ async def _submit(conn, state: TimesheetState, tracker: TrackerClient, cfg: Trac
         journal = worklog_submissions(conn, iso_days)
         claimed = _claimed(journal)
         reconciled = await _reconcile(conn, tracker, identities, _open_rows(journal, cells), claimed)
-        worklogs = await tracker.search_worklogs(str(me.get("login") or ""), days[0], days[-1])
+        worklogs = await tracker.search_worklogs(worklog_author(me), days[0], days[-1])
     except TrackerApiError as exc:
         logger.warning("timesheet: submit pre-read failed: %s", exc.message)
         return [_result(entry, "failed", exc.message) for entry in entries]

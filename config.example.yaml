@@ -99,6 +99,8 @@ tracker:
   # Ссылки на MR в комментариях задач Tracker связывают MR с задачей; при конфликте
   # (один MR в нескольких задачах) побеждает комментарий этих авторов (логин или имя).
   pr_link_bots: [ya360-pr-check]
+  # Ключи статусов workflow, которые считаются «в работе» (пусто — "Status Type": inProgress).
+  in_progress_statuses: [development, codereview]
 
 paths:
   # Файл базы SQLite (каталог создаётся автоматически).

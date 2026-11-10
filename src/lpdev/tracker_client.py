@@ -8,7 +8,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from typing import Any
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit
 from zoneinfo import ZoneInfo
 
 import httpx
@@ -19,8 +19,7 @@ from lpdev.procutil import mask_secrets
 logger = logging.getLogger(__name__)
 
 ISSUE_KEY_RE = re.compile(r"[A-Z][A-Z0-9_]+-\d+")
-MY_ISSUES_QUERY = 'Assignee: me() Resolution: empty() "Sort by": Updated DESC'
-WORKLOG_CREATED_MARGIN_DAYS = 14
+STATUS_KEY_RE = re.compile(r"[A-Za-z][A-Za-z0-9_]*")
 WEEK_DAYS = 5
 
 _MAX_RETRIES = 3
@@ -90,6 +89,35 @@ def _parse_moment(value: object) -> datetime | None:
     except ValueError:
         return None
     return moment if moment.tzinfo is not None else None
+
+
+def worklog_author(user: dict[str, Any]) -> str:
+    for name in ("trackerUid", "uid"):
+        if user.get(name) not in (None, ""):
+            return str(user[name])
+    raise TrackerApiError("Tracker не вернул uid текущего пользователя")
+
+
+def my_issues_query(statuses: list[str], queues: list[str]) -> str:
+    for value in (*statuses, *queues):
+        if not STATUS_KEY_RE.fullmatch(value):
+            raise ValueError(f"invalid Tracker key: {value!r}")
+    parts = ["Assignee: me()"]
+    if queues:
+        parts.append("Queue: " + ", ".join(queues))
+    parts.append("Status: " + ", ".join(statuses) if statuses else '"Status Type": inProgress')
+    parts.append('"Sort by": Updated DESC')
+    return " ".join(parts)
+
+
+def _origin(url: str) -> tuple[str, str, int | None]:
+    parts = urlsplit(url)
+    scheme = parts.scheme.lower()
+    try:
+        port = parts.port
+    except ValueError:
+        return scheme, "", None
+    return scheme, (parts.hostname or "").lower(), port or {"http": 80, "https": 443}.get(scheme)
 
 
 def user_identities(user: dict[str, Any]) -> set[str]:
@@ -237,18 +265,34 @@ class TrackerClient:
             raise TrackerApiError("Tracker: неожиданный ответ")
         return payload
 
-    async def search_my_issues(self) -> list[dict[str, Any]]:
-        return await self._read_pages("/issues/_search", {"query": MY_ISSUES_QUERY})
+    async def search_my_issues(self, statuses: list[str], queues: list[str], limit: int) -> list[dict[str, Any]]:
+        return await self._read_pages("/issues/_search", {"query": my_issues_query(statuses, queues)}, limit=limit)
+
+    async def _read_linked(self, path: str) -> list[dict[str, Any]]:
+        items: list[dict[str, Any]] = []
+        url = path
+        params: dict[str, Any] | None = {"perPage": _PER_PAGE}
+        for _ in range(_MAX_PAGES):
+            response = await self._read("GET", url, params=params)
+            payload = response.json()
+            if not isinstance(payload, list):
+                raise TrackerApiError("Tracker: неожиданный ответ")
+            items.extend(item for item in payload if isinstance(item, dict))
+            next_url = response.links.get("next", {}).get("url")
+            if not next_url:
+                return items
+            if _origin(next_url) != _origin(self.cfg.url):
+                logger.warning("tracker pagination stopped: foreign next link for %s", path)
+                return items
+            url, params = next_url, None
+        logger.warning("tracker pagination capped at %s pages for %s", _MAX_PAGES, path)
+        return items
 
     async def search_issues(self, query: str, limit: int) -> list[dict[str, Any]]:
         return await self._read_pages("/issues/_search", {"query": query}, limit=limit)
 
     async def issue_comments(self, key: str) -> list[dict[str, Any]]:
-        response = await self._read("GET", self._issue_path(key, "/comments"), params={"perPage": _PER_PAGE})
-        payload = response.json()
-        if not isinstance(payload, list):
-            raise TrackerApiError("Tracker: неожиданный ответ")
-        return [item for item in payload if isinstance(item, dict)]
+        return await self._read_linked(self._issue_path(key, "/comments"))
 
     async def get_issues(self, keys: list[str]) -> dict[str, dict[str, Any]]:
         valid = sorted({key for key in keys if valid_issue_key(key)})
@@ -277,12 +321,9 @@ class TrackerClient:
         )
 
     async def search_worklogs(self, created_by: str, start_from: date, start_to: date) -> list[Worklog]:
-        created_from = datetime.combine(start_from - timedelta(days=WORKLOG_CREATED_MARGIN_DAYS), datetime.min.time(), self._tz)
-        created_to = datetime.now(self._tz) + timedelta(days=1)
-        body = {
-            "createdBy": created_by,
-            "createdAt": {"from": format_start(created_from), "to": format_start(created_to)},
-        }
+        start = datetime.combine(start_from, datetime.min.time(), self._tz)
+        end = datetime.combine(start_to + timedelta(days=1), datetime.min.time(), self._tz)
+        body = {"createdBy": created_by, "start": {"from": format_start(start), "to": format_start(end)}}
         result = []
         for item in await self._read_pages("/worklog/_search", body):
             worklog = self._worklog(item)
@@ -291,14 +332,8 @@ class TrackerClient:
         return result
 
     async def issue_worklogs(self, key: str, authors: set[str] | None = None) -> list[Worklog]:
-        response = await self._read("GET", self._issue_path(key, "/worklog"))
-        payload = response.json()
-        if not isinstance(payload, list):
-            raise TrackerApiError("Tracker: неожиданный ответ")
         result = []
-        for item in payload:
-            if not isinstance(item, dict):
-                continue
+        for item in await self._read_linked(self._issue_path(key, "/worklog")):
             author = item.get("createdBy") if isinstance(item.get("createdBy"), dict) else {}
             if authors is not None and not authors & {str(author.get(name)) for name in ("id", "login", "uid") if author.get(name)}:
                 continue

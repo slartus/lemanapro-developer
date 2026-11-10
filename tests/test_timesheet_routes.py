@@ -24,9 +24,9 @@ class FakeTracker:
     def __init__(self) -> None:
         self.worklogs: list[Worklog] = []
         self.issues = [
-            {"key": "SUPERAPP-5", "summary": "Doing it", "status": {"key": "inProgress"}},
-            {"key": "SUPERAPP-6", "summary": "Backlog", "status": {"key": "open"}},
-            {"key": "OTHER-1", "summary": "Other queue", "status": {"key": "inProgress"}},
+            {"key": "SUPERAPP-5", "summary": "Doing it", "status": {"key": "development"}, "statusType": {"key": "inProgress"}},
+            {"key": "SUPERAPP-6", "summary": "Backlog", "status": {"key": "open"}, "statusType": {"key": "new"}},
+            {"key": "OTHER-1", "summary": "Other queue", "status": {"key": "codereview"}, "statusType": {"key": "paused"}},
         ]
         self.titles = {"SUPERAPP-1": "Login screen"}
         self.created: list[tuple[str, datetime, int]] = []
@@ -37,6 +37,7 @@ class FakeTracker:
         self.issue_worklogs_delay = 0.0
         self.issue_worklogs_calls: list[str] = []
         self.linked_issues: list[dict] = []
+        self.my_issue_queries: list[tuple] = []
         self.comments: dict[str, list[dict]] = {}
         self.failing_comments: set[str] = set()
         self.fail_link_search = False
@@ -50,11 +51,15 @@ class FakeTracker:
 
     async def myself(self):
         self._read()
-        return {"login": "me", "uid": 5}
+        return {"login": "60121337", "uid": 5, "trackerUid": 5, "passportUid": 1130000066073403}
 
-    async def search_my_issues(self):
+    async def search_my_issues(self, statuses, queues, limit):
         self._read()
-        return self.issues
+        self.my_issue_queries.append((tuple(statuses), tuple(queues), limit))
+        return [
+            issue for issue in self.issues
+            if issue["status"]["key"] in statuses and (not queues or issue["key"].rsplit("-", 1)[0] in queues)
+        ][:limit]
 
     async def search_issues(self, query, limit):
         self._read()
@@ -75,7 +80,7 @@ class FakeTracker:
 
     async def search_worklogs(self, created_by, start_from, start_to):
         self._read()
-        assert created_by == "me"
+        assert created_by == "5"
         return [w for w in self.worklogs if start_from <= w.day <= start_to]
 
     async def issue_worklogs(self, key, authors=None):
@@ -87,7 +92,7 @@ class FakeTracker:
             raise TrackerApiError("Tracker недоступен: ConnectError")
         if self.issue_worklogs_error is not None:
             raise self.issue_worklogs_error
-        assert authors is not None and "me" in authors
+        assert authors is not None and "5" in authors
         return [w for w in self.worklogs if w.key == key]
 
     def add(self, key: str, day: date, minutes: int) -> str:
@@ -1070,3 +1075,14 @@ async def test_failed_branch_lookups_are_cached_and_do_not_spend_the_budget(env,
     await _get(env)
     branch_calls = [call for call in fake.calls if call[0] == "branch"]
     assert branch_calls == [("branch", 10, "task/a"), ("branch", 10, "task/b"), ("branch", 10, "task/c")]
+
+
+async def test_in_progress_issues_are_requested_by_configured_statuses(env):
+    await _get(env)
+    assert env["tracker"].my_issue_queries == [(("development", "codereview"), ("SUPERAPP",), 5)]
+    tracker = TRACKER.model_copy(update={"in_progress_statuses": ["codereview"], "queues": []})
+    env["ctx"].config = env["ctx"].config.model_copy(update={"tracker": tracker})
+    payload = await _get(env)
+    assert env["tracker"].my_issue_queries[-1] == (("codereview",), (), 5)
+    assert "in_progress" in _rows(payload)["OTHER-1"]["sources"]
+    assert "SUPERAPP-5" not in _rows(payload) or "in_progress" not in _rows(payload)["SUPERAPP-5"]["sources"]

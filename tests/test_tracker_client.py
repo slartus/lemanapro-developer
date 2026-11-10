@@ -9,15 +9,16 @@ import pytest
 
 from lpdev.config import TrackerConfig
 from lpdev.tracker_client import (
-    MY_ISSUES_QUERY,
     TrackerApiError,
     TrackerClient,
     TrackerUncertain,
     format_start,
     iso_duration,
+    my_issues_query,
     parse_duration,
     user_identities,
     valid_issue_key,
+    worklog_author,
 )
 
 MSK = ZoneInfo("Europe/Moscow")
@@ -122,23 +123,54 @@ async def test_headers_org_and_myself():
     assert client.token_calls["tokens"] == 1
 
 
-async def test_search_my_issues_paginates_by_total_pages():
+async def test_search_my_issues_queries_in_progress_statuses_with_a_limit():
     pages = []
 
     def handler(request: httpx.Request) -> httpx.Response:
-        pages.append(request.url.params["page"])
+        pages.append((request.url.params["page"], request.url.params["perPage"]))
         assert request.url.path == "/v3/issues/_search"
-        assert json.loads(request.content) == {"query": MY_ISSUES_QUERY}
+        assert json.loads(request.content) == {
+            "query": 'Assignee: me() Queue: SUPERAPP Status: development, codereview "Sort by": Updated DESC'
+        }
         page = int(request.url.params["page"])
-        return httpx.Response(200, json=[{"key": f"SUPERAPP-{page}"}], headers={"X-Total-Pages": "2"})
+        return httpx.Response(200, json=[
+            {"key": f"SUPERAPP-{page}{n}", "status": {"key": "development"}, "statusType": {"key": "inProgress"}}
+            for n in range(5)
+        ], headers={"X-Total-Pages": "100"})
 
     client = _client(handler)
     try:
-        issues = await client.search_my_issues()
+        issues = await client.search_my_issues(["development", "codereview"], ["SUPERAPP"], 5)
     finally:
         await client.aclose()
-    assert [issue["key"] for issue in issues] == ["SUPERAPP-1", "SUPERAPP-2"]
-    assert pages == ["1", "2"]
+    assert len(issues) == 5
+    assert pages == [("1", "5")]
+
+
+@pytest.mark.parametrize(
+    ("statuses", "queues", "query"),
+    [
+        (["development"], [], 'Assignee: me() Status: development "Sort by": Updated DESC'),
+        ([], [], 'Assignee: me() "Status Type": inProgress "Sort by": Updated DESC'),
+        ([], ["SUPERAPP", "MOB"], 'Assignee: me() Queue: SUPERAPP, MOB "Status Type": inProgress "Sort by": Updated DESC'),
+    ],
+)
+def test_my_issues_query(statuses, queues, query):
+    assert my_issues_query(statuses, queues) == query
+
+
+@pytest.mark.parametrize("bad", ["dev ops", 'x" OR "y', "1dev", ""])
+def test_my_issues_query_rejects_raw_input(bad):
+    with pytest.raises(ValueError):
+        my_issues_query([bad], [])
+
+
+def test_worklog_author_prefers_tracker_uid():
+    me = {"uid": 9000000000151720, "trackerUid": 9000000000151720, "login": "60121337", "passportUid": 1130000066073403}
+    assert worklog_author(me) == "9000000000151720"
+    assert worklog_author({"uid": 7, "login": "x"}) == "7"
+    with pytest.raises(TrackerApiError):
+        worklog_author({"login": "60121337"})
 
 
 async def test_get_issues_by_keys_skips_invalid_keys():
@@ -184,7 +216,8 @@ async def test_search_worklogs_filters_by_local_start_day():
     ]
     body = bodies[0]
     assert body["createdBy"] == "me"
-    assert body["createdAt"]["from"] == "2026-10-26T00:00:00.000+0300"
+    assert body["start"] == {"from": "2026-11-09T00:00:00.000+0300", "to": "2026-11-16T00:00:00.000+0300"}
+    assert "createdAt" not in body
 
 
 async def test_search_worklogs_paginates():
@@ -209,7 +242,7 @@ async def test_search_worklogs_paginates():
 
 async def test_issue_worklogs_filters_by_author_and_quotes_key():
     def handler(request: httpx.Request) -> httpx.Response:
-        assert request.url.raw_path == b"/v3/issues/SUPERAPP-1/worklog"
+        assert request.url.raw_path == b"/v3/issues/SUPERAPP-1/worklog?perPage=100"
         return httpx.Response(200, json=[
             {"id": 1, "issue": {"key": "SUPERAPP-1"}, "createdBy": {"id": "5"}, "start": "2026-11-09T10:00:00.000+0300", "duration": "PT30M"},
             {"id": 2, "issue": {"key": "SUPERAPP-1"}, "createdBy": {"id": "9"}, "start": "2026-11-09T10:00:00.000+0300", "duration": "PT30M"},
@@ -348,7 +381,7 @@ async def test_non_list_payloads_are_errors():
     client = _client(handler)
     try:
         with pytest.raises(TrackerApiError):
-            await client.search_my_issues()
+            await client.search_my_issues([], [], 5)
         with pytest.raises(TrackerApiError):
             await client.search_worklogs("me", date(2026, 11, 9), date(2026, 11, 15))
         with pytest.raises(TrackerApiError):
@@ -445,7 +478,7 @@ async def test_search_issues_stops_at_the_limit():
 async def test_issue_comments():
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.url.raw_path == b"/v3/issues/SUPERAPP-1/comments?perPage=100"
-        return httpx.Response(200, json=[{"id": 1, "text": "PR: x"}, "junk"])
+        return httpx.Response(200, json=[{"id": 1, "text": "PR: x"}, "junk"], headers={"X-Total-Pages": "1"})
 
     client = _client(handler)
     try:
@@ -463,3 +496,96 @@ async def test_issue_comments_rejects_non_list():
             await client.issue_comments("SUPERAPP-1")
     finally:
         await client.aclose()
+
+
+REAL_WORKLOG = {
+    "self": "https://api.tracker.yandex.net/v3/issues/SUPERAPP-9886/worklog/1",
+    "id": 1,
+    "issue": {"self": "https://api.tracker.yandex.net/v3/issues/SUPERAPP-9886", "id": "abc", "key": "SUPERAPP-9886",
+              "display": "Task"},
+    "start": "2026-11-02T04:00:00.000+0000",
+    "createdAt": "2026-11-06T14:11:37.252+0000",
+    "duration": "P1D",
+    "createdBy": {"self": "https://api.tracker.yandex.net/v3/users/9000000000151720", "id": "9000000000151720",
+                  "display": "Артём Слинкин", "cloudUid": "ajeabcdef", "passportUid": 1130000066073403},
+}
+
+
+async def test_search_worklogs_with_real_response_shape():
+    bodies = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        bodies.append(json.loads(request.content))
+        return httpx.Response(200, json=[
+            REAL_WORKLOG,
+            {**REAL_WORKLOG, "id": 2, "duration": "PT7H", "start": "2026-11-03T06:00:00.000+0000"},
+            {**REAL_WORKLOG, "id": 3, "duration": "PT4H", "start": "2026-11-08T21:30:00.000+0000"},
+        ], headers={"X-Total-Pages": "1"})
+
+    client = _client(handler)
+    try:
+        worklogs = await client.search_worklogs("9000000000151720", date(2026, 11, 2), date(2026, 11, 8))
+    finally:
+        await client.aclose()
+    assert bodies[0] == {
+        "createdBy": "9000000000151720",
+        "start": {"from": "2026-11-02T00:00:00.000+0300", "to": "2026-11-09T00:00:00.000+0300"},
+    }
+    assert [(w.key, w.day.isoformat(), w.minutes) for w in worklogs] == [
+        ("SUPERAPP-9886", "2026-11-02", 480), ("SUPERAPP-9886", "2026-11-03", 420),
+    ]
+    assert worklogs[0].created_at is not None
+
+
+async def test_issue_worklogs_matches_my_uid_against_created_by_id():
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=[
+            REAL_WORKLOG,
+            {**REAL_WORKLOG, "id": 2, "createdBy": {"id": "8000000000061439", "display": "ya360-pr-check"}},
+        ])
+
+    me = {"uid": 9000000000151720, "trackerUid": 9000000000151720, "login": "60121337", "passportUid": 1130000066073403}
+    client = _client(handler)
+    try:
+        worklogs = await client.issue_worklogs("SUPERAPP-9886", user_identities(me))
+    finally:
+        await client.aclose()
+    assert [w.id for w in worklogs] == ["1"]
+
+
+async def test_comments_follow_link_pagination_on_the_same_host_only():
+    calls = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(str(request.url))
+        if "id=2" in str(request.url):
+            return httpx.Response(200, json=[{"id": 3, "text": "c"}], headers={
+                "Link": '<https://evil.example.com/v3/issues/SUPERAPP-1/comments?id=3>; rel="next"', "X-Total-Pages": "1",
+            })
+        return httpx.Response(200, json=[
+            {"id": 1, "text": "PR: https://gitlab.lmru.tech/products/lmwork/lmru-mobile_lmwork/-/merge_requests/5172 Визуальных изменений не",
+             "createdBy": {"id": "8000000000061439", "display": "ya360-pr-check"}},
+            {"id": 2, "text": "b"},
+        ], headers={"Link": '<https://api.tracker.yandex.net/v3/issues/SUPERAPP-1/comments?perPage=100&id=2>; rel="next"',
+                    "X-Total-Pages": "1"})
+
+    client = _client(handler)
+    try:
+        comments = await client.issue_comments("SUPERAPP-1")
+    finally:
+        await client.aclose()
+    assert [c["id"] for c in comments] == [1, 2, 3]
+    assert len(calls) == 2
+
+
+async def test_comments_pagination_is_capped():
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=[{"id": 1}], headers={
+            "Link": '<https://api.tracker.yandex.net/v3/issues/SUPERAPP-1/comments?id=1>; rel="next"'})
+
+    client = _client(handler)
+    try:
+        comments = await client.issue_comments("SUPERAPP-1")
+    finally:
+        await client.aclose()
+    assert len(comments) == 20

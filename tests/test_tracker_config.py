@@ -140,3 +140,11 @@ def test_pr_link_bots_default_and_validation():
     for bad in ([""], [" "], ["x\n"]):
         with pytest.raises(ValidationError):
             TrackerConfig(pr_link_bots=bad)
+
+
+def test_in_progress_statuses_default_and_validation():
+    assert TrackerConfig().in_progress_statuses == ["development", "codereview"]
+    assert TrackerConfig(in_progress_statuses=[]).in_progress_statuses == []
+    for bad in (["dev ops"], ['x" OR "y'], ["1dev"], [""]):
+        with pytest.raises(ValidationError):
+            TrackerConfig(in_progress_statuses=bad)
