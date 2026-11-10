@@ -4,7 +4,7 @@ import asyncio
 import json
 import logging
 import time
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, time as dt_time, timedelta
 from typing import Any
@@ -76,16 +76,18 @@ MAX_IN_PROGRESS = 5
 WORKLOG_START = dt_time(9, 0)
 OPEN_SUBMISSION_STATUSES = ("pending", "unknown")
 MAX_GITLAB_LOOKUPS = 50
+MAX_GITLAB_PARALLEL = 6
 LOOKUP_CACHE_SIZE = 5000
 BRANCH_LOOKUP_TTL_SEC = 600.0
 PR_LINKS_TTL_SEC = 600.0
 LOOKUP_FAILURE_TTL_SEC = 60.0
 HISTORY_TTL_SEC = 600.0
-MAX_HISTORY_PARALLEL = 4
+MAX_HISTORY_PARALLEL = 6
 MAX_HISTORY_KEYS = 30
 USER_LOOKUP_WARNING = "GitLab не отдал текущего пользователя: комментарии, апрувы и мержи в своих MR не учтены"
 PR_LINK_LOOKBACK = timedelta(days=7)
 MAX_PR_LINK_ISSUES = 49
+MAX_TRACKER_PARALLEL = 6
 
 TrackerFactory = Callable[[TrackerConfig], TrackerClient]
 
@@ -111,6 +113,16 @@ def _mr_info(mr: dict[str, Any]) -> dict[str, Any]:
         "web_url": mr.get("web_url"), "author_username": author.get("username"),
         "iid": mr.get("iid"), "description": mr.get("description"),
     }
+
+
+async def _gather_limited(coros: Iterable[Awaitable[Any]], limit: int = MAX_GITLAB_PARALLEL) -> list[Any]:
+    semaphore = asyncio.Semaphore(limit)
+
+    async def run(coro: Awaitable[Any]) -> Any:
+        async with semaphore:
+            return await coro
+
+    return list(await asyncio.gather(*(run(coro) for coro in coros)))
 
 
 @dataclass
@@ -210,29 +222,33 @@ class GitlabLookups:
         by_iid = _mr_lookup(conn)
         defaults: dict[int, str] = {}
         paths = _project_paths(conn)
-        for project_id in sorted({ref[0] for ref in map(push_ref, events) if ref is not None}):
+        project_ids = {ref[0] for ref in map(push_ref, events) if ref is not None}
+        if links:
+            project_ids |= {
+                event["project_id"] for event in events
+                if isinstance(event.get("project_id"), int) and event["project_id"] not in paths
+            }
+        wanted_projects: list[int] = []
+        for project_id in sorted(project_ids):
             if self.would_call("project", project_id) and budget <= 0:
                 continue
             budget -= self.would_call("project", project_id)
-            detail = await self.project(gitlab, project_id)
+            wanted_projects.append(project_id)
+        details = await _gather_limited(self.project(gitlab, project_id) for project_id in wanted_projects)
+        for project_id, detail in zip(wanted_projects, details):
             if detail.get("default_branch"):
                 defaults[project_id] = detail["default_branch"]
             if detail.get("path"):
                 paths.setdefault(project_id, detail["path"].lower())
         tracker_links: dict[tuple[int, int], str] = {}
         if links:
-            for project_id in sorted({event["project_id"] for event in events if isinstance(event.get("project_id"), int)}):
-                if project_id not in paths and budget > 0:
-                    budget -= self.would_call("project", project_id)
-                    path = (await self.project(gitlab, project_id)).get("path")
-                    if path:
-                        paths[project_id] = path.lower()
             by_path: dict[str, list[int]] = {}
             for project_id, path in paths.items():
                 by_path.setdefault(path, []).append(project_id)
             for (path, iid), key in links.items():
                 for project_id in by_path.get(path, []):
                     tracker_links[(project_id, iid)] = key
+        wanted_mrs: list[tuple[int, int]] = []
         for ref in dict.fromkeys(ref for ref in map(mr_ref, events) if ref is not None):
             if ref in by_iid:
                 continue
@@ -240,7 +256,8 @@ class GitlabLookups:
                 logger.warning("timesheet: merge request lookups capped, %s!%s skipped", ref[0], ref[1])
                 continue
             budget -= self.would_call("mr", ref)
-            info = await self.mr(gitlab, ref)
+            wanted_mrs.append(ref)
+        for ref, info in zip(wanted_mrs, await _gather_limited(self.mr(gitlab, ref) for ref in wanted_mrs)):
             if info is not None:
                 by_iid[ref] = info
         by_branch: dict[tuple[int, str], dict[str, Any]] = {}
@@ -252,15 +269,17 @@ class GitlabLookups:
             ignored_push_branches=tuple(cfg.ignored_push_branches), default_branches=defaults, queues=tuple(cfg.queues),
             tracker_links=tracker_links,
         )
+        wanted_branches: list[tuple[int, str]] = []
         for event in events:
             ref = push_ref(event)
-            if ref is None or ref in by_branch or is_ignored_push(event, context) or event_keys(event, context):
+            if ref is None or ref in by_branch or ref in wanted_branches or is_ignored_push(event, context) or event_keys(event, context):
                 continue
             if self.would_call("branch", ref) and budget <= 0:
                 logger.warning("timesheet: branch lookups capped, %s:%s skipped", ref[0], ref[1])
                 continue
             budget -= self.would_call("branch", ref)
-            info = await self.branch_mr(gitlab, ref)
+            wanted_branches.append(ref)
+        for ref, info in zip(wanted_branches, await _gather_limited(self.branch_mr(gitlab, ref) for ref in wanted_branches)):
             if info is not None:
                 by_branch[ref] = info
         return context
@@ -278,6 +297,7 @@ class TimesheetState:
     gitlab: GitlabLookups = field(default_factory=lambda: GitlabLookups())
     links: dict[date, tuple[float, dict[tuple[str, int], str]]] = field(default_factory=dict)
     histories: dict[str, tuple[float, list[tuple[datetime, str | None, str | None]] | None]] = field(default_factory=dict)
+    issue_links: dict[str, tuple[str, list[tuple[str, int, bool]]]] = field(default_factory=dict)
 
     async def aclose(self) -> None:
         if self.tracker is not None:
@@ -297,6 +317,7 @@ class TimesheetState:
                 self.me = None
                 self.links.clear()
                 self.histories.clear()
+                self.issue_links.clear()
             return self.tracker
 
     async def pr_links(
@@ -312,23 +333,36 @@ class TimesheetState:
         except TrackerApiError as exc:
             logger.warning("timesheet: tracker merge request links skipped: %s", exc.message)
             return {}
-        found: list[PrLink] = []
-        for issue in issues:
+        semaphore = asyncio.Semaphore(MAX_TRACKER_PARALLEL)
+
+        async def issue_links(issue: dict[str, Any]) -> list[PrLink]:
             key = issue.get("key")
             if not valid_issue_key(key) or (cfg.queues and queue_of(key) not in cfg.queues):
-                continue
+                return []
             assignee = issue.get("assignee") if isinstance(issue.get("assignee"), dict) else {}
             assigned = bool(identities & {str(assignee.get(name)) for name in ("id", "login", "uid") if assignee.get(name)})
+            updated = str(issue.get("updatedAt") or "")
+            cached = self.issue_links.get(key)
+            if cached is not None and updated and cached[0] == updated:
+                return [PrLink(path, iid, key, from_bot, assigned) for path, iid, from_bot in cached[1]]
             try:
-                comments = await tracker.issue_comments(key)
+                async with semaphore:
+                    comments = await tracker.issue_comments(key)
             except TrackerApiError as exc:
                 logger.warning("timesheet: comments of %s skipped: %s", key, exc.message)
-                continue
+                return []
+            parsed: list[tuple[str, int, bool]] = []
             for comment in comments:
                 author = comment.get("createdBy") if isinstance(comment.get("createdBy"), dict) else {}
                 name = author.get("login") or author.get("display")
-                for path, iid in parse_mr_links(comment.get("text"), gitlab_url):
-                    found.append(PrLink(path, iid, key, name in cfg.pr_link_bots, assigned))
+                parsed.extend((path, iid, name in cfg.pr_link_bots) for path, iid in parse_mr_links(comment.get("text"), gitlab_url))
+            if updated:
+                if len(self.issue_links) > LOOKUP_CACHE_SIZE:
+                    self.issue_links.clear()
+                self.issue_links[key] = (updated, parsed)
+            return [PrLink(path, iid, key, from_bot, assigned) for path, iid, from_bot in parsed]
+
+        found = [link for links_of in await asyncio.gather(*(issue_links(issue) for issue in issues)) for link in links_of]
         links = resolve_pr_links(found)
         self.links[since] = (time.monotonic(), links)
         while len(self.links) > EVENTS_CACHE_SIZE:
@@ -539,10 +573,12 @@ async def _tracker_data(state: TimesheetState, tracker: TrackerClient, cfg: Trac
     data = TrackerData()
     try:
         me = await state.myself(tracker)
-        issues = await tracker.search_my_issues(cfg.in_progress_statuses, cfg.queues, MAX_IN_PROGRESS)
+        issues, data.worklogs = await asyncio.gather(
+            tracker.search_my_issues(cfg.in_progress_statuses, cfg.queues, MAX_IN_PROGRESS),
+            tracker.search_worklogs(worklog_author(me), days[0], days[-1]),
+        )
         data.in_progress = _in_progress(issues, cfg)
         data.statuses = {key: status for issue in issues if (key := issue.get("key")) and (status := _issue_status(issue))}
-        data.worklogs = await tracker.search_worklogs(worklog_author(me), days[0], days[-1])
         wanted = (keys | {worklog.key for worklog in data.worklogs}) - set(data.in_progress)
         issues = await tracker.get_issues(sorted(wanted)) if wanted else {}
         data.titles = {key: str(issue.get("summary") or "") for key, issue in issues.items()}
@@ -571,16 +607,27 @@ async def api_timesheet(request: Request):
     except InvalidRequest as exc:
         return _error(str(exc))
     days = week_days(week_start)
-    try:
-        events = await state.events_between(
-            ctx.api, days[0] - timedelta(days=EVENTS_PADDING_DAYS), days[-1] + timedelta(days=EVENTS_PADDING_DAYS)
-        )
-    except GitlabApiError as exc:
-        logger.warning("timesheet: gitlab events failed: %s", exc.message)
-        return _error("GitLab не отдал события, повторите позже", 502)
-    week_events = [event for event in events if isinstance(event, dict) and event_day(event, tz) in days]
     tracker = await state.tracker_for(cfg)
-    links = await state.pr_links(tracker, cfg, ctx.config.gitlab.url, week_start - PR_LINK_LOOKBACK) if tracker else None
+
+    async def tracker_links() -> dict[tuple[str, int], str] | None:
+        return await state.pr_links(tracker, cfg, ctx.config.gitlab.url, week_start - PR_LINK_LOOKBACK) if tracker else None
+
+    events_result, links = await asyncio.gather(
+        state.events_between(ctx.api, days[0] - timedelta(days=EVENTS_PADDING_DAYS), days[-1] + timedelta(days=EVENTS_PADDING_DAYS)),
+        tracker_links(),
+        return_exceptions=True,
+    )
+    if isinstance(links, BaseException):
+        if not isinstance(links, Exception):
+            raise links
+        logger.warning("timesheet: tracker merge request links failed: %s", links)
+        links = None
+    if isinstance(events_result, GitlabApiError):
+        logger.warning("timesheet: gitlab events failed: %s", events_result.message)
+        return _error("GitLab не отдал события, повторите позже", 502)
+    if isinstance(events_result, BaseException):
+        raise events_result
+    week_events = [event for event in events_result if isinstance(event, dict) and event_day(event, tz) in days]
     warnings: list[str] = []
     context = await state.gitlab.context(ctx.api, ctx.conn, cfg, week_events, links, warnings)
     activity = bucket_events(week_events, tz, context)

@@ -553,13 +553,14 @@ async def test_issue_worklogs_matches_my_uid_against_created_by_id():
     assert [w.id for w in worklogs] == ["1"]
 
 
-async def test_comments_follow_link_pagination_on_the_same_host_only():
+async def test_comments_follow_link_pagination_on_the_same_host_only(monkeypatch):
+    monkeypatch.setattr("lpdev.tracker_client._PER_PAGE", 2)
     calls = []
 
     def handler(request: httpx.Request) -> httpx.Response:
         calls.append(str(request.url))
         if "id=2" in str(request.url):
-            return httpx.Response(200, json=[{"id": 3, "text": "c"}], headers={
+            return httpx.Response(200, json=[{"id": 3, "text": "c"}, {"id": 4, "text": "d"}], headers={
                 "Link": '<https://evil.example.com/v3/issues/SUPERAPP-1/comments?id=3>; rel="next"', "X-Total-Pages": "1",
             })
         return httpx.Response(200, json=[
@@ -574,11 +575,29 @@ async def test_comments_follow_link_pagination_on_the_same_host_only():
         comments = await client.issue_comments("SUPERAPP-1")
     finally:
         await client.aclose()
-    assert [c["id"] for c in comments] == [1, 2, 3]
+    assert [c["id"] for c in comments] == [1, 2, 3, 4]
     assert len(calls) == 2
 
 
-async def test_comments_pagination_is_capped():
+async def test_a_short_page_is_the_last_one():
+    calls = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(str(request.url))
+        return httpx.Response(200, json=[{"id": 1}], headers={
+            "Link": '<https://api.tracker.yandex.net/v3/issues/SUPERAPP-1/comments?id=1>; rel="next"'})
+
+    client = _client(handler)
+    try:
+        assert len(await client.issue_comments("SUPERAPP-1")) == 1
+    finally:
+        await client.aclose()
+    assert len(calls) == 1
+
+
+async def test_comments_pagination_is_capped(monkeypatch):
+    monkeypatch.setattr("lpdev.tracker_client._PER_PAGE", 1)
+
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, json=[{"id": 1}], headers={
             "Link": '<https://api.tracker.yandex.net/v3/issues/SUPERAPP-1/comments?id=1>; rel="next"'})
@@ -608,7 +627,8 @@ def _status_change(at, src, dst, kind="IssueWorkflow"):
     }
 
 
-async def test_status_history_reads_the_real_changelog_shape_with_link_pages():
+async def test_status_history_reads_the_real_changelog_shape_with_link_pages(monkeypatch):
+    monkeypatch.setattr("lpdev.tracker_client._PER_PAGE", 2)
     calls = []
     pages = {
         None: [_status_change("2026-11-09T06:48:21.060+0000", None, "backlog", "IssueCreated"),
@@ -641,10 +661,12 @@ async def test_status_history_reads_the_real_changelog_shape_with_link_pages():
         ("2026-11-09T06:57:06.162000+00:00", "development", "codereview"),
     ]
     assert len(calls) == 3
-    assert "field=status" in calls[0] and "perPage=100" in calls[0]
+    assert "field=status" in calls[0] and "perPage=2" in calls[0]
 
 
-async def test_status_history_is_capped_at_ten_pages():
+async def test_status_history_is_capped_at_ten_pages(monkeypatch):
+    monkeypatch.setattr("lpdev.tracker_client._PER_PAGE", 1)
+
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, json=[_status_change("2026-11-09T06:48:51.745+0000", "todo", "development")], headers={
             "Link": '<https://api.tracker.yandex.net/v3/issues/SUPERAPP-1/changelog?id=n>; rel="next"'})

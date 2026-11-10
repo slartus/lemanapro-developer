@@ -849,7 +849,9 @@ function cellConfirmView(scope) {
     className: 'dlg-hours',
     attrs: { id: 'dlg-hours', type: 'text', inputmode: 'decimal', autocomplete: 'off', 'aria-describedby': 'dlg-hours-error' },
   });
-  input.value = cellValue(cell) > 0 ? formatHours(cellValue(cell)) : '';
+  const shown = state.inputs.get(`${scope.key}|${scope.date}`);
+  const current = shown ? parseHours(shown.value, step) ?? 0 : cellValue(cell);
+  input.value = current > 0 ? formatHours(current) : '';
   input.placeholder = formatHours(step);
   const error = el('p', { className: 'dlg-errors', attrs: { id: 'dlg-hours-error', 'aria-live': 'polite' } });
   const otherPlanned = dayTotals(state.data).find((total) => total.date === scope.date);
@@ -1019,14 +1021,22 @@ async function openSubmitDialog(scope) {
   if (menu.matches(':popover-open')) menu.hidePopover();
   if (document.activeElement?.classList?.contains('cell-input')) document.activeElement.blur();
   state.opening = true;
-  setStatus('Сохраняю правки и обновляю неделю…');
   try {
-    await state.saveChain;
-    if (state.saveErrors.size) {
-      setStatus(`${saveErrorText()} — исправьте или сбросьте правку перед списанием`, 'err');
-      return;
+    if (scope.type === 'cell') {
+      await state.saveChain;
+      if (state.saveErrors.has(`${scope.key}|${scope.date}`)) {
+        setStatus(`${saveErrorText()} — исправьте или сбросьте правку перед списанием`, 'err');
+        return;
+      }
+    } else {
+      setStatus('Сохраняю правки и обновляю неделю…');
+      await state.saveChain;
+      if (state.saveErrors.size) {
+        setStatus(`${saveErrorText()} — исправьте или сбросьте правку перед списанием`, 'err');
+        return;
+      }
+      await load();
     }
-    await load();
   } finally {
     state.opening = false;
   }

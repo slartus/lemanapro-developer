@@ -287,7 +287,7 @@ class TrackerClient:
                 raise TrackerApiError("Tracker: неожиданный ответ")
             items.extend(item for item in payload if isinstance(item, dict))
             next_url = response.links.get("next", {}).get("url")
-            if not next_url or not payload:
+            if not next_url or len(payload) < _PER_PAGE:
                 return items
             if _origin(next_url) != _origin(self.cfg.url):
                 logger.warning("tracker pagination stopped: foreign next link for %s", path)

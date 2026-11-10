@@ -44,6 +44,7 @@ class FakeTracker:
         self.history_active = 0
         self.history_peak = 0
         self.comments: dict[str, list[dict]] = {}
+        self.comment_calls: list[str] = []
         self.failing_comments: set[str] = set()
         self.fail_link_search = False
         self.link_queries: list[tuple[str, int]] = []
@@ -87,6 +88,7 @@ class FakeTracker:
 
     async def issue_comments(self, key):
         self._read()
+        self.comment_calls.append(key)
         if key in self.failing_comments:
             raise TrackerApiError("Tracker: не найдено", 404)
         return self.comments.get(key, [])
@@ -1008,6 +1010,34 @@ async def test_links_are_cached(env):
     await _get(env)
     await _get(env)
     assert len(env["tracker"].link_queries) == 1
+
+
+async def test_comments_of_unchanged_issues_are_reused_across_weeks(env):
+    _linked(env, "SUPERAPP-10397", _comment(f"PR: {MR_URL.format(5175)}", login="ya360-pr-check"))
+    env["tracker"].linked_issues[-1]["updatedAt"] = "2026-11-09T10:00:00.000+0000"
+    await _get(env)
+    await env["client"].get("/api/timesheet?week=2026-W45")
+    assert env["tracker"].comment_calls == ["SUPERAPP-10397"]
+    env["tracker"].linked_issues[-1]["updatedAt"] = "2026-11-10T10:00:00.000+0000"
+    await env["client"].get("/api/timesheet?week=2026-W44")
+    assert env["tracker"].comment_calls == ["SUPERAPP-10397", "SUPERAPP-10397"]
+
+
+async def test_gather_limited_keeps_order_and_caps_concurrency():
+    from lpdev.web.timesheet_routes import _gather_limited
+
+    active = peak = 0
+
+    async def job(n):
+        nonlocal active, peak
+        active += 1
+        peak = max(peak, active)
+        await asyncio.sleep(0)
+        active -= 1
+        return n
+
+    assert await _gather_limited((job(n) for n in range(20)), limit=3) == list(range(20))
+    assert peak == 3
 
 
 async def test_link_to_a_project_outside_the_local_database_uses_the_project_path(env):
