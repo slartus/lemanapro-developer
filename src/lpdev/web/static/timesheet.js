@@ -729,7 +729,7 @@ async function addTask(event) {
   if (!isValidIssueKey(key)) {
     input.classList.add('invalid');
     input.setAttribute('aria-invalid', 'true');
-    errorBox.textContent = 'Ключ вида LMWORK-123';
+    errorBox.textContent = 'Ключ вида SUPERAPP-123';
     input.focus();
     return;
   }

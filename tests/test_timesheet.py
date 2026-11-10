@@ -618,6 +618,18 @@ STATUSES = {"development": "d", "codereview": "r"}
         ([(_at("2026-11-09T10:00:00+03:00"), "development", "done")], date(2026, 11, 10), []),
         ([(_at("2026-11-12T10:00:00+03:00"), "todo", "development")], date(2026, 11, 10), [("development", "2026-11-12", "2026-11-12")]),
         ([], date(2026, 11, 10), []),
+        (
+            [(_at("2026-11-09T09:00:00+03:00"), "todo", "development"), (_at("2026-11-09T11:00:00+03:00"), "development", "codereview"),
+             (_at("2026-11-09T15:00:00+03:00"), "codereview", "rc")],
+            date(2026, 11, 10),
+            [("development", "2026-11-09", "2026-11-09"), ("codereview", "2026-11-09", "2026-11-09")],
+        ),
+        (
+            [(_at("2026-11-09T09:00:00+03:00"), "todo", "codereview"), (_at("2026-11-09T11:00:00+03:00"), "codereview", "development"),
+             (_at("2026-11-09T15:00:00+03:00"), "development", "rc")],
+            date(2026, 11, 10),
+            [("codereview", "2026-11-09", "2026-11-09"), ("development", "2026-11-09", "2026-11-09")],
+        ),
     ],
 )
 def test_status_intervals(history, today, expected):
