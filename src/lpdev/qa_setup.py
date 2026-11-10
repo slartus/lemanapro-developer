@@ -25,6 +25,7 @@ QA_DATA_DIR = Path("~/lemanapro-timesheet")
 QA_DEFAULT_PORT = 8124
 QA_DEFAULT_GITLAB_URL = "https://gitlab.lmru.tech"
 QA_DEFAULT_QUEUES = "SUPERAPP"
+QA_DEFAULT_ORG_ID = "7867633"
 
 GITLAB_PAT_PREFIX = "glpat-"
 TRACKER_TOKEN_PREFIX = "y0_"
@@ -227,7 +228,7 @@ class Wizard:
         self.print_fn(f"  GitLab: {login}")
         self.keychain_add_fn("gitlab", pat)
 
-        org_id = self.ask_valid("Tracker org_id (ID организации)", "", validate_org_id)
+        org_id = self.ask_valid("Tracker org_id (ID организации)", QA_DEFAULT_ORG_ID, validate_org_id)
         queues = self.ask_valid("Очереди через запятую", QA_DEFAULT_QUEUES, parse_queues)
         submit = self.ask("Списывать время из интерфейса? (y/n)", "y").lower() in ("y", "yes", "д", "да")
 

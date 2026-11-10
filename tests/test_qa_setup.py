@@ -160,6 +160,7 @@ def test_wizard_writes_config_and_keychain(tmp_path):
     assert path.stat().st_mode & 0o777 == 0o600
     raw = yaml.safe_load(path.read_text(encoding="utf-8"))
     assert raw["gitlab"]["url"] == "https://gitlab.lmru.tech"
+    assert raw["tracker"]["org_id"] == "7867633"
     assert raw["tracker"]["submit_enabled"] is True
     assert raw["tracker"]["role"] == "qa"
     assert "secret" not in path.read_text(encoding="utf-8")
