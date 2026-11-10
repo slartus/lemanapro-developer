@@ -353,15 +353,17 @@ class TimesheetState:
 
     async def row_activity(
         self, tracker: TrackerClient | None, cfg: TrackerConfig, keys: list[str], days: list[date], today: date
-    ) -> dict[str, list[dict[str, str]]]:
+    ) -> dict[str, list[dict[str, str]] | None]:
         if tracker is None or not cfg.activity_statuses:
             return {}
         semaphore = asyncio.Semaphore(MAX_HISTORY_PARALLEL)
 
-        async def one(key: str) -> tuple[str, list[dict[str, str]]]:
+        async def one(key: str) -> tuple[str, list[dict[str, str]] | None]:
             async with semaphore:
                 history = await self.status_history(tracker, key)
-            intervals = status_intervals(history or [], cfg.activity_statuses, _tz(cfg), today)
+            if history is None:
+                return key, None
+            intervals = status_intervals(history, cfg.activity_statuses, _tz(cfg), today)
             return key, [
                 {**interval, "letter": cfg.activity_statuses[interval["status"]]}
                 for interval in intervals
@@ -610,7 +612,7 @@ async def api_timesheet(request: Request):
     payload = build_week(inputs)
     activity_by_key = await state.row_activity(tracker, cfg, [row["key"] for row in payload["rows"]], days, today)
     for row in payload["rows"]:
-        row["activity"] = activity_by_key.get(row["key"], [])
+        row["activity"] = activity_by_key.get(row["key"])
         row["status"] = data.statuses.get(row["key"])
     return JSONResponse({**payload, "warnings": warnings}, headers={"Cache-Control": "no-store"})
 

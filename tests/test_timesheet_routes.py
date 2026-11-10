@@ -1136,7 +1136,7 @@ async def test_rows_carry_the_current_tracker_status(env):
 async def test_activity_is_cached_and_failures_are_empty(env, caplog):
     env["tracker"].failing_histories.add("SUPERAPP-5")
     payload = await _get(env)
-    assert _rows(payload)["SUPERAPP-5"]["activity"] == []
+    assert _rows(payload)["SUPERAPP-5"]["activity"] is None
     assert "status history of SUPERAPP-5 skipped" in caplog.text
     calls = len(env["tracker"].history_calls)
     await _get(env)
@@ -1151,14 +1151,14 @@ async def test_activity_requests_are_limited(env, monkeypatch):
     payload = await _get(env)
     assert len(env["tracker"].history_calls) == 3
     assert env["tracker"].history_peak <= 2
-    assert all(row["activity"] == [] for row in payload["rows"][3:])
+    assert all(row["activity"] is None for row in payload["rows"][3:])
 
 
 async def test_no_activity_without_tracker(env):
     env["ctx"].config = env["ctx"].config.model_copy(update={"tracker": TrackerConfig(queues=["SUPERAPP"])})
     payload = await _get(env)
     assert payload["rows"]
-    assert all(row["activity"] == [] for row in payload["rows"])
+    assert all(row["activity"] is None for row in payload["rows"])
     assert env["tracker"].history_calls == []
 
 
@@ -1166,5 +1166,5 @@ async def test_activity_disabled_by_empty_status_map(env):
     tracker = TRACKER.model_copy(update={"activity_statuses": {}})
     env["ctx"].config = env["ctx"].config.model_copy(update={"tracker": tracker})
     payload = await _get(env)
-    assert all(row["activity"] == [] for row in payload["rows"])
+    assert all(row["activity"] is None for row in payload["rows"])
     assert env["tracker"].history_calls == []

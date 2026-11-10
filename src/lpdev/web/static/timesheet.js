@@ -19,6 +19,7 @@ import {
   stepOf,
   summarizeResults,
   visibleDays,
+  workedOn,
 } from '/static/timesheet-model.js';
 
 const WEEKDAYS = ['Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб', 'Вс'];
@@ -337,6 +338,13 @@ function inputText(cell) {
   return value ? formatHours(value) : '';
 }
 
+function loggedLine(cell) {
+  const logged = cell?.logged ?? 0;
+  return logged > 0
+    ? el('span', { className: 'logged-line', text: `✓ ${formatHours(logged)}`, attrs: { title: 'Уже списано в Tracker' } })
+    : el('span', { className: 'logged-line none', text: '✓ 0', attrs: { 'aria-hidden': 'true' } });
+}
+
 function dataCell(row, day) {
   const cell = row.cells?.[day.date];
   const stateName = cellState(cell, day, state.data.today);
@@ -375,17 +383,17 @@ function dataCell(row, day) {
   if (editable) {
     box.append(
       button('−', {
-        className: 'step-btn',
+        className: 'step-btn minus',
         attrs: { 'aria-label': `${label}: −${step}`, tabindex: '-1' },
         onClick: () => stepAndSave(input, -1),
       }),
     );
   }
-  box.append(input);
+  box.append(loggedLine(cell), input);
   if (editable) {
     box.append(
       button('+', {
-        className: 'step-btn',
+        className: 'step-btn plus',
         attrs: { 'aria-label': `${label}: +${step}`, tabindex: '-1' },
         onClick: () => stepAndSave(input, 1),
       }),
@@ -403,12 +411,18 @@ function dataCell(row, day) {
     );
   }
   const tracker = trackerState();
-  if (editable && tracker.enabled && cellValue(cell) > 0 && !isUncertain(cell)) {
+  if (editable && tracker.enabled && !isUncertain(cell)) {
+    const suggested = cellValue(cell) > 0;
     actions.append(
-      button('✓', {
-        className: 'submit-cell-btn',
-        title: tracker.submitEnabled ? `Списать ${formatHours(cellValue(cell))} ч` : SUBMIT_DISABLED_TITLE,
-        attrs: { 'aria-label': `${row.key}, ${dayLabel(day.date)}: списать`, disabled: !tracker.submitEnabled },
+      button(suggested ? '✓' : '+', {
+        className: suggested ? 'submit-cell-btn' : 'submit-cell-btn extra',
+        title: tracker.submitEnabled
+          ? suggested ? `Списать ${formatHours(cellValue(cell))} ч` : 'Списать время на задачу вручную'
+          : SUBMIT_DISABLED_TITLE,
+        attrs: {
+          'aria-label': `${row.key}, ${dayLabel(day.date)}: ${suggested ? 'списать' : 'списать вручную'}`,
+          disabled: !tracker.submitEnabled,
+        },
         onClick: () => openSubmitDialog({ type: 'cell', key: row.key, date: day.date }),
       }),
     );
@@ -423,13 +437,9 @@ function dataCell(row, day) {
     );
   }
   box.append(actions);
-  const logged = cell?.logged ?? 0;
   const uncertain = isUncertain(cell);
   return el('td', { className: `day st-${stateName}${isToday ? ' today' : ''}` }, [
     el('div', { className: 'cell' }, [
-      logged > 0
-        ? el('span', { className: 'logged-line', text: `✓ ${formatHours(logged)}`, attrs: { title: 'Уже списано в Tracker' } })
-        : el('span', { className: 'logged-line none', text: '✓ 0', attrs: { 'aria-hidden': 'true' } }),
       box,
       uncertain
         ? button('Обновить', {
@@ -817,13 +827,19 @@ function dayWarning(group) {
   return null;
 }
 
+function statusWarning(row, date) {
+  if (workedOn(row.activity, date) !== false) return null;
+  const now = row.status?.display ? ` Сейчас: «${row.status.display}».` : '';
+  return el('p', { className: 'dlg-status-warn', text: `В этот день задача не была в разработке или ревью.${now} Проверьте, что списываете на нужную задачу.` });
+}
+
 function cellConfirmView(scope) {
   const title = dialogTitle(scope);
   const row = state.data.rows.find((item) => item.key === scope.key);
   const day = state.data.days.find((item) => item.date === scope.date);
   const cell = row?.cells?.[scope.date];
-  if (!row || !day || cellValue(cell) <= 0 || isUncertain(cell)) {
-    setDialog(title, [el('p', { text: 'Нечего списывать: значение изменилось, проверьте ячейку.' })], [
+  if (!row || !day || isUncertain(cell)) {
+    setDialog(title, [el('p', { text: 'Списать нельзя: ячейка изменилась или ждёт сверки, обновите неделю.' })], [
       button('Закрыть', { onClick: closeDialog }),
     ]);
     return null;
@@ -833,7 +849,8 @@ function cellConfirmView(scope) {
     className: 'dlg-hours',
     attrs: { id: 'dlg-hours', type: 'text', inputmode: 'decimal', autocomplete: 'off', 'aria-describedby': 'dlg-hours-error' },
   });
-  input.value = formatHours(cellValue(cell));
+  input.value = cellValue(cell) > 0 ? formatHours(cellValue(cell)) : '';
+  input.placeholder = formatHours(step);
   const error = el('p', { className: 'dlg-errors', attrs: { id: 'dlg-hours-error', 'aria-live': 'polite' } });
   const otherPlanned = dayTotals(state.data).find((total) => total.date === scope.date);
   const logged = cell?.logged ?? 0;
@@ -846,6 +863,7 @@ function cellConfirmView(scope) {
       text: `${logged > 0 ? `Уже списано на задачу в этот день: ${formatHours(logged)} ч. ` : ''}За день списано ${formatHours(day.logged)} из ${formatHours(day.norm)} ч.`,
     }),
     otherPlanned && otherPlanned.over > 0 ? el('p', { className: 'dlg-note', text: `В таблице на этот день перебор +${formatHours(otherPlanned.over)} ч` }) : null,
+    statusWarning(row, scope.date),
   ].filter(Boolean);
   const submit = () => {
     const minutes = parseHours(input.value, step);

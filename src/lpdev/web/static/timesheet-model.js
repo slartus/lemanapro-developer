@@ -216,3 +216,8 @@ export function formatActivity(activity) {
     return [{ text: `${range}${item.letter ?? ''}`, title: status ? `${status}: ${span}` : span }];
   });
 }
+
+export function workedOn(activity, date) {
+  if (!Array.isArray(activity)) return null;
+  return activity.some((item) => item?.from && item.from <= date && date <= (item.to ?? item.from));
+}

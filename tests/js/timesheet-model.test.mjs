@@ -24,6 +24,7 @@ import {
   stepOf,
   summarizeResults,
   visibleDays,
+  workedOn,
 } from '../../src/lpdev/web/static/timesheet-model.js';
 
 const DATES = ['2026-11-09', '2026-11-10', '2026-11-11', '2026-11-12', '2026-11-13', '2026-11-14', '2026-11-15'];
@@ -441,5 +442,25 @@ describe('formatActivity', () => {
         { text: '09.11–r', title: 'codereview: с 09.11 по сейчас' },
       ],
     );
+  });
+});
+
+describe('workedOn', () => {
+  const activity = [
+    { status: 'development', from: '2026-11-03', to: '2026-11-04' },
+    { status: 'codereview', from: '2026-11-06', to: '2026-11-10', open: true },
+  ];
+
+  it('tells whether the issue was in a working status that day', () => {
+    assert.equal(workedOn(activity, '2026-11-03'), true);
+    assert.equal(workedOn(activity, '2026-11-04'), true);
+    assert.equal(workedOn(activity, '2026-11-05'), false);
+    assert.equal(workedOn(activity, '2026-11-10'), true);
+    assert.equal(workedOn([], '2026-11-05'), false);
+  });
+
+  it('is unknown when the history was not loaded', () => {
+    assert.equal(workedOn(null, '2026-11-05'), null);
+    assert.equal(workedOn(undefined, '2026-11-05'), null);
   });
 });

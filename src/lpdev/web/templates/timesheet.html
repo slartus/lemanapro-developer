@@ -53,6 +53,12 @@
   .cell-box { position: relative; display: inline-flex; align-items: center; gap: 0.15rem; }
   .cell-actions { display: inline-flex; align-items: center; gap: 0.15rem; min-width: 2.9em; }
   .logged-line.none { visibility: hidden; }
+  .cell-box { display: inline-grid; grid-template-columns: auto auto auto auto; align-items: center; column-gap: 0.15rem; row-gap: 0.1rem; }
+  .cell-box > .logged-line { grid-row: 1; grid-column: 2; justify-self: center; }
+  .cell-box > .minus { grid-row: 2; grid-column: 1; }
+  .cell-box > .cell-input { grid-row: 2; grid-column: 2; }
+  .cell-box > .plus { grid-row: 2; grid-column: 3; }
+  .cell-box > .cell-actions { grid-row: 2; grid-column: 4; }
   .cell-input { width: 3.6em; text-align: center; padding: 0.3rem 0.25rem; font-variant-numeric: tabular-nums; }
   .cell-input:disabled { opacity: 0.6; background: transparent; border-color: transparent; }
   .st-suggested .cell-input { color: var(--muted); font-style: italic; background: var(--surface-2); }
@@ -71,6 +77,8 @@
   .step-btn { display: none; }
   .submit-cell-btn { padding: 0 0.35rem; line-height: 1.5; font-size: 0.8rem; background: var(--surface); color: var(--ok-fg); border-color: var(--border); }
   .submit-cell-btn:hover:not(:disabled) { background: var(--ok-bg); border-color: var(--ok-fg); }
+  .submit-cell-btn.extra { color: var(--muted); opacity: 0.45; }
+  .ts td.day:hover .submit-cell-btn.extra, .cell-box:focus-within .submit-cell-btn.extra, .submit-cell-btn.extra:focus-visible { opacity: 1; }
   .refresh-btn { padding: 0.05rem 0.45rem; font-size: 0.72rem; background: var(--surface); color: var(--warn-fg); border-color: var(--warn-fg); }
   .under-note { display: block; font-size: 0.72rem; font-weight: 500; color: var(--muted); white-space: normal; max-width: 9rem; margin: 0 auto; }
   tr.quiet-toggle td { padding: 0; background: var(--surface); }
@@ -128,6 +136,7 @@
   .dlg-errors li, p.dlg-errors { color: var(--err-fg); }
   p.dlg-errors:empty { display: none; }
   .dlg-task { margin: 0.2rem 0 0.6rem; overflow-wrap: anywhere; }
+  .dlg-status-warn { margin: 0.5rem 0 0; padding: 0.45rem 0.6rem; border-radius: 6px; background: var(--warn-bg); color: var(--warn-fg); font-size: 0.85rem; }
   .dlg-field { display: flex; align-items: center; gap: 0.6rem; flex-wrap: wrap; }
   .dlg-hours { width: 6em; font-variant-numeric: tabular-nums; text-align: center; }
   .dlg-actions { display: flex; justify-content: flex-end; gap: 0.5rem; flex-wrap: wrap; padding: 0.8rem 1.2rem; border-top: 1px solid var(--border); }
@@ -137,6 +146,7 @@
     .cell-input { min-height: 40px; }
     .reset-btn { opacity: 1; min-width: 40px; min-height: 40px; }
     .submit-cell-btn { min-width: 40px; min-height: 40px; }
+    .submit-cell-btn.extra { opacity: 1; }
     .day-menu-btn { min-width: 40px; min-height: 40px; }
     .menu button { min-height: 40px; }
   }
