@@ -51,7 +51,7 @@
 <div class="card">
 <div class="form-grid">
   <div class="field"><label for="max_parallel">Параллельных ревью</label><input type="number" id="max_parallel" value="{{ config.review.max_parallel }}" min="1" step="1"><div class="err"></div></div>
-  <div class="field"><label for="timeout_sec">Таймаут ревью, сек</label><input type="number" id="timeout_sec" value="{{ config.review.timeout_sec }}" min="1" step="1"><div class="err"></div></div>
+  <div class="field"><label for="timeout_sec">Предельное время ревью, сек</label><input type="number" id="timeout_sec" value="{{ config.review.timeout_sec }}" min="1" step="1"><div class="err"></div></div>
   <div class="field"><label for="clone_depth">Глубина клона</label><input type="number" id="clone_depth" value="{{ config.review.clone_depth }}" min="1" step="1"><div class="err"></div></div>
   <div class="field"><label for="workspace_ttl_days">TTL workspace, дней</label><input type="number" id="workspace_ttl_days" value="{{ config.review.workspace_ttl_days }}" min="1" step="1"><div class="err"></div></div>
   <div class="field"><label for="push_debounce_sec">Отсрочка ревью после push, сек</label><input type="number" id="push_debounce_sec" value="{{ config.review.push_debounce_sec }}" min="0" step="1"><div class="err"></div></div>
