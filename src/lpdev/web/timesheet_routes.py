@@ -57,6 +57,8 @@ EVENTS_PADDING_DAYS = 2
 MAX_SUBMIT_ENTRIES = 50
 DUPLICATE_WINDOW = timedelta(minutes=10)
 RECONCILE_SLACK = timedelta(minutes=1)
+RECONCILE_MIN_AGE = timedelta(minutes=2)
+MAX_RECONCILE_ON_READ = 20
 MAX_IN_PROGRESS = 5
 IN_PROGRESS_STATUSES = frozenset({"inProgress", "inReview", "testing"})
 WORKLOG_START = dt_time(9, 0)
@@ -304,10 +306,12 @@ async def api_timesheet(request: Request):
         tz, _mr_lookup(ctx.conn), cfg.queues,
     )
     iso_days = [day.isoformat() for day in days]
+    tracker = await state.tracker_for(cfg)
+    if tracker is not None:
+        await _reconcile_week(ctx.conn, state, tracker, iso_days)
     edits = {(key, date.fromisoformat(day)): minutes for (key, day), minutes in timesheet_cells(ctx.conn, iso_days).items()}
     manual = timesheet_tasks(ctx.conn, week_start.isoformat())
     journal = worklog_submissions(ctx.conn, iso_days)
-    tracker = await state.tracker_for(cfg)
     data = TrackerData()
     if tracker is not None:
         keys = {key for key, _ in activity.weights if key is not None} | set(manual) | {key for key, _ in edits}
@@ -409,10 +413,18 @@ def _entries(body: dict[str, Any], cfg: TrackerConfig) -> list[Entry]:
 def _matches(worklog: Worklog, key: str, day: date, minutes: int, since: datetime, claimed: set[str]) -> bool:
     if worklog.key != key or worklog.day != day or worklog.minutes != minutes or worklog.id in claimed:
         return False
-    return worklog.created_at is None or worklog.created_at >= since - RECONCILE_SLACK
+    return worklog.created_at is not None and worklog.created_at >= since - RECONCILE_SLACK
 
 
-async def _reconcile(conn, tracker: TrackerClient, identities: set[str], rows, claimed: set[str]) -> None:
+@dataclass
+class Reconciled:
+    confirmed: set[tuple[str, date]] = field(default_factory=set)
+    unresolved: set[tuple[str, date]] = field(default_factory=set)
+
+
+async def _reconcile(conn, tracker: TrackerClient, identities: set[str], rows, claimed: set[str]) -> Reconciled:
+    outcome = Reconciled()
+    now = datetime.now(UTC)
     for row in rows:
         key, day = row["issue_key"], date.fromisoformat(row["day"])
         since = _parse_created(row["created_at"])
@@ -420,16 +432,50 @@ async def _reconcile(conn, tracker: TrackerClient, identities: set[str], rows, c
             worklogs = await tracker.issue_worklogs(key, identities)
         except TrackerApiError as exc:
             logger.warning("timesheet: reconcile %s %s failed: %s", key, day, exc.message)
+            outcome.unresolved.add((key, day))
             continue
         match = next((w for w in worklogs if _matches(w, key, day, row["minutes"], since, claimed)), None)
         if match is not None:
             claimed.add(match.id)
             worklog_submission_finish(conn, row["id"], "done", tracker_id=match.id)
             timesheet_cell_set(conn, key, day.isoformat(), None)
+            outcome.confirmed.add((key, day))
             logger.info("timesheet: reconciled %s %s %s as done", key, day, row["minutes"])
+        elif now - since < RECONCILE_MIN_AGE:
+            outcome.unresolved.add((key, day))
         else:
             worklog_submission_finish(conn, row["id"], "failed", error="не найдено в Tracker после сбоя, можно повторить")
             logger.info("timesheet: reconciled %s %s %s as failed", key, day, row["minutes"])
+    outcome.unresolved -= outcome.confirmed
+    return outcome
+
+
+def _open_rows(journal, cells: set[tuple[str, date]] | None = None) -> list:
+    return [
+        row for row in journal
+        if row["status"] in OPEN_SUBMISSION_STATUSES
+        and (cells is None or (row["issue_key"], date.fromisoformat(row["day"])) in cells)
+    ]
+
+
+def _claimed(journal) -> set[str]:
+    return {row["tracker_id"] for row in journal if row["status"] == "done" and row["tracker_id"]}
+
+
+async def _reconcile_week(conn, state: TimesheetState, tracker: TrackerClient, iso_days: list[str]) -> None:
+    if state.submit_lock.locked():
+        return
+    async with state.submit_lock:
+        journal = worklog_submissions(conn, iso_days)
+        rows = _open_rows(journal)[:MAX_RECONCILE_ON_READ]
+        if not rows:
+            return
+        try:
+            identities = user_identities(await state.myself(tracker))
+        except TrackerApiError as exc:
+            logger.warning("timesheet: reconcile skipped: %s", exc.message)
+            return
+        await _reconcile(conn, tracker, identities, rows, _claimed(journal))
 
 
 def _result(entry: Entry, status: str, error: str | None = None) -> dict[str, Any]:
@@ -462,12 +508,8 @@ async def _submit(conn, state: TimesheetState, tracker: TrackerClient, cfg: Trac
         me = await state.myself(tracker)
         identities = user_identities(me)
         journal = worklog_submissions(conn, iso_days)
-        claimed = {row["tracker_id"] for row in journal if row["status"] == "done" and row["tracker_id"]}
-        open_rows = [
-            row for row in journal
-            if row["status"] in OPEN_SUBMISSION_STATUSES and (row["issue_key"], date.fromisoformat(row["day"])) in cells
-        ]
-        await _reconcile(conn, tracker, identities, open_rows, claimed)
+        claimed = _claimed(journal)
+        reconciled = await _reconcile(conn, tracker, identities, _open_rows(journal, cells), claimed)
         worklogs = await tracker.search_worklogs(str(me.get("login") or ""), days[0], days[-1])
     except TrackerApiError as exc:
         logger.warning("timesheet: submit pre-read failed: %s", exc.message)
@@ -484,7 +526,14 @@ async def _submit(conn, state: TimesheetState, tracker: TrackerClient, cfg: Trac
         if row["status"] == "done" and now - _parse_created(row["created_at"]) < DUPLICATE_WINDOW
     }
     results = []
+    still_open = {(row["issue_key"], date.fromisoformat(row["day"])) for row in _open_rows(journal, cells)}
     for entry in entries:
+        if (entry.key, entry.day) in reconciled.confirmed:
+            results.append(_result(entry, "skipped", "уже списано, подтверждено сверкой"))
+            continue
+        if (entry.key, entry.day) in reconciled.unresolved | still_open:
+            results.append(_result(entry, "unknown", "не удалось сверить с Tracker, повторите позже"))
+            continue
         if (entry.key, entry.day, entry.minutes) in recent_done:
             results.append(_result(entry, "skipped", "уже списано за последние 10 минут"))
             continue
@@ -512,8 +561,13 @@ async def _create(conn, tracker: TrackerClient, cfg: TrackerConfig, entry: Entry
         worklog_submission_finish(conn, submission_id, "failed", error=exc.message)
         logger.info("timesheet: submit %s %s %s failed (%s)", entry.key, entry.day, entry.minutes, exc.status)
         return _result(entry, "failed", exc.message)
+    if not tracker_id:
+        message = "Tracker не вернул id worklog, результат проверяется"
+        worklog_submission_finish(conn, submission_id, "unknown", error=message)
+        logger.warning("timesheet: submit %s %s %s returned no id", entry.key, entry.day, entry.minutes)
+        return await _confirm(conn, tracker, entry, submission_id, identities, known_ids, started_at, message)
     known_ids.add(tracker_id)
-    worklog_submission_finish(conn, submission_id, "done", tracker_id=tracker_id or None)
+    worklog_submission_finish(conn, submission_id, "done", tracker_id=tracker_id)
     timesheet_cell_set(conn, entry.key, entry.day.isoformat(), None)
     logger.info("timesheet: submit %s %s %s done", entry.key, entry.day, entry.minutes)
     return _result(entry, "done")

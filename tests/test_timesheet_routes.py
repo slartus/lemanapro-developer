@@ -31,6 +31,7 @@ class FakeTracker:
         self.created: list[tuple[str, datetime, int]] = []
         self.mode = "ok"
         self.fail_reads: TrackerApiError | None = None
+        self.fail_issue_worklogs = False
         self.closed = False
         self.next_id = 100
 
@@ -57,6 +58,8 @@ class FakeTracker:
 
     async def issue_worklogs(self, key, authors=None):
         self._read()
+        if self.fail_issue_worklogs:
+            raise TrackerApiError("Tracker недоступен: ConnectError")
         assert authors is not None and "me" in authors
         return [w for w in self.worklogs if w.key == key]
 
@@ -74,6 +77,9 @@ class FakeTracker:
             raise TrackerUncertain("Tracker не ответил вовремя: ReadTimeout")
         if self.mode == "timeout_lost":
             raise TrackerUncertain("Tracker не ответил вовремя: ReadTimeout")
+        if self.mode == "no_id":
+            self.add(key, start.date(), minutes)
+            return ""
         return self.add(key, start.date(), minutes)
 
     async def aclose(self):
@@ -303,6 +309,11 @@ async def test_add_task_validation(env, body):
     assert response.status_code == 422
 
 
+def _age_journal(env, minutes: int) -> None:
+    moment = (datetime.now(UTC) - timedelta(minutes=minutes)).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+    env["ctx"].conn.execute("UPDATE worklog_submission SET created_at = ?", (moment,))
+
+
 async def _submit(env, entries):
     response = await env["client"].post("/api/timesheet/submit", json={"entries": entries}, headers=H)
     assert response.status_code == 200, response.text
@@ -366,6 +377,9 @@ async def test_submit_timeout_lost_stays_unknown_then_resolves_on_next_submit(en
     payload = await _get(env)
     assert _rows(payload)["SUPERAPP-1"]["cells"]["2026-11-09"]["submission"] == "unknown"
     env["tracker"].mode = "ok"
+    results = await _submit(env, [ENTRY])
+    assert results[0]["status"] == "unknown"
+    _age_journal(env, minutes=3)
     results = await _submit(env, [ENTRY])
     assert results[0]["status"] == "done"
     statuses = [r["status"] for r in worklog_submissions(env["ctx"].conn, ["2026-11-09"])]
@@ -481,3 +495,110 @@ async def test_default_tracker_factory_reports_token_failure(ctx):
             await client.myself()
     finally:
         await client.aclose()
+
+
+async def test_reconciled_cell_is_skipped_even_after_the_duplicate_window(env):
+    env["tracker"].mode = "timeout_lost"
+    await _submit(env, [ENTRY])
+    _age_journal(env, minutes=11)
+    env["tracker"].worklogs.append(
+        Worklog("900", "SUPERAPP-1", date(2026, 11, 9), 120, datetime.now(UTC) - timedelta(minutes=10))
+    )
+    env["tracker"].mode = "ok"
+    results = await _submit(env, [ENTRY])
+    assert results[0] == {**ENTRY, "status": "skipped", "error": "уже списано, подтверждено сверкой"}
+    assert len(env["tracker"].created) == 1
+
+
+async def test_failed_reconciliation_read_blocks_the_post(env):
+    env["tracker"].mode = "timeout_lost"
+    await _submit(env, [ENTRY])
+    _age_journal(env, minutes=5)
+    env["tracker"].mode = "ok"
+    env["tracker"].fail_issue_worklogs = True
+    results = await _submit(env, [ENTRY, {**ENTRY, "key": "SUPERAPP-2"}])
+    assert results[0] == {**ENTRY, "status": "unknown", "error": "не удалось сверить с Tracker, повторите позже"}
+    assert results[1]["status"] == "done"
+    assert [c[0] for c in env["tracker"].created] == ["SUPERAPP-1", "SUPERAPP-2"]
+
+
+async def test_fresh_unknown_without_match_keeps_blocking(env):
+    env["tracker"].mode = "timeout_lost"
+    await _submit(env, [ENTRY])
+    await _get(env)
+    statuses = [r["status"] for r in worklog_submissions(env["ctx"].conn, ["2026-11-09"])]
+    assert statuses == ["unknown"]
+
+
+async def test_get_reconciles_open_rows_after_restart(env):
+    from lpdev.db import worklog_submission_create
+
+    conn = env["ctx"].conn
+    worklog_submission_create(conn, "SUPERAPP-1", "2026-11-09", 120)
+    worklog_submission_create(conn, "SUPERAPP-2", "2026-11-10", 60)
+    _age_journal(env, minutes=5)
+    env["tracker"].worklogs.append(
+        Worklog("900", "SUPERAPP-1", date(2026, 11, 9), 120, datetime.now(UTC) - timedelta(minutes=4))
+    )
+    timesheet_cell_set(conn, "SUPERAPP-1", "2026-11-09", 120)
+    payload = await _get(env)
+    rows = worklog_submissions(conn, ["2026-11-09", "2026-11-10"])
+    assert [(r["issue_key"], r["status"], r["tracker_id"]) for r in rows] == [
+        ("SUPERAPP-1", "done", "900"), ("SUPERAPP-2", "failed", None)
+    ]
+    cells = _rows(payload)
+    assert cells["SUPERAPP-1"]["cells"]["2026-11-09"]["submission"] is None
+    assert cells["SUPERAPP-1"]["cells"]["2026-11-09"]["edited"] is None
+    assert cells["SUPERAPP-2"]["cells"]["2026-11-10"]["submission"] == "failed"
+    results = await _submit(env, [{"key": "SUPERAPP-2", "date": "2026-11-10", "minutes": 60}])
+    assert results[0]["status"] == "done"
+
+
+async def test_get_reconciliation_is_capped(env):
+    from lpdev.db import worklog_submission_create
+
+    conn = env["ctx"].conn
+    for n in range(25):
+        worklog_submission_create(conn, f"SUPERAPP-{n + 1}", "2026-11-09", 30)
+    _age_journal(env, minutes=5)
+    await _get(env)
+    statuses = [r["status"] for r in worklog_submissions(conn, ["2026-11-09"])]
+    assert statuses.count("failed") == 20
+    assert statuses.count("pending") == 5
+
+
+async def test_get_skips_reconciliation_while_submit_is_running(env):
+    from lpdev.db import worklog_submission_create
+
+    conn = env["ctx"].conn
+    worklog_submission_create(conn, "SUPERAPP-1", "2026-11-09", 120)
+    _age_journal(env, minutes=5)
+    async with env["app"].state.timesheet.submit_lock:
+        payload = await _get(env)
+    assert _rows(payload)["SUPERAPP-1"]["cells"]["2026-11-09"]["submission"] == "pending"
+
+
+async def test_get_does_not_reconcile_when_tracker_disabled(env):
+    from lpdev.db import worklog_submission_create
+
+    conn = env["ctx"].conn
+    worklog_submission_create(conn, "SUPERAPP-1", "2026-11-09", 120)
+    _age_journal(env, minutes=5)
+    env["ctx"].config = env["ctx"].config.model_copy(update={"tracker": TrackerConfig(queues=["SUPERAPP"])})
+    await _get(env)
+    assert [r["status"] for r in worklog_submissions(conn, ["2026-11-09"])] == ["pending"]
+
+
+async def test_create_without_id_is_confirmed_by_reconciliation(env):
+    env["tracker"].mode = "no_id"
+    results = await _submit(env, [ENTRY])
+    assert results[0]["status"] == "done"
+    rows = worklog_submissions(env["ctx"].conn, ["2026-11-09"])
+    assert [(r["status"], r["tracker_id"]) for r in rows] == [("done", "101")]
+
+
+def test_matches_requires_created_at():
+    from lpdev.web.timesheet_routes import _matches
+
+    worklog = Worklog("1", "SUPERAPP-1", date(2026, 11, 9), 30, None)
+    assert not _matches(worklog, "SUPERAPP-1", date(2026, 11, 9), 30, datetime.now(UTC), set())
