@@ -755,6 +755,11 @@ addRow была задвоенная кнопка. Блок <script> переп�
 - [MINOR] битый конфиг после мастера давал traceback — ConfigError перехвачен
   с подсказкой `--setup`; Ctrl+C до старта uvicorn больше не traceback
   (exit 130)
+- [BLOCKER] на русской локали macOS `ps -o lstart=` возвращал кириллицу и
+  запись pidfile падала с UnicodeEncodeError (бинарь не стартовал) — ps
+  вызывается с `LC_ALL=C`, не-ASCII символы заменяются (безопасный исход:
+  инстанс не убивается); в INSTALL.md добавлен отзыв доступа
+  (`id.yandex.ru/personal/data-access`)
 - [MINOR] версия pyinstaller зафиксирована (воспроизводимость sha256);
   INSTALL.md — обновление заменой папки, не «поверх»
 - [NIT] `--port` валидируется (`validate_port`), atexit-закрытие вкладок

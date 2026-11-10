@@ -66,6 +66,33 @@ def test_write_pid_entry_creates_file_with_owner_only_mode(tmp_path):
         proc.wait()
 
 
+def test_process_start_time_uses_c_locale(monkeypatch):
+    seen = {}
+
+    def fake_run(cmd, **kwargs):
+        seen["env"] = kwargs.get("env")
+        return type("Proc", (), {"stdout": b"Wed Nov 10 09:04:42 2026"})()
+
+    monkeypatch.setattr("lpdev.qa_main.subprocess.run", fake_run)
+    assert process_start_time(123) == "Wed Nov 10 09:04:42 2026"
+    assert seen["env"]["LC_ALL"] == "C"
+
+
+def test_write_pid_entry_survives_non_ascii_start_time(tmp_path, monkeypatch):
+    proc = subprocess.Popen(["/bin/sleep", "30"])
+    try:
+        monkeypatch.setattr("lpdev.qa_main.process_start_time", lambda pid: "среда ноября")
+        pid_path = tmp_path / "lpdev-qa.pid"
+        write_pid_entry(pid_path, proc.pid)
+        pid, start_time = read_pid_entry(pid_path)
+        assert pid == proc.pid
+        assert start_time == "????? ??????"
+        assert (pid_path.stat().st_mode & 0o777) == 0o600
+    finally:
+        proc.kill()
+        proc.wait()
+
+
 def test_stop_pid_kills_process():
     proc = subprocess.Popen(["/bin/sleep", "30"])
     stop_pid(proc.pid, timeout_sec=2.0)

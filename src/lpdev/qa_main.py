@@ -62,18 +62,22 @@ def pid_alive(pid: int) -> bool:
 def process_start_time(pid: int) -> str | None:
     try:
         proc = subprocess.run(
-            ["ps", "-p", str(pid), "-o", "lstart="], capture_output=True, timeout=5, check=False
+            ["ps", "-p", str(pid), "-o", "lstart="],
+            capture_output=True,
+            timeout=5,
+            check=False,
+            env={**os.environ, "LC_ALL": "C"},
         )
     except (OSError, subprocess.TimeoutExpired):
         return None
-    return proc.stdout.decode().strip() or None
+    return proc.stdout.decode(errors="replace").strip() or None
 
 
 def write_pid_entry(path: Path, pid: int) -> None:
     start_time = process_start_time(pid) or ""
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     try:
-        os.write(fd, f"{pid} {start_time}\n".encode("ascii"))
+        os.write(fd, f"{pid} {start_time}\n".encode("ascii", errors="replace"))
     finally:
         os.close(fd)
 
