@@ -8,7 +8,6 @@ from helpers import list_reviews
 from lpdev.db import (
     MAX_REVIEW_MD_LENGTH,
     backup,
-    cancel_draft_reviews,
     MAX_QUESTIONS_PER_REVIEW,
     claim_next_question,
     claim_next_review,
@@ -32,7 +31,6 @@ from lpdev.db import (
     requeue_incomplete,
     requeue_review,
     retry_review,
-    supersede_reviews,
     sync_projects,
     upsert_mr,
 )
@@ -695,80 +693,11 @@ def _set_status(conn, review_id, status):
     conn.execute("UPDATE review SET status = ? WHERE id = ?", (status, review_id))
 
 
-def test_supersede_rebases_queued_review(conn):
-    mr_id = _mr_with_reviews(conn)
-    review_id = create_review(conn, mr_id, "new", "a" * 40, "agent-a")
-    conn.execute(
-        "UPDATE review SET attempt = 2, not_before = '2999-01-01T00:00:00Z' WHERE id = ?",
-        (review_id,),
-    )
-
-    result = supersede_reviews(conn, mr_id, "b" * 40)
-
-    assert result.rebased == [review_id]
-    assert result.cancelled_active == [] and result.cancelled_queued == []
-    assert result.touched
-    row = get_review(conn, review_id)
-    assert row["status"] == "queued"
-    assert row["head_sha"] == "b" * 40
-    assert row["attempt"] == 0
-    assert row["not_before"] is None
-
-
-def test_supersede_cancels_queued_on_conflict(conn):
-    mr_id = _mr_with_reviews(conn)
-    stale = create_review(conn, mr_id, "new", "a" * 40, "agent-a")
-    existing = create_review(conn, mr_id, "new", "b" * 40, "agent-a")
-
-    result = supersede_reviews(conn, mr_id, "b" * 40)
-
-    assert result.cancelled_queued == [stale]
-    assert result.rebased == [] and result.cancelled_active == []
-    row = get_review(conn, stale)
-    assert row["status"] == "cancelled"
-    assert row["head_sha"] == "a" * 40
-    assert row["finished_at"] is not None
-    assert get_review(conn, existing)["status"] == "queued"
-
-
-@pytest.mark.parametrize("status", ["cloning", "reviewing"])
-def test_supersede_cancels_active(conn, status):
-    mr_id = _mr_with_reviews(conn)
-    review_id = create_review(conn, mr_id, "new", "a" * 40, "agent-a")
-    _set_status(conn, review_id, status)
-
-    result = supersede_reviews(conn, mr_id, "b" * 40)
-
-    assert result.cancelled_active == [review_id]
-    row = get_review(conn, review_id)
-    assert row["status"] == "cancelled"
-    assert row["head_sha"] == "a" * 40
-    assert row["finished_at"] is not None
-    assert row["error"] == f"отменено: в MR новый коммит {'b' * 12}"
-
-
-def test_supersede_skips_finished_and_same_head(conn):
-    mr_id = _mr_with_reviews(conn)
-    done = create_review(conn, mr_id, "new", "a" * 40, "agent-a")
-    finish_review(conn, done, "done", review_md="ok")
-    failed = create_review(conn, mr_id, "manual", "a" * 40, "agent-a")
-    finish_review(conn, failed, "error", error="boom")
-    current = create_review(conn, mr_id, "push", "b" * 40, "agent-a")
-    _set_status(conn, current, "reviewing")
-
-    result = supersede_reviews(conn, mr_id, "b" * 40)
-
-    assert not result.touched
-    assert get_review(conn, done)["status"] == "done"
-    assert get_review(conn, failed)["status"] == "error"
-    assert get_review(conn, current)["status"] == "reviewing"
-
-
 def test_late_writes_do_not_override_cancelled(conn):
     mr_id = _mr_with_reviews(conn)
     review_id = create_review(conn, mr_id, "new", "a" * 40, "agent-a")
     _set_status(conn, review_id, "reviewing")
-    supersede_reviews(conn, mr_id, "b" * 40)
+    finish_review(conn, review_id, "cancelled")
     cancelled = dict(get_review(conn, review_id))
 
     finish_review(conn, review_id, "done", review_md="late")
@@ -783,7 +712,7 @@ def test_retry_review_from_cancelled(conn):
     mr_id = _mr_with_reviews(conn)
     review_id = create_review(conn, mr_id, "new", "a" * 40, "agent-a")
     _set_status(conn, review_id, "cloning")
-    supersede_reviews(conn, mr_id, "b" * 40)
+    finish_review(conn, review_id, "cancelled", error="x")
 
     assert retry_review(conn, review_id) is True
 
@@ -800,7 +729,7 @@ def test_list_mrs_ignores_cancelled_for_verdict(conn):
     active = create_review(conn, mr_id, "push", "b" * 40, "agent-a")
     _set_status(conn, active, "reviewing")
     conn.execute("UPDATE review SET verdict = 'REQUEST_CHANGES', crit_count = 9 WHERE id = ?", (active,))
-    supersede_reviews(conn, mr_id, "c" * 40)
+    finish_review(conn, active, "cancelled")
 
     row = list_mrs(conn)[0]
     assert row["latest_done_review_id"] == done
@@ -845,30 +774,6 @@ def test_upsert_reports_draft_transitions(conn):
 
     still_draft = _upsert_draft(conn, project_id, True)
     assert not still_draft.became_ready and not still_draft.became_draft
-
-
-def test_cancel_draft_reviews_cancels_active_only(conn):
-    mr_id = _mr_with_reviews(conn)
-    done = create_review(conn, mr_id, "new", "a" * 40, "agent-a")
-    finish_review(conn, done, "done", review_md="ok")
-    queued = create_review(conn, mr_id, "push", "a" * 40, "agent-a")
-    cloning = create_review(conn, mr_id, "manual", "a" * 40, "agent-a")
-    _set_status(conn, cloning, "cloning")
-    reviewing = create_review(conn, mr_id, "new", "b" * 40, "agent-a")
-    _set_status(conn, reviewing, "reviewing")
-
-    result = cancel_draft_reviews(conn, mr_id)
-
-    assert result.cancelled_active == [cloning, reviewing]
-    assert result.cancelled_queued == [queued]
-    assert result.rebased == []
-    for review_id in (queued, cloning, reviewing):
-        row = get_review(conn, review_id)
-        assert row["status"] == "cancelled"
-        assert row["finished_at"] is not None
-        assert row["error"] == "отменено: MR переведён в draft"
-    assert get_review(conn, done)["status"] == "done"
-    assert not cancel_draft_reviews(conn, mr_id).touched
 
 
 def test_mr_wants_review_by_roles_or_history(conn):
@@ -1059,7 +964,7 @@ def test_retry_review_writes_and_clears_instructions(conn):
     assert get_review(conn, review_id)["extra_instructions"] is None
 
 
-def test_instructions_survive_requeue_rebase_and_supersede(conn):
+def test_instructions_survive_requeue_and_rebase(conn):
     review_id = _done_review(conn)
     retry_review(conn, review_id, "фокус на безопасности")
     claim_next_review(conn)
@@ -1067,10 +972,8 @@ def test_instructions_survive_requeue_rebase_and_supersede(conn):
     claim_next_review(conn)
     assert rebase_review_head(conn, review_id, "b" * 40)
     requeue_review(conn, review_id)
-    mr_id = get_review(conn, review_id)["mr_id"]
-    supersede_reviews(conn, mr_id, "c" * 40)
     review = get_review(conn, review_id)
-    assert review["head_sha"] == "c" * 40
+    assert review["head_sha"] == "b" * 40
     assert review["extra_instructions"] == "фокус на безопасности"
 
 
@@ -1110,20 +1013,6 @@ def test_claim_next_review_waits_for_not_before(conn):
     )
     conn.commit()
     assert claim_next_review(conn)["id"] == deferred
-
-
-def test_supersede_with_delay_defers_rebased_review(conn):
-    mr_id = _mr_with_reviews(conn)
-    queued = create_review(conn, mr_id, "push", "a" * 40, "agent-a", delay_sec=5)
-    active = create_review(conn, mr_id, "new", "a" * 40, "agent-a")
-    _set_status(conn, active, "reviewing")
-
-    result = supersede_reviews(conn, mr_id, "b" * 40, delay_sec=300)
-
-    assert result.rebased == [queued]
-    assert result.cancelled_active == [active]
-    assert 290 < _delay_sec(get_review(conn, queued)) <= 300
-    assert get_review(conn, active)["not_before"] is None
 
 
 def test_retry_review_clears_not_before(conn):

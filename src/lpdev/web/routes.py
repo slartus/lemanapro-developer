@@ -275,7 +275,6 @@ async def start_mr_review(request: Request, gitlab_project_id: int, iid: int):
     if project_db_id is None:
         return PlainTextResponse("проект не настроен для авторевью", status_code=404)
     poller = getattr(request.app.state, "poller", None)
-    queued_by_ingest = 0
     detail = None
     if poller is not None:
         try:
@@ -284,7 +283,7 @@ async def start_mr_review(request: Request, gitlab_project_id: int, iid: int):
             if _find_mr(ctx.conn, project_db_id, iid) is None:
                 return PlainTextResponse(f"GitLab: {exc.message}", status_code=502)
         else:
-            queued_by_ingest = poller.ingest([{**detail, "project_id": gitlab_project_id}])
+            poller.ingest([{**detail, "project_id": gitlab_project_id}])
     mr = _find_mr(ctx.conn, project_db_id, iid)
     if mr is None and detail is not None and detail.get("state") not in (None, "opened"):
         return PlainTextResponse("MR не открыт", status_code=409)
@@ -299,9 +298,6 @@ async def start_mr_review(request: Request, gitlab_project_id: int, iid: int):
         " ORDER BY id DESC LIMIT 1",
         (mr["id"], *ACTIVE_STATUSES),
     ).fetchone()
-    if active and queued_by_ingest:
-        _wake_workers(request)
-        return JSONResponse({"review_id": active["id"]}, status_code=201)
     if active:
         return PlainTextResponse("ревью уже выполняется", status_code=409)
     if mr["state"] not in (None, "opened"):

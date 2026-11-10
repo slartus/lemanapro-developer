@@ -20,7 +20,6 @@ from lpdev.db import (
     get_review,
     list_questions,
     requeue_incomplete,
-    supersede_reviews,
     sync_projects,
     upsert_mr,
 )
@@ -344,7 +343,7 @@ async def test_cancel_during_clone_removes_workspace_and_worker_continues(
         assert _workspace(tmp_path, stale_id).exists()
 
         worker._api.detail["sha"] = head_sha
-        supersede_reviews(db, mr_id, head_sha)
+        finish_review(db, stale_id, "cancelled")
         assert registry.cancel(stale_id) is True
         fresh_id = create_review(db, mr_id, "push", head_sha, "agent-a")
 
@@ -384,7 +383,7 @@ async def test_cancel_during_review_discards_result(tmp_path, db, origin, monkey
     assert get_review(db, review_id)["status"] == "reviewing"
     assert _workspace(tmp_path, review_id).exists()
 
-    supersede_reviews(db, get_review(db, review_id)["mr_id"], "e" * 40)
+    finish_review(db, review_id, "cancelled")
     registry.cancel(review_id)
 
     assert await task is True

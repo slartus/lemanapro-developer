@@ -16,21 +16,16 @@ from lpdev.db import (
     ROLES_BACKFILL_KEY,
     SCAN_DONE_KEY,
     MrUpsertResult,
-    cancel_draft_reviews,
-    create_review,
     poll_state_delete,
-    review_exists_for_head,
     poll_state_get,
     poll_state_set,
     set_mention_url,
-    supersede_reviews,
     todo_mark_seen,
     todo_seen_ids,
     update_mr_roles,
     upsert_mr,
 )
 from lpdev.gitlab_client import GitLabClient, parse_draft
-from lpdev.worker import ReviewRegistry
 
 logger = logging.getLogger(__name__)
 
@@ -54,16 +49,12 @@ class Poller:
         api: GitLabClient,
         config: Config,
         project_ids: dict[int, int],
-        work_event: asyncio.Event | None = None,
-        registry: ReviewRegistry | None = None,
         on_mr_updated: Callable[[int, int], None] | None = None,
     ) -> None:
         self._conn = conn
         self._api = api
         self._config = config
         self._project_ids = project_ids
-        self._work_event = work_event
-        self._registry = registry
         self._me: dict[str, Any] | None = None
         self._refresh_task: asyncio.Task | None = None
         self._last_refresh: float | None = None
@@ -111,29 +102,17 @@ class Poller:
         self._project_ids = project_ids
 
     async def tick(self) -> int:
+        """Run one poll cycle. Returns the number of auto-started reviews (always 0)."""
         if self._me is None:
             self._me = await self._api.get_user()
-        created = 0
-        sweep_error: Exception | None = None
-        try:
-            await self._backfill_roles()
-            created += await self._process_todos()
-            scanned: set[int] = set()
-            created += await self._full_scan(scanned)
-            swept, sweep_error = await self._sweep_merge_requests(scanned)
-            created += swept
-        finally:
-            if created and self._work_event is not None:
-                self._work_event.set()
-        if sweep_error is not None:
-            raise sweep_error
-        return created
-
-    def _agent_for(self, project_db_id: int) -> str:
-        row = get_project_row(self._conn, project_db_id)
-        if row is None:
-            raise RuntimeError(f"project db row missing: {project_db_id}")
-        return row["agent"]
+        await self._backfill_roles()
+        await self._process_todos()
+        scanned: set[int] = set()
+        await self._full_scan(scanned)
+        error = await self._sweep_merge_requests(scanned)
+        if error is not None:
+            raise error
+        return 0
 
     def _upsert(
         self,
@@ -167,58 +146,6 @@ class Poller:
             is_draft=parse_draft(mr),
         )
 
-    def _supersede_stale(
-        self, result: MrUpsertResult, mr: dict[str, Any], project_db_id: int
-    ) -> int | None:
-        if result.inserted or not result.head_sha_changed:
-            return None
-        outcome = supersede_reviews(
-            self._conn, result.mr_id, mr["sha"], self._config.review.push_debounce_sec
-        )
-        if not outcome.touched:
-            return None
-        logger.info(
-            "MR %s head moved to %s: cancelled %s, rebased %s",
-            mr.get("iid"), mr["sha"][:12],
-            outcome.cancelled_active + outcome.cancelled_queued, outcome.rebased,
-        )
-        if self._registry is not None:
-            for review_id in outcome.cancelled_active:
-                self._registry.cancel(review_id)
-        if not outcome.cancelled_active or mr.get("state") not in (None, "opened"):
-            return 0
-        if review_exists_for_head(self._conn, result.mr_id, mr["sha"]):
-            return 0
-        return self._enqueue(result.mr_id, "push", mr, project_db_id)
-
-    def _reconcile(
-        self, result: MrUpsertResult, mr: dict[str, Any], project_db_id: int
-    ) -> int | None:
-        if result.became_draft:
-            self._cancel_for_draft(result.mr_id, mr)
-        return self._supersede_stale(result, mr, project_db_id)
-
-    def _cancel_for_draft(self, mr_id: int, mr: dict[str, Any]) -> None:
-        outcome = cancel_draft_reviews(self._conn, mr_id)
-        if not outcome.touched:
-            return
-        logger.info(
-            "MR %s moved to draft: cancelled %s",
-            mr.get("iid"), outcome.cancelled_active + outcome.cancelled_queued,
-        )
-        if self._registry is not None:
-            for review_id in outcome.cancelled_active:
-                self._registry.cancel(review_id)
-
-    def _enqueue(self, mr_id: int, trigger: str, mr: dict[str, Any], project_db_id: int) -> int:
-        if parse_draft(mr) is True:
-            return 0
-        delay_sec = self._config.review.push_debounce_sec if trigger == "push" else 0
-        review_id = create_review(
-            self._conn, mr_id, trigger, mr["sha"], self._agent_for(project_db_id), delay_sec
-        )
-        return 1 if review_id is not None else 0
-
     async def _backfill_roles(self) -> None:
         username = self._username()
         for gitlab_pid, project_db_id in self._project_ids.items():
@@ -245,8 +172,7 @@ class Poller:
                 )
             poll_state_set(self._conn, key, datetime.now(UTC).isoformat())
 
-    async def _process_todos(self) -> int:
-        created = 0
+    async def _process_todos(self) -> None:
         seen = todo_seen_ids(self._conn)
         todos = await self._api.get_todos()
         for todo in sorted(todos, key=_todo_sort_key):
@@ -269,21 +195,19 @@ class Poller:
                 if self._is_older_than_stored(self._project_ids[gitlab_pid], detail):
                     logger.info("todo %s kept: MR %s/%s detail is older than stored", todo_id, gitlab_pid, iid)
                     continue
-                created += self._handle_todo(todo, detail, gitlab_pid)
+                self._handle_todo(todo, detail, gitlab_pid)
             except Exception:
                 logger.exception("todo %s (MR %s/%s) failed", todo_id, gitlab_pid, iid)
                 continue
             todo_mark_seen(self._conn, todo_id)
-        return created
 
-    def _handle_todo(self, todo: dict[str, Any], detail: dict[str, Any], gitlab_pid: int) -> int:
+    def _handle_todo(self, todo: dict[str, Any], detail: dict[str, Any], gitlab_pid: int) -> None:
         project_db_id = self._project_ids[gitlab_pid]
         result = self._upsert(project_db_id, detail, todo_signal_roles(todo))
         if result is None:
-            return 0
-        superseded = self._reconcile(result, detail, project_db_id)
+            return
         if detail.get("state") != "opened":
-            return superseded or 0
+            return
         mentioned = todo.get("action_name") in MENTION_ACTIONS
         if mentioned:
             try:
@@ -294,10 +218,8 @@ class Poller:
                     set_mention_url(self._conn, result.mr_id, mention_url)
             except Exception:
                 logger.exception("failed to save mention url for todo %s", todo.get("id"))
-        return superseded or 0
 
-    async def _full_scan(self, scanned: set[int]) -> int:
-        created = 0
+    async def _full_scan(self, scanned: set[int]) -> None:
         username = self._username()
         for gitlab_pid, project_db_id in self._project_ids.items():
             if poll_state_get(self._conn, SCAN_DONE_KEY.format(gitlab_pid)) is not None:
@@ -310,7 +232,7 @@ class Poller:
                 continue
             for mr in mrs:
                 try:
-                    created += await self._scan_one(gitlab_pid, project_db_id, mr, username)
+                    await self._scan_one(gitlab_pid, project_db_id, mr, username)
                 except Exception:
                     logger.exception("full scan: MR %s/%s failed", gitlab_pid, mr.get("iid"))
             self._advance_cursor(gitlab_pid, mrs, scan_started)
@@ -319,22 +241,17 @@ class Poller:
                 datetime.now(UTC).isoformat(),
             )
             scanned.add(gitlab_pid)
-        return created
 
     async def _scan_one(
         self, gitlab_pid: int, project_db_id: int, mr: dict[str, Any], username: str
-    ) -> int:
+    ) -> None:
         mine = _author(mr).get("username") == username or username in _reviewer_usernames(mr)
         mentioned = await self._mentioned_in_mr(
             gitlab_pid, mr["iid"], username, mr.get("description"), fetch_notes=not mine
         )
-        result = self._upsert(
+        self._upsert(
             project_db_id, mr, frozenset({MENTIONED_ROLE}) if mentioned else frozenset()
         )
-        if result is None:
-            return 0
-        superseded = self._reconcile(result, mr, project_db_id)
-        return superseded or 0
 
     def _advance_cursor(
         self,
@@ -375,8 +292,7 @@ class Poller:
             return False
         return any(_has_mention(note.get("body"), username) for note in notes)
 
-    async def _sweep_merge_requests(self, scanned: set[int]) -> tuple[int, Exception | None]:
-        created = 0
+    async def _sweep_merge_requests(self, scanned: set[int]) -> Exception | None:
         pending: list[tuple[int, int, str]] = []
         for gitlab_pid, project_db_id in self._project_ids.items():
             if gitlab_pid in scanned:
@@ -391,7 +307,7 @@ class Poller:
                 continue
             pending.append((gitlab_pid, project_db_id, cursor))
         if not pending:
-            return 0, None
+            return None
         group_path = self._common_group(pending)
         error: Exception | None = None
         if group_path is not None:
@@ -404,8 +320,8 @@ class Poller:
             else:
                 for gitlab_pid, project_db_id, cursor in pending:
                     project_mrs = [mr for mr in mrs if mr.get("project_id") == gitlab_pid]
-                    created += self._sweep_project(gitlab_pid, project_db_id, project_mrs)
-                return created, None
+                    self._sweep_project(gitlab_pid, project_db_id, project_mrs)
+                return None
         for gitlab_pid, project_db_id, cursor in pending:
             try:
                 mrs = await self._api.get_project_merge_requests(
@@ -415,23 +331,21 @@ class Poller:
                 logger.exception("sweep failed for project %s", gitlab_pid)
                 error = exc
                 continue
-            created += self._sweep_project(gitlab_pid, project_db_id, mrs)
-        return created, error
+            self._sweep_project(gitlab_pid, project_db_id, mrs)
+        return error
 
     def _sweep_project(
         self, gitlab_pid: int, project_db_id: int, mrs: list[dict[str, Any]]
-    ) -> int:
-        created = 0
+    ) -> None:
         for mr in mrs:
             try:
                 updated = self._is_update_of_known(project_db_id, mr)
-                created += self._sweep_one(project_db_id, mr)
+                self._sweep_one(project_db_id, mr)
                 if updated and self._on_mr_updated is not None:
                     self._on_mr_updated(gitlab_pid, mr["iid"])
             except Exception:
                 logger.exception("sweep: MR %s/%s failed", gitlab_pid, mr.get("iid"))
         self._advance_cursor(gitlab_pid, mrs)
-        return created
 
     def _common_group(self, pending: list[tuple[int, int, str]]) -> str | None:
         """Longest common group path for 2+ pending projects, or None."""
@@ -492,7 +406,6 @@ class Poller:
     def ingest(self, mrs: list[Any]) -> int:
         if self._me is None:
             return 0
-        created = 0
         for mr in mrs:
             if not isinstance(mr, dict) or not isinstance(mr.get("iid"), int) or not isinstance(mr.get("sha"), str):
                 continue
@@ -502,18 +415,13 @@ class Poller:
                 continue
             try:
                 if self._is_newer_than_stored(project_db_id, mr) and self._may_insert(project_db_id, mr):
-                    created += self._sweep_one(project_db_id, mr)
+                    self._sweep_one(project_db_id, mr)
             except Exception:
                 logger.exception("ingest: MR %s/%s failed", gitlab_pid, mr.get("iid"))
-        if created and self._work_event is not None:
-            self._work_event.set()
-        return created
+        return 0
 
-    def _sweep_one(self, project_db_id: int, mr: dict[str, Any]) -> int:
-        result = self._upsert(project_db_id, mr)
-        if result is None:
-            return 0
-        return self._reconcile(result, mr, project_db_id) or 0
+    def _sweep_one(self, project_db_id: int, mr: dict[str, Any]) -> None:
+        self._upsert(project_db_id, mr)
 
     def _username(self) -> str:
         if self._me is None:

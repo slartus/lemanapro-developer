@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 import dataclasses
 import json
 
@@ -10,7 +9,7 @@ from helpers import list_reviews
 from lpdev.db import claim_next_review, create_review, get_review, list_mrs
 from lpdev.gitlab_client import GitLabClient
 from lpdev.main import create_app
-from test_poller import FakeRegistry, StubApi, _make_poller, _mr, _seen_foreign_mr
+from test_poller import StubApi, _make_poller, _mr, _seen_foreign_mr
 
 OLD = "2026-01-01T12:00:00Z"
 NEW = "2026-01-01T12:05:00Z"
@@ -18,44 +17,42 @@ NEW = "2026-01-01T12:05:00Z"
 
 async def _active_review_on_old_head(conn):
     api = StubApi()
-    registry = FakeRegistry()
-    work_event = asyncio.Event()
-    poller, mr_id = await _seen_foreign_mr(conn, api, registry, work_event)
+    poller, mr_id = await _seen_foreign_mr(conn, api)
     review_id = create_review(conn, mr_id, "manual", "a" * 40, "agent-a")
     assert claim_next_review(conn)["id"] == review_id
-    return api, registry, work_event, poller, review_id
+    return api, poller, review_id
 
 
 async def test_radar_data_reaches_the_review_flow_first_and_sweep_does_not_duplicate(conn):
-    api, registry, work_event, poller, review_id = await _active_review_on_old_head(conn)
+    api, poller, review_id = await _active_review_on_old_head(conn)
     pushed = _mr(10, 1, sha="b" * 40, updated_at=NEW)
 
-    assert poller.ingest([pushed]) == 1
-    assert registry.cancelled == [review_id]
-    assert get_review(conn, review_id)["status"] == "cancelled"
-    assert work_event.is_set()
+    assert poller.ingest([pushed]) == 0
+    row = get_review(conn, review_id)
+    assert row["status"] == "cloning"
+    assert row["head_sha"] == "a" * 40
 
     api.mrs = [pushed]
     assert await poller.tick() == 0
-    fresh = [r for r in list_reviews(conn) if r["head_sha"] == "b" * 40]
-    assert [(r["trigger"], r["status"]) for r in fresh] == [("push", "queued")]
+    assert [r["id"] for r in list_reviews(conn)] == [review_id]
 
 
 async def test_stale_sweep_data_does_not_roll_back_a_newer_head(conn):
-    api, registry, _, poller, review_id = await _active_review_on_old_head(conn)
+    api, poller, review_id = await _active_review_on_old_head(conn)
     poller.ingest([_mr(10, 1, sha="b" * 40, updated_at=NEW)])
 
     api.mrs = [_mr(10, 1, sha="a" * 40, updated_at=OLD)]
     assert await poller.tick() == 0
     assert conn.execute("SELECT head_sha FROM mr WHERE iid = 1").fetchone()["head_sha"] == "b" * 40
-    assert [r["head_sha"] for r in list_reviews(conn) if r["status"] == "queued"] == ["b" * 40]
+    assert get_review(conn, review_id)["head_sha"] == "a" * 40
 
 
 async def test_ingest_skips_data_that_is_not_newer(conn):
-    api, registry, _, poller, review_id = await _active_review_on_old_head(conn)
+    api, poller, review_id = await _active_review_on_old_head(conn)
     assert poller.ingest([_mr(10, 1, sha="b" * 40, updated_at=OLD)]) == 0
-    assert get_review(conn, review_id)["status"] != "cancelled"
-    assert registry.cancelled == []
+    row = get_review(conn, review_id)
+    assert row["status"] == "cloning"
+    assert conn.execute("SELECT head_sha FROM mr WHERE iid = 1").fetchone()["head_sha"] == "a" * 40
 
 
 async def test_ingest_ignores_unknown_projects_unscanned_projects_and_malformed_items(conn):
@@ -254,7 +251,7 @@ async def test_board_lists_projects_configured_for_review(ctx):
 async def test_todo_with_stale_detail_is_kept_for_the_next_tick(conn):
     from lpdev.db import todo_seen_ids
 
-    api, registry, _, poller, _ = await _active_review_on_old_head(conn)
+    api, poller, _ = await _active_review_on_old_head(conn)
     poller.ingest([_mr(10, 1, sha="b" * 40, updated_at=NEW)])
     api.details[(10, 1)] = _mr(10, 1, sha="a" * 40, updated_at=OLD)
     api.todos = [{"id": 501, "target_type": "MergeRequest", "action_name": "mentioned",

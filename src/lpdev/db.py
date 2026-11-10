@@ -50,17 +50,6 @@ class MrUpsertResult:
     became_draft: bool = False
 
 
-@dataclass(frozen=True)
-class SupersedeResult:
-    cancelled_active: list[int]
-    rebased: list[int]
-    cancelled_queued: list[int]
-
-    @property
-    def touched(self) -> bool:
-        return bool(self.cancelled_active or self.rebased or self.cancelled_queued)
-
-
 def connect(db_path: Path) -> sqlite3.Connection:
     conn = sqlite3.connect(db_path, isolation_level=None)
     conn.row_factory = sqlite3.Row
@@ -489,13 +478,6 @@ def mr_wants_review(conn: sqlite3.Connection, mr_id: int) -> bool:
     ).fetchone() is not None
 
 
-def review_exists_for_head(conn: sqlite3.Connection, mr_id: int, head_sha: str) -> bool:
-    row = conn.execute(
-        "SELECT 1 FROM review WHERE mr_id = ? AND head_sha = ? LIMIT 1", (mr_id, head_sha)
-    ).fetchone()
-    return row is not None
-
-
 def claim_next_review(conn: sqlite3.Connection) -> sqlite3.Row | None:
     conn.execute("BEGIN IMMEDIATE")
     try:
@@ -680,78 +662,6 @@ def _migrate_to_v13(conn: sqlite3.Connection) -> None:
 
 def _migrate_to_v14(conn: sqlite3.Connection) -> None:
     _add_column(conn, "worklog_submission", "reconcile_attempts", "INTEGER NOT NULL DEFAULT 0")
-
-
-def supersede_reviews(
-    conn: sqlite3.Connection, mr_id: int, new_sha: str, delay_sec: float = 0.0
-) -> SupersedeResult:
-    cancelled_active: list[int] = []
-    rebased: list[int] = []
-    cancelled_queued: list[int] = []
-    error = superseded_error(new_sha)
-    not_before = deferred_iso(delay_sec)
-    conn.execute("BEGIN IMMEDIATE")
-    try:
-        rows = conn.execute(
-            """
-            SELECT id, status FROM review
-            WHERE mr_id = ? AND head_sha != ? AND status IN ('queued', 'cloning', 'reviewing')
-            ORDER BY id
-            """,
-            (mr_id, new_sha),
-        ).fetchall()
-        now = utcnow_iso()
-        for row in rows:
-            if row["status"] == "queued":
-                try:
-                    conn.execute(
-                        "UPDATE review SET head_sha = ?, attempt = 0, not_before = ? "
-                        "WHERE id = ?",
-                        (new_sha, not_before, row["id"]),
-                    )
-                    rebased.append(row["id"])
-                    continue
-                except sqlite3.IntegrityError:
-                    cancelled_queued.append(row["id"])
-            else:
-                cancelled_active.append(row["id"])
-            conn.execute(
-                "UPDATE review SET status = 'cancelled', finished_at = ?, error = ? WHERE id = ?",
-                (now, error, row["id"]),
-            )
-        conn.commit()
-    except BaseException:
-        conn.rollback()
-        raise
-    return SupersedeResult(cancelled_active, rebased, cancelled_queued)
-
-
-def cancel_draft_reviews(conn: sqlite3.Connection, mr_id: int) -> SupersedeResult:
-    cancelled_active: list[int] = []
-    cancelled_queued: list[int] = []
-    conn.execute("BEGIN IMMEDIATE")
-    try:
-        rows = conn.execute(
-            """
-            SELECT id, status FROM review
-            WHERE mr_id = ? AND status IN ('queued', 'cloning', 'reviewing')
-            ORDER BY id
-            """,
-            (mr_id,),
-        ).fetchall()
-        now = utcnow_iso()
-        for row in rows:
-            target = cancelled_queued if row["status"] == "queued" else cancelled_active
-            target.append(row["id"])
-            conn.execute(
-                "UPDATE review SET status = 'cancelled', finished_at = ?, error = ? WHERE id = ?",
-                (now, DRAFT_CANCEL_ERROR, row["id"]),
-            )
-        conn.commit()
-    except BaseException:
-        conn.rollback()
-        raise
-    return SupersedeResult(cancelled_active, [], cancelled_queued)
 
 
 def finish_review(

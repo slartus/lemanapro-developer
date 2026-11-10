@@ -727,10 +727,10 @@ def test_todo_seen_roundtrip(conn):
 
 # ---------- poller ----------
 
-def _poller(conn, api, re_review=False, work_event=None):
+def _poller(conn, api, re_review=False):
     config = poller_config(re_review_on_push=re_review)
     mapping = sync_projects(conn, [(10, "g/p", "agent-a", re_review, True)])
-    return Poller(conn, api, config, mapping, work_event=work_event)
+    return Poller(conn, api, config, mapping)
 
 
 def _reviews(conn):
@@ -914,38 +914,6 @@ async def test_sweep_error_propagates_after_other_projects(conn):
     with pytest.raises(GitlabApiError):
         await p.tick()
     assert conn.execute("SELECT COUNT(*) FROM mr WHERE iid = 3").fetchone()[0] == 1
-
-
-async def test_work_event_set_even_if_sweep_raises(conn):
-    api = StubApi()
-    api.fail_group = True
-    event = asyncio.Event()
-    config = poller_config()
-    config.projects.append(ProjectConfig(gitlab_project_id=20, slug="g/q", agent="agent-a"))
-    mapping = sync_projects(
-        conn, [(10, "g/p", "agent-a", False, True), (20, "g/q", "agent-a", False, True)]
-    )
-    p = Poller(conn, api, config, mapping, work_event=event)
-    api.mrs = [_mr(10, 1, author="other")]
-    await p.tick()
-    mr_id = conn.execute("SELECT id FROM mr WHERE iid = 1").fetchone()["id"]
-    review_id = create_review(conn, mr_id, "manual", "a" * 40, "agent-a")
-    claim_next_review(conn)
-
-    api.mrs = [_mr(10, 1, sha="b" * 40, author="other")]
-    original = api.get_project_merge_requests
-
-    async def failing(project_id, updated_after=None, state="opened"):
-        if project_id == 20:
-            raise GitlabApiError("down", status=500)
-        return await original(project_id, updated_after, state)
-
-    api.get_project_merge_requests = failing
-
-    with pytest.raises(GitlabApiError):
-        await p.tick()
-    assert event.is_set()
-    assert get_review(conn, review_id)["status"] == "cancelled"
 
 
 # ---------- maintenance ----------
