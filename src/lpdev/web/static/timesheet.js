@@ -303,8 +303,11 @@ function taskCell(row) {
     el('span', { className: `src ${source}`, text: SOURCE_LABELS[source] ?? source, attrs: { title: SOURCE_TITLES[source] } }),
   );
   const activity = formatActivity(row.activity);
+  const status = row.status?.display
+    ? el('span', { className: 'issue-status', text: row.status.display, attrs: { title: `Статус в Tracker: ${row.status.key}` } })
+    : null;
   return el('th', { className: 'task', attrs: { scope: 'row' } }, [
-    key,
+    status ? el('div', { className: 'task-head' }, [key, status]) : key,
     displayTitle(row) ? el('div', { className: 'task-title', text: displayTitle(row), attrs: { title: row.title } }) : null,
     sources.length || activity.length ? el('div', { className: 'sources' }, [...sources, activity.length ? activityLine(activity) : null]) : null,
   ]);

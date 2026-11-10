@@ -513,22 +513,26 @@ def status_intervals(
     today: date,
 ) -> list[dict[str, str]]:
     tracked = set(statuses)
-    raw: list[tuple[str, date, date, datetime]] = []
+    raw: list[tuple[str, date, date, datetime, bool]] = []
     current: str | None = None
     since: date | None = None
     entered: datetime | None = None
     for moment, _, to_status in sorted(history, key=lambda item: item[0]):
         day = moment.astimezone(tz).date()
         if current in tracked and since is not None and entered is not None:
-            raw.append((current, since, day, entered))
+            raw.append((current, since, day, entered, False))
         current, since, entered = to_status, day, moment
     if current in tracked and since is not None and entered is not None:
-        raw.append((current, since, max(since, today), entered))
-    merged: list[tuple[str, date, date, datetime]] = []
-    for status, start, end, moment in sorted(raw, key=lambda item: (item[0], item[3])):
+        raw.append((current, since, max(since, today), entered, True))
+    merged: list[tuple[str, date, date, datetime, bool]] = []
+    for status, start, end, moment, is_open in sorted(raw, key=lambda item: (item[0], item[3])):
         if merged and merged[-1][0] == status and start <= merged[-1][2] + timedelta(days=1):
-            merged[-1] = (status, merged[-1][1], max(merged[-1][2], end), merged[-1][3])
+            last = merged[-1]
+            merged[-1] = (status, last[1], max(last[2], end), last[3], last[4] or is_open)
         else:
-            merged.append((status, start, end, moment))
+            merged.append((status, start, end, moment, is_open))
     merged.sort(key=lambda item: item[3])
-    return [{"status": status, "from": start.isoformat(), "to": end.isoformat()} for status, start, end, _ in merged]
+    return [
+        {"status": status, "from": start.isoformat(), "to": end.isoformat(), "open": is_open}
+        for status, start, end, _, is_open in merged
+    ]

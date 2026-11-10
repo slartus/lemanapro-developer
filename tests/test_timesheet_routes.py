@@ -1119,10 +1119,18 @@ async def test_rows_show_development_and_review_activity_within_the_week(env):
     payload = await _get(env)
     rows = _rows(payload)
     assert rows["SUPERAPP-1"]["activity"] == [
-        {"status": "development", "letter": "d", "from": "2026-11-06", "to": "2026-11-09"},
-        {"status": "codereview", "letter": "r", "from": "2026-11-09", "to": "2026-11-10"},
+        {"status": "development", "letter": "d", "from": "2026-11-06", "to": "2026-11-09", "open": False},
+        {"status": "codereview", "letter": "r", "from": "2026-11-09", "to": "2026-11-10", "open": True},
     ]
     assert rows["SUPERAPP-5"]["activity"] == []
+
+
+async def test_rows_carry_the_current_tracker_status(env):
+    env["tracker"].issues[0]["status"]["display"] = "Разработка"
+    payload = await _get(env)
+    rows = _rows(payload)
+    assert rows["SUPERAPP-5"]["status"] == {"key": "development", "display": "Разработка"}
+    assert all(row["status"] is None or row["status"]["key"] for row in rows.values())
 
 
 async def test_activity_is_cached_and_failures_are_empty(env, caplog):

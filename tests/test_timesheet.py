@@ -635,3 +635,12 @@ STATUSES = {"development": "d", "codereview": "r"}
 def test_status_intervals(history, today, expected):
     result = status_intervals(history, STATUSES, MSK, today)
     assert [(item["status"], item["from"], item["to"]) for item in result] == expected
+
+
+def test_status_intervals_mark_only_the_current_status_open():
+    history = [
+        (_at("2026-11-09T09:00:00+03:00"), "todo", "development"),
+        (_at("2026-11-09T11:00:00+03:00"), "development", "codereview"),
+    ]
+    result = status_intervals(history, STATUSES, MSK, date(2026, 11, 10))
+    assert [(item["status"], item["open"]) for item in result] == [("development", False), ("codereview", True)]

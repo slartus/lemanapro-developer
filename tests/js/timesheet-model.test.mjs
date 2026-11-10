@@ -429,4 +429,17 @@ describe('formatActivity', () => {
     assert.deepEqual(formatActivity([{ status: 'x', letter: 'x', from: 'bad', to: '2026-11-19' }, null]), []);
     assert.deepEqual(formatActivity([{ from: '2026-12-31' }]), [{ text: '31.12', title: '31.12' }]);
   });
+
+  it('leaves the end open while the issue is still in the status', () => {
+    assert.deepEqual(
+      formatActivity([
+        { status: 'development', letter: 'd', from: '2026-11-09', to: '2026-11-09', open: false },
+        { status: 'codereview', letter: 'r', from: '2026-11-09', to: '2026-11-10', open: true },
+      ]),
+      [
+        { text: '09.11d', title: 'development: 09.11' },
+        { text: '09.11–r', title: 'codereview: с 09.11 по сейчас' },
+      ],
+    );
+  });
 });

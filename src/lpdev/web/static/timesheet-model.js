@@ -210,8 +210,9 @@ export function formatActivity(activity) {
     const from = shortIsoDate(item?.from);
     const to = shortIsoDate(item?.to ?? item?.from);
     if (!from || !to) return [];
-    const range = item.from === (item.to ?? item.from) ? from : `${from}–${to}`;
+    const range = item.open ? `${from}–` : item.from === (item.to ?? item.from) ? from : `${from}–${to}`;
     const status = item.status ?? '';
-    return [{ text: `${range}${item.letter ?? ''}`, title: status ? `${status}: ${range}` : range }];
+    const span = item.open ? `с ${from} по сейчас` : range;
+    return [{ text: `${range}${item.letter ?? ''}`, title: status ? `${status}: ${span}` : span }];
   });
 }

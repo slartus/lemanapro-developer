@@ -496,6 +496,13 @@ def _in_progress(issues: list[dict[str, Any]], cfg: TrackerConfig) -> dict[str, 
     return result
 
 
+def _issue_status(issue: dict[str, Any]) -> dict[str, str] | None:
+    status = issue.get("status")
+    if not isinstance(status, dict) or not status.get("key"):
+        return None
+    return {"key": str(status["key"]), "display": str(status.get("display") or status["key"])}
+
+
 def _parse_created(value: str) -> datetime:
     return datetime.fromisoformat(value.replace("Z", "+00:00"))
 
@@ -522,6 +529,7 @@ class TrackerData:
     in_progress: dict[str, str] = field(default_factory=dict)
     worklogs: list[Worklog] = field(default_factory=list)
     titles: dict[str, str] = field(default_factory=dict)
+    statuses: dict[str, dict[str, str]] = field(default_factory=dict)
     error: str | None = None
 
 
@@ -531,10 +539,12 @@ async def _tracker_data(state: TimesheetState, tracker: TrackerClient, cfg: Trac
         me = await state.myself(tracker)
         issues = await tracker.search_my_issues(cfg.in_progress_statuses, cfg.queues, MAX_IN_PROGRESS)
         data.in_progress = _in_progress(issues, cfg)
+        data.statuses = {key: status for issue in issues if (key := issue.get("key")) and (status := _issue_status(issue))}
         data.worklogs = await tracker.search_worklogs(worklog_author(me), days[0], days[-1])
         wanted = (keys | {worklog.key for worklog in data.worklogs}) - set(data.in_progress)
         issues = await tracker.get_issues(sorted(wanted)) if wanted else {}
         data.titles = {key: str(issue.get("summary") or "") for key, issue in issues.items()}
+        data.statuses |= {key: status for key, issue in issues.items() if (status := _issue_status(issue))}
     except TrackerApiError as exc:
         logger.warning("timesheet: tracker read failed: %s", exc.message)
         return TrackerData(error=exc.message)
@@ -601,6 +611,7 @@ async def api_timesheet(request: Request):
     activity_by_key = await state.row_activity(tracker, cfg, [row["key"] for row in payload["rows"]], days, today)
     for row in payload["rows"]:
         row["activity"] = activity_by_key.get(row["key"], [])
+        row["status"] = data.statuses.get(row["key"])
     return JSONResponse({**payload, "warnings": warnings}, headers={"Cache-Control": "no-store"})
 
 
