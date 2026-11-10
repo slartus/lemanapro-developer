@@ -223,7 +223,10 @@ def event_source(event: Mapping[str, Any]) -> str | None:
 def event_weight(event: Mapping[str, Any]) -> float:
     source = event_source(event)
     if source == "push":
-        count = event["push_data"].get("commit_count")
+        push = event["push_data"]
+        count = push.get("commit_count")
+        if isinstance(count, int) and is_merge_commit(push):
+            count -= 1
         extra = max(0, count - 1) if isinstance(count, int) else 0
         return min(PUSH_WEIGHT + extra, PUSH_MAX_WEIGHT)
     if source == "mr" and event.get("action_name") != "approved":
@@ -233,17 +236,20 @@ def event_weight(event: Mapping[str, Any]) -> float:
     return 0
 
 
+def is_merge_commit(push: Mapping[str, Any]) -> bool:
+    return str(push.get("commit_title") or "").startswith(MERGE_COMMIT_PREFIXES)
+
+
 def is_ignored_push(event: Mapping[str, Any], context: EventContext) -> bool:
     push = event.get("push_data")
     if not isinstance(push, Mapping):
         return False
     ref = push.get("ref")
-    title = str(push.get("commit_title") or "")
     if push.get("action") in ("removed", "deleted") or event.get("action_name") == "deleted":
         return True
     if push.get("commit_count") == 0 or push.get("ref_type") == "tag" or not isinstance(ref, str) or not ref:
         return True
-    if title.startswith(MERGE_COMMIT_PREFIXES):
+    if is_merge_commit(push) and not (isinstance(push.get("commit_count"), int) and push["commit_count"] > 1):
         return True
     if ref == context.default_branches.get(event.get("project_id")):
         return True
@@ -289,7 +295,10 @@ def mr_keys(info: Mapping[str, Any], project_id: object, context: EventContext) 
 def event_keys(event: Mapping[str, Any], context: EventContext) -> list[str]:
     info = event_mr(event, context)
     push = event.get("push_data")
-    own = [push.get("ref"), push.get("commit_title")] if isinstance(push, Mapping) else [event.get("target_title")]
+    if isinstance(push, Mapping):
+        own = [push.get("ref")] if is_merge_commit(push) else [push.get("ref"), push.get("commit_title")]
+    else:
+        own = [event.get("target_title")]
     for text in own:
         keys = extract_issue_keys(text, context.queues)
         if keys:

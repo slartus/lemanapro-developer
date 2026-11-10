@@ -561,3 +561,20 @@ def test_tracker_link_does_not_make_foreign_reviews_count():
     context = _context(mr_by_iid=lookup, tracker_links={(10, 7): "SUPERAPP-9"})
     activity = bucket_events([_note("Their", iid=7), _mr_event("approved", "Their", iid=7)], MSK, context)
     assert activity.weights == {}
+
+
+@pytest.mark.parametrize(
+    ("count", "weight", "ignored"),
+    [(1, 0, True), (2, 3, False), (3, 4, False), (9, 6, False), (None, 0, True)],
+)
+def test_merge_commit_pushes_count_only_the_extra_commits(count, weight, ignored):
+    event = _push("task/x", "Merge branch 'develop' into task/x", count=count)
+    assert is_ignored_push(event, _context()) is ignored
+    if not ignored:
+        assert event_weight(event) == weight
+
+
+def test_merge_commit_title_is_not_a_key_source():
+    event = _push("task/x", "Merge branch 'feature/SUPERAPP-1' into task/x", count=3)
+    assert event_keys(event, _context()) == []
+    assert event_keys(_push("feature/SUPERAPP-2", "Merge branch 'develop'", count=3), _context()) == ["SUPERAPP-2"]

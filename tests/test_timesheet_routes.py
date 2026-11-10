@@ -995,3 +995,78 @@ async def test_link_to_a_project_outside_the_local_database_uses_the_project_pat
     _linked(env, "SUPERAPP-80", _comment("https://gitlab.example.com/other/repo/-/merge_requests/9", login="dev"))
     env["gitlab"].events = [_ev_mr("opened", 9, "Other repo", project=77)]
     assert "SUPERAPP-80" in _rows(await _get(env))
+
+
+async def test_reconcile_attempt_is_counted_before_the_request(env, monkeypatch):
+    from lpdev.db import worklog_submission_create
+
+    monkeypatch.setattr("lpdev.web.timesheet_routes.RECONCILE_ON_READ_TIMEOUT_SEC", 0.05)
+    conn = env["ctx"].conn
+    worklog_submission_create(conn, "SUPERAPP-1", "2026-11-09", 120)
+    worklog_submission_create(conn, "SUPERAPP-2", "2026-11-09", 60)
+    _age_journal(env, minutes=5)
+    env["tracker"].issue_worklogs_delay = 5
+    await _get(env)
+    await _get(env)
+    assert env["tracker"].issue_worklogs_calls == ["SUPERAPP-1", "SUPERAPP-2"]
+    rows = worklog_submissions(conn, ["2026-11-09"])
+    assert [r["reconcile_attempts"] for r in rows] == [1, 1]
+
+
+class _Clock:
+    def __init__(self) -> None:
+        self.now = 1000.0
+
+    def monotonic(self) -> float:
+        return self.now
+
+
+@pytest.fixture
+def clock(monkeypatch):
+    fake = _Clock()
+    monkeypatch.setattr("lpdev.web.timesheet_routes.time.monotonic", fake.monotonic)
+    return fake
+
+
+async def test_user_lookup_failure_is_reported_and_cached(env, clock):
+    fake = env["fake_gitlab"]
+    fake.fail.add("user")
+    payload = await _get(env)
+    assert payload["warnings"] == ["GitLab не отдал текущего пользователя: комментарии, апрувы и мержи в своих MR не учтены"]
+    env["app"].state.timesheet.events.clear()
+    await _get(env)
+    assert fake.calls.count(("user",)) == 1
+    clock.now += 61
+    fake.fail.clear()
+    env["app"].state.timesheet.events.clear()
+    payload = await _get(env)
+    assert payload["warnings"] == []
+    assert fake.calls.count(("user",)) == 2
+
+
+async def test_failed_project_and_merge_request_lookups_are_cached_for_a_minute(env, clock):
+    fake = env["fake_gitlab"]
+    fake.fail |= {"project", "mr"}
+    env["gitlab"].events = [_ev_push("task/x", "SUPERAPP-1 x"), _ev_note(66, "SUPERAPP-2 y")]
+    await _get(env)
+    await _get(env)
+    assert fake.calls.count(("project", "10")) == 1
+    assert fake.calls.count(("mr", 10, 66)) == 1
+    clock.now += 61
+    await _get(env)
+    assert fake.calls.count(("project", "10")) == 2
+    assert fake.calls.count(("mr", 10, 66)) == 2
+
+
+async def test_failed_branch_lookups_are_cached_and_do_not_spend_the_budget(env, clock, monkeypatch):
+    monkeypatch.setattr("lpdev.web.timesheet_routes.MAX_GITLAB_LOOKUPS", 3)
+    fake = env["fake_gitlab"]
+    fake.fail.add("branch")
+    env["gitlab"].events = [_ev_push("task/a", "x"), _ev_push("task/b", "x")]
+    await _get(env)
+    fake.fail.clear()
+    env["app"].state.timesheet.events.clear()
+    env["gitlab"].events = [_ev_push("task/a", "x"), _ev_push("task/b", "x"), _ev_push("task/c", "x")]
+    await _get(env)
+    branch_calls = [call for call in fake.calls if call[0] == "branch"]
+    assert branch_calls == [("branch", 10, "task/a"), ("branch", 10, "task/b"), ("branch", 10, "task/c")]

@@ -78,6 +78,8 @@ MAX_GITLAB_LOOKUPS = 50
 LOOKUP_CACHE_SIZE = 5000
 BRANCH_LOOKUP_TTL_SEC = 600.0
 PR_LINKS_TTL_SEC = 600.0
+LOOKUP_FAILURE_TTL_SEC = 60.0
+USER_LOOKUP_WARNING = "GitLab не отдал текущего пользователя: комментарии, апрувы и мержи в своих MR не учтены"
 PR_LINK_LOOKBACK = timedelta(days=7)
 MAX_PR_LINK_ISSUES = 49
 
@@ -113,26 +115,48 @@ class GitlabLookups:
     mrs: dict[tuple[int, int], dict[str, Any]] = field(default_factory=dict)
     branches: dict[tuple[int, str], tuple[float, dict[str, Any] | None]] = field(default_factory=dict)
     projects: dict[int, dict[str, Any]] = field(default_factory=dict)
+    failures: dict[tuple[Any, ...], float] = field(default_factory=dict)
 
     def _trim(self) -> None:
-        for cache in (self.mrs, self.branches, self.projects):
+        for cache in (self.mrs, self.branches, self.projects, self.failures):
             if len(cache) > LOOKUP_CACHE_SIZE:
                 cache.clear()
 
+    def _failed_recently(self, marker: tuple[Any, ...]) -> bool:
+        until = self.failures.get(marker)
+        return until is not None and time.monotonic() < until
+
+    def _fail(self, marker: tuple[Any, ...]) -> None:
+        self.failures[marker] = time.monotonic() + LOOKUP_FAILURE_TTL_SEC
+
+    def would_call(self, kind: str, ref: Any) -> bool:
+        if self._failed_recently((kind, ref)):
+            return False
+        if kind == "mr":
+            return ref not in self.mrs
+        if kind == "project":
+            return ref not in self.projects
+        cached = self.branches.get(ref)
+        return cached is None or time.monotonic() - cached[0] >= BRANCH_LOOKUP_TTL_SEC
+
     async def me(self, gitlab) -> str | None:
-        if self.username is None:
+        if self.username is None and not self._failed_recently(("user",)):
             try:
                 self.username = str((await gitlab.get_user()).get("username") or "") or None
             except GitlabApiError as exc:
                 logger.warning("timesheet: gitlab user lookup failed: %s", exc.message)
+                self._fail(("user",))
         return self.username
 
     async def mr(self, gitlab, ref: tuple[int, int]) -> dict[str, Any] | None:
         if ref not in self.mrs:
+            if self._failed_recently(("mr", ref)):
+                return None
             try:
                 detail = await gitlab.get_project_mr(*ref)
             except GitlabApiError as exc:
                 logger.warning("timesheet: merge request %s!%s lookup failed: %s", ref[0], ref[1], exc.message)
+                self._fail(("mr", ref))
                 return None
             self.mrs[ref] = _mr_info(detail if isinstance(detail, dict) else {})
         return self.mrs[ref]
@@ -141,10 +165,13 @@ class GitlabLookups:
         cached = self.branches.get(ref)
         if cached is not None and time.monotonic() - cached[0] < BRANCH_LOOKUP_TTL_SEC:
             return cached[1]
+        if self._failed_recently(("branch", ref)):
+            return None
         try:
             found = await gitlab.get_merge_requests_by_branch(*ref)
         except GitlabApiError as exc:
             logger.warning("timesheet: merge requests of branch %s:%s lookup failed: %s", ref[0], ref[1], exc.message)
+            self._fail(("branch", ref))
             return None
         info = next((_mr_info(mr) for mr in found if isinstance(mr, dict)), None)
         self.branches[ref] = (time.monotonic(), info)
@@ -152,10 +179,13 @@ class GitlabLookups:
 
     async def project(self, gitlab, project_id: int) -> dict[str, Any]:
         if project_id not in self.projects:
+            if self._failed_recently(("project", project_id)):
+                return {}
             try:
                 detail = await gitlab.get_project_by_path(str(project_id))
             except GitlabApiError as exc:
                 logger.warning("timesheet: project %s lookup failed: %s", project_id, exc.message)
+                self._fail(("project", project_id))
                 return {}
             detail = detail if isinstance(detail, dict) else {}
             self.projects[project_id] = {
@@ -166,18 +196,20 @@ class GitlabLookups:
 
     async def context(
         self, gitlab, conn, cfg: TrackerConfig, events: list[dict[str, Any]],
-        links: dict[tuple[str, int], str] | None = None,
+        links: dict[tuple[str, int], str] | None = None, warnings: list[str] | None = None,
     ) -> EventContext:
         self._trim()
         budget = MAX_GITLAB_LOOKUPS
         me = await self.me(gitlab)
+        if me is None and warnings is not None:
+            warnings.append(USER_LOOKUP_WARNING)
         by_iid = _mr_lookup(conn)
         defaults: dict[int, str] = {}
         paths = _project_paths(conn)
         for project_id in sorted({ref[0] for ref in map(push_ref, events) if ref is not None}):
-            if budget <= 0:
-                break
-            budget -= project_id not in self.projects
+            if self.would_call("project", project_id) and budget <= 0:
+                continue
+            budget -= self.would_call("project", project_id)
             detail = await self.project(gitlab, project_id)
             if detail.get("default_branch"):
                 defaults[project_id] = detail["default_branch"]
@@ -187,7 +219,7 @@ class GitlabLookups:
         if links:
             for project_id in sorted({event["project_id"] for event in events if isinstance(event.get("project_id"), int)}):
                 if project_id not in paths and budget > 0:
-                    budget -= project_id not in self.projects
+                    budget -= self.would_call("project", project_id)
                     path = (await self.project(gitlab, project_id)).get("path")
                     if path:
                         paths[project_id] = path.lower()
@@ -200,10 +232,10 @@ class GitlabLookups:
         for ref in dict.fromkeys(ref for ref in map(mr_ref, events) if ref is not None):
             if ref in by_iid:
                 continue
-            if ref not in self.mrs and budget <= 0:
+            if self.would_call("mr", ref) and budget <= 0:
                 logger.warning("timesheet: merge request lookups capped, %s!%s skipped", ref[0], ref[1])
                 continue
-            budget -= ref not in self.mrs
+            budget -= self.would_call("mr", ref)
             info = await self.mr(gitlab, ref)
             if info is not None:
                 by_iid[ref] = info
@@ -220,10 +252,10 @@ class GitlabLookups:
             ref = push_ref(event)
             if ref is None or ref in by_branch or is_ignored_push(event, context) or event_keys(event, context):
                 continue
-            if budget <= 0:
+            if self.would_call("branch", ref) and budget <= 0:
                 logger.warning("timesheet: branch lookups capped, %s:%s skipped", ref[0], ref[1])
-                break
-            budget -= ref not in self.branches
+                continue
+            budget -= self.would_call("branch", ref)
             info = await self.branch_mr(gitlab, ref)
             if info is not None:
                 by_branch[ref] = info
@@ -498,7 +530,8 @@ async def api_timesheet(request: Request):
     week_events = [event for event in events if isinstance(event, dict) and event_day(event, tz) in days]
     tracker = await state.tracker_for(cfg)
     links = await state.pr_links(tracker, cfg, ctx.config.gitlab.url, week_start - PR_LINK_LOOKBACK) if tracker else None
-    context = await state.gitlab.context(ctx.api, ctx.conn, cfg, week_events, links)
+    warnings: list[str] = []
+    context = await state.gitlab.context(ctx.api, ctx.conn, cfg, week_events, links, warnings)
     activity = bucket_events(week_events, tz, context)
     iso_days = [day.isoformat() for day in days]
     if tracker is not None:
@@ -525,7 +558,7 @@ async def api_timesheet(request: Request):
         },
         calendar_ok=all(has_year(day.year) for day in days),
     )
-    return JSONResponse(build_week(inputs), headers={"Cache-Control": "no-store"})
+    return JSONResponse({**build_week(inputs), "warnings": warnings}, headers={"Cache-Control": "no-store"})
 
 
 @router.put("/api/timesheet/cell")
@@ -622,6 +655,7 @@ async def _reconcile(conn, tracker: TrackerClient, identities: set[str], rows, c
     for row in rows:
         key, day = row["issue_key"], date.fromisoformat(row["day"])
         since = _parse_created(row["created_at"])
+        worklog_submission_attempted(conn, row["id"])
         try:
             worklogs = await tracker.issue_worklogs(key, identities)
         except TrackerApiError as exc:
@@ -630,7 +664,6 @@ async def _reconcile(conn, tracker: TrackerClient, identities: set[str], rows, c
                 logger.info("timesheet: reconcile %s %s gave up (%s)", key, day, exc.status)
                 continue
             logger.warning("timesheet: reconcile %s %s failed: %s", key, day, exc.message)
-            worklog_submission_attempted(conn, row["id"])
             outcome.unresolved.add((key, day))
             continue
         match = next((w for w in worklogs if _matches(w, key, day, row["minutes"], since, claimed)), None)
@@ -641,7 +674,6 @@ async def _reconcile(conn, tracker: TrackerClient, identities: set[str], rows, c
             outcome.confirmed.add((key, day))
             logger.info("timesheet: reconciled %s %s %s as done", key, day, row["minutes"])
         elif now - since < RECONCILE_MIN_AGE:
-            worklog_submission_attempted(conn, row["id"])
             outcome.unresolved.add((key, day))
         else:
             worklog_submission_finish(conn, row["id"], "failed", error="не найдено в Tracker после сбоя, можно повторить")
