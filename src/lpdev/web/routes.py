@@ -91,12 +91,6 @@ def _ctx(request: Request):
 async def index(request: Request):
     ctx = _ctx(request)
     gitlab_url = ctx.config.gitlab.url
-    poller = getattr(request.app.state, "poller", None)
-    if poller is not None:
-        poller.request_refresh()
-    radar = getattr(request.app.state, "radar", None)
-    if radar is not None:
-        radar.request_refresh()
     initial = {
         "gitlabUrl": gitlab_url,
         "mrs": [_mr_payload(row, gitlab_url) for row in list_mrs(ctx.conn)],

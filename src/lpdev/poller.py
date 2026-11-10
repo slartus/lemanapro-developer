@@ -75,6 +75,9 @@ class Poller:
         self._refresh_task = loop.create_task(self._refresh_job())
         return True
 
+    def is_refreshing(self) -> bool:
+        return self._refresh_task is not None and not self._refresh_task.done()
+
     async def refresh_now(self) -> None:
         if self._refresh_task is not None and not self._refresh_task.done():
             await self._refresh_task

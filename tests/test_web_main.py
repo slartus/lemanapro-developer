@@ -143,6 +143,52 @@ async def test_index_embeds_severity_counts(ctx):
     assert mr["latest_done_review_id"] == review_id
 
 
+async def test_index_does_not_trigger_refresh(ctx, monkeypatch):
+    ctx_obj, _ = ctx
+    calls: list[tuple[str, bool]] = []
+
+    class FakePoller:
+        def request_refresh(self, force=False):
+            calls.append(("poller", force))
+            return True
+
+    class FakeRadar:
+        def request_refresh(self, force=False):
+            calls.append(("radar", force))
+            return True
+
+    app = create_app(ctx_obj)
+    app.state.poller = FakePoller()
+    app.state.radar = FakeRadar()
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://127.0.0.1:8123"
+    ) as client:
+        response = await client.get("/")
+    assert response.status_code == 200
+    assert calls == []
+
+
+async def test_healthz_reports_refreshing(ctx):
+    ctx_obj, _ = ctx
+
+    class FakePoller:
+        def is_refreshing(self):
+            return True
+
+    class FakeRadar:
+        def is_refreshing(self):
+            return False
+
+    app = create_app(ctx_obj)
+    app.state.poller = FakePoller()
+    app.state.radar = FakeRadar()
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://127.0.0.1:8123"
+    ) as client:
+        response = await client.get("/healthz")
+    assert response.json()["refreshing"] is True
+
+
 async def test_force_check_requires_header(ctx, monkeypatch):
     ctx_obj, _ = ctx
     async with _client(ctx_obj) as client:

@@ -282,12 +282,21 @@ def create_app(ctx: AppContext, port: int = DEFAULT_PORT, timesheet_only: bool =
             task.get_name() for task in getattr(app.state, "tasks", []) if task.done()
         ]
         degraded = bool(last_error) or bool(dead_tasks)
+        refreshing = False
+        if not timesheet_only:
+            poller = getattr(app.state, "poller", None)
+            radar = getattr(app.state, "radar", None)
+            refreshing = bool(
+                (poller is not None and poller.is_refreshing())
+                or (radar is not None and radar.is_refreshing())
+            )
         return JSONResponse(
             {
                 "status": "degraded" if degraded else "ok",
                 "last_poll": last_ok,
                 "last_error": last_error,
                 "dead_tasks": dead_tasks,
+                "refreshing": refreshing,
                 "config": os.environ.get("LPDEV_CONFIG") or str(default_config_path()),
                 "data": str(ctx.paths.db),
             },

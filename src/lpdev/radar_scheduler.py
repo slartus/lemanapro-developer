@@ -113,6 +113,9 @@ class RadarScheduler:
         self._refresh_task: asyncio.Task | None = None
         self._last_refresh_done: float | None = None
 
+    def is_refreshing(self) -> bool:
+        return self._refresh_task is not None and not self._refresh_task.done()
+
     def request_refresh(self, force: bool = False) -> bool:
         """Schedule one radar refresh in the background (on-demand mode).
 

@@ -68,6 +68,8 @@ try { if (localStorage.getItem("lpdev.sidebar") === "collapsed") document.docume
   .dot.ok { background: #2ea043; }
   .dot.degraded { background: #d29922; }
   .dot.down { background: #d1242f; }
+  .dot.busy { background: #2f81f7; animation: dot-pulse 1s ease-in-out infinite; }
+  @keyframes dot-pulse { 50% { opacity: .25; } }
   .collapse-btn { display: flex; align-items: center; gap: 0.7rem; background: none; border: 0; color: var(--muted); padding: 0.45rem 0.55rem;
                   border-radius: 6px; white-space: nowrap; text-align: left; }
   .collapse-btn:hover:not(:disabled) { background: var(--surface-2); color: var(--text); }
@@ -218,17 +220,19 @@ const MRW = {
   async health() {
     const dot = document.getElementById("health-dot");
     const text = document.getElementById("health-text");
-    let state = "down", label = "нет связи";
+    let state = "down", label = "нет связи", refreshing = false;
     try {
       const r = await fetch("/healthz", {cache: "no-store"});
       const body = await r.json();
-      if (body.status === "ok") { state = "ok"; label = "работает"; }
+      refreshing = Boolean(body.refreshing);
+      if (body.status === "ok") { state = "ok"; label = refreshing ? "обновляется…" : "работает"; }
       else { state = "degraded"; label = "деградация"; }
-      if (body.last_poll) label += " · опрос " + MRW.relTime(body.last_poll);
+      if (!refreshing && body.last_poll) label += " · опрос " + MRW.relTime(body.last_poll);
     } catch (e) {}
-    dot.className = "dot " + state;
+    dot.className = "dot " + (refreshing ? "busy" : state);
     text.textContent = label;
     document.getElementById("health").title = label;
+    if (refreshing) setTimeout(MRW.health, 2000);
   }
 };
 (function () {
