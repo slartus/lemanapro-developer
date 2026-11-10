@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import secrets
 import sqlite3
 import time
@@ -292,6 +293,8 @@ def create_app(ctx: AppContext, port: int = DEFAULT_PORT, timesheet_only: bool =
                 "last_poll": last_ok,
                 "last_error": last_error,
                 "dead_tasks": dead_tasks,
+                "config": os.environ.get("LPDEV_CONFIG") or str(default_config_path()),
+                "data": str(ctx.paths.db),
             },
             status_code=503 if degraded else 200,
         )

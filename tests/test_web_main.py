@@ -29,6 +29,16 @@ async def test_healthz_ok(ctx):
     body = response.json()
     assert body["status"] == "ok"
     assert body["last_poll"] is None
+    assert body["config"]
+    assert body["data"] == str(ctx_obj.paths.db)
+
+
+async def test_healthz_reports_config_env(ctx, monkeypatch):
+    ctx_obj, _ = ctx
+    monkeypatch.setenv("LPDEV_CONFIG", "/tmp/other-profile.yaml")
+    async with _client(ctx_obj) as client:
+        response = await client.get("/healthz")
+    assert response.json()["config"] == "/tmp/other-profile.yaml"
 
 
 async def test_healthz_degraded_on_error(ctx):

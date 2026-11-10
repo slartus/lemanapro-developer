@@ -193,6 +193,11 @@ def main(argv: list[str] | None = None) -> int:
                 timer.start()
             ctx, _ = bootstrap(timesheet_only=True)
             app = create_app(ctx, port, timesheet_only=True)
+            print(
+                f"\nКонфиг: {config_path}\nДанные: {paths.db.parent}\n"
+                f"Сервис: http://127.0.0.1:{port}/timesheet\nCtrl+C — остановить.",
+                flush=True,
+            )
             uvicorn.run(app, host="127.0.0.1", port=port, workers=1)
         finally:
             pid_path.unlink(missing_ok=True)
