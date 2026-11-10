@@ -20,6 +20,7 @@ dependencies = [
 where = ["src"]
 
 [tool.setuptools.package-data]
+"lpdev" = ["calendar/ru/*.json"]
 "lpdev.web" = ["templates/*.html", "static/*.svg", "static/*.js"]
 
 [dependency-groups]

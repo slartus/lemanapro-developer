@@ -75,6 +75,26 @@ radar:
   node_bin: node
   timeout_sec: 300
 
+tracker:
+  # Вкладка «Таймшит»: предложения по списанию времени в Yandex Tracker по активности в GitLab.
+  enabled: false
+  # Разрешить кнопку «Списать» (запись worklog в Tracker). Без неё — только просмотр.
+  submit_enabled: false
+  url: https://api.tracker.yandex.net/v3
+  # ID организации: Яндекс 360 — X-Org-Id, Yandex Cloud Organization — X-Cloud-Org-Id.
+  org_id: ""
+  org_header: X-Org-Id
+  # Shell-команда, печатающая OAuth-токен Tracker (scope tracker:read + tracker:write):
+  #   security add-generic-password -s lpdev -a tracker -w
+  # token_command: security find-generic-password -s lpdev -a tracker -w
+  token_command: ""
+  # Учитывать только задачи этих очередей; пустой список — любые очереди.
+  queues: [SUPERAPP]
+  # Норма рабочего дня (часы), шаг списания (минуты, делит 60), часовой пояс рабочих дней.
+  day_hours: 8
+  step_minutes: 30
+  timezone: Europe/Moscow
+
 paths:
   # Файл базы SQLite (каталог создаётся автоматически).
   db: ~/projects/lemanapro-developer/data/lpdev.db

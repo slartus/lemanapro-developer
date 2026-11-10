@@ -11,7 +11,9 @@ from typing import Literal
 from urllib.parse import urlsplit
 
 import yaml
-from pydantic import BaseModel, Field, ValidationError, field_validator
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+from pydantic import BaseModel, Field, ValidationError, field_validator, model_validator
 
 DEFAULT_PAT_COMMAND = "security find-generic-password -s mr-watch -a gitlab -w"
 
@@ -26,6 +28,30 @@ class ConfigError(Exception):
     pass
 
 
+def normalize_https_url(value: str) -> str:
+    url = value.rstrip("/")
+    if not url:
+        raise ValueError("url must not be empty")
+    if "\\" in url or any(c.isspace() or not c.isprintable() for c in url):
+        raise ValueError("url must not contain whitespace, control characters or backslashes")
+    parts = urlsplit(url)
+    try:
+        port = parts.port
+    except ValueError:
+        raise ValueError("url has an invalid port") from None
+    if port is not None and not 1 <= port <= 65535:
+        raise ValueError("url has an invalid port")
+    if parts.scheme != "https":
+        raise ValueError("url must use https://")
+    if not parts.hostname:
+        raise ValueError("url must contain a host")
+    if "@" in parts.netloc:
+        raise ValueError("url must not contain credentials")
+    if parts.query or parts.fragment or "?" in url or "#" in url:
+        raise ValueError("url must not contain query or fragment")
+    return url
+
+
 class GitlabConfig(BaseModel):
     model_config = {"extra": "forbid"}
 
@@ -36,27 +62,7 @@ class GitlabConfig(BaseModel):
     @field_validator("url")
     @classmethod
     def normalize_url(cls, value: str) -> str:
-        url = value.rstrip("/")
-        if not url:
-            raise ValueError("url must not be empty")
-        if "\\" in url or any(c.isspace() or not c.isprintable() for c in url):
-            raise ValueError("url must not contain whitespace, control characters or backslashes")
-        parts = urlsplit(url)
-        try:
-            port = parts.port
-        except ValueError:
-            raise ValueError("url has an invalid port") from None
-        if port is not None and not 1 <= port <= 65535:
-            raise ValueError("url has an invalid port")
-        if parts.scheme != "https":
-            raise ValueError("url must use https://")
-        if not parts.hostname:
-            raise ValueError("url must contain a host")
-        if "@" in parts.netloc:
-            raise ValueError("url must not contain credentials")
-        if parts.query or parts.fragment or "?" in url or "#" in url:
-            raise ValueError("url must not contain query or fragment")
-        return url
+        return normalize_https_url(value)
 
 
 class ProjectConfig(BaseModel):
@@ -133,6 +139,64 @@ class RadarConfig(BaseModel):
     timeout_sec: int = Field(default=300, ge=10)
 
 
+TRACKER_QUEUE_RE = re.compile(r"[A-Z][A-Z0-9_]+")
+SHORT_DAY_REDUCTION_MINUTES = 60
+
+
+class TrackerConfig(BaseModel):
+    model_config = {"extra": "forbid"}
+
+    enabled: bool = False
+    submit_enabled: bool = False
+    url: str = "https://api.tracker.yandex.net/v3"
+    org_id: str = ""
+    org_header: Literal["X-Org-Id", "X-Cloud-Org-Id"] = "X-Org-Id"
+    token_command: str = ""
+    queues: list[str] = []
+    day_hours: int = Field(default=8, ge=1, le=24)
+    step_minutes: int = Field(default=30, ge=5, le=240)
+    timezone: str = "Europe/Moscow"
+
+    @field_validator("url")
+    @classmethod
+    def normalize_url(cls, value: str) -> str:
+        return normalize_https_url(value)
+
+    @field_validator("org_id")
+    @classmethod
+    def valid_org_id(cls, value: str) -> str:
+        if value and not re.fullmatch(r"[A-Za-z0-9_-]+", value):
+            raise ValueError("org_id may contain only letters, digits, '_', '-'")
+        return value
+
+    @field_validator("queues")
+    @classmethod
+    def valid_queues(cls, value: list[str]) -> list[str]:
+        for queue in value:
+            if not TRACKER_QUEUE_RE.fullmatch(queue):
+                raise ValueError(f"invalid queue key: {queue!r}")
+        return list(dict.fromkeys(value))
+
+    @field_validator("timezone")
+    @classmethod
+    def valid_timezone(cls, value: str) -> str:
+        try:
+            ZoneInfo(value)
+        except (ZoneInfoNotFoundError, ValueError):
+            raise ValueError(f"unknown timezone: {value!r}") from None
+        return value
+
+    @model_validator(mode="after")
+    def consistent(self) -> "TrackerConfig":
+        if (self.day_hours * 60) % self.step_minutes or SHORT_DAY_REDUCTION_MINUTES % self.step_minutes:
+            raise ValueError("step_minutes must divide 60 and day_hours * 60")
+        if self.enabled and not (self.org_id and self.token_command):
+            raise ValueError("tracker.enabled requires org_id and token_command")
+        if self.submit_enabled and not self.enabled:
+            raise ValueError("tracker.submit_enabled requires tracker.enabled")
+        return self
+
+
 class PathsConfig(BaseModel):
     model_config = {"extra": "forbid"}
 
@@ -149,6 +213,7 @@ class Config(BaseModel):
     review: ReviewConfig = ReviewConfig()
     opencode: OpenCodeConfig = OpenCodeConfig()
     radar: RadarConfig = RadarConfig()
+    tracker: TrackerConfig = TrackerConfig()
     paths: PathsConfig = PathsConfig()
 
     @field_validator("projects")
@@ -217,22 +282,26 @@ def resolve_paths(config: Config) -> ResolvedPaths:
     return paths
 
 
-def get_pat(gitlab_cfg: GitlabConfig) -> str:
+def run_secret_command(command: str, label: str) -> str:
     try:
         proc = subprocess.run(
-            gitlab_cfg.pat_command,
+            command,
             shell=True,
             capture_output=True,
             timeout=_PAT_TIMEOUT_SEC,
         )
     except subprocess.TimeoutExpired as exc:
         raise RuntimeError(
-            f"failed to get GitLab PAT: pat_command timed out after {_PAT_TIMEOUT_SEC}s"
+            f"failed to get {label}: command timed out after {_PAT_TIMEOUT_SEC}s"
         ) from exc
     except OSError as exc:
-        raise RuntimeError(f"failed to get GitLab PAT: {exc}") from exc
+        raise RuntimeError(f"failed to get {label}: {exc}") from exc
     token = proc.stdout.decode().strip()
     if proc.returncode != 0 or not token:
         reason = "empty output" if not token else f"exit code {proc.returncode}"
-        raise RuntimeError(f"failed to get GitLab PAT: {reason}")
+        raise RuntimeError(f"failed to get {label}: {reason}")
     return token
+
+
+def get_pat(gitlab_cfg: GitlabConfig) -> str:
+    return run_secret_command(gitlab_cfg.pat_command, "GitLab PAT")
