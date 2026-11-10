@@ -153,6 +153,8 @@ MUTATING_ROUTES = [
     "/reviews/1/questions",
     "/settings",
     "/api/mr/1/1/review",
+    "/api/timesheet/tasks",
+    "/api/timesheet/submit",
 ]
 
 

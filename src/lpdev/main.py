@@ -24,6 +24,8 @@ from lpdev.web.gitlab_proxy import PROXY_PREFIX
 from lpdev.web.gitlab_proxy import router as gitlab_proxy_router
 from lpdev.web.radar_routes import router as radar_router
 from lpdev.web.routes import router as web_router
+from lpdev.web.timesheet_routes import TimesheetState
+from lpdev.web.timesheet_routes import router as timesheet_router
 from lpdev.worker import QuestionWorker, ReviewRegistry, start_workers
 
 logger = logging.getLogger("lpdev")
@@ -239,6 +241,7 @@ def create_app(ctx: AppContext, port: int = DEFAULT_PORT) -> FastAPI:
         for task in tasks:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
+        await app.state.timesheet.aclose()
         await ctx.api.aclose()
         ctx.conn.close()
         logger.info("stopped")
@@ -246,9 +249,11 @@ def create_app(ctx: AppContext, port: int = DEFAULT_PORT) -> FastAPI:
     app = FastAPI(title="lemanapro-developer", lifespan=lifespan)
     app.state.ctx = ctx
     app.state.proxy_secret = secrets.token_urlsafe(32)
+    app.state.timesheet = TimesheetState()
     app.include_router(web_router)
     app.include_router(gitlab_proxy_router)
     app.include_router(radar_router)
+    app.include_router(timesheet_router)
     app.mount("/static/radar", StaticFiles(directory=RUNNER_PATH.parent), name="radar-static")
     app.mount("/static", StaticFiles(directory=Path(__file__).parent / "web" / "static"), name="static")
 

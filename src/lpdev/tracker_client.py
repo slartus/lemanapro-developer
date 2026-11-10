@@ -55,6 +55,7 @@ class Worklog:
     key: str
     day: date
     minutes: int
+    created_at: datetime | None = None
 
 
 def valid_issue_key(key: object) -> bool:
@@ -81,6 +82,14 @@ def parse_duration(value: object, day_hours: int = 8) -> int | None:
     seconds = float(parts["seconds"] or 0)
     total = days * day_hours * 60 + int(parts["hours"] or 0) * 60 + int(parts["minutes"] or 0)
     return total + round(seconds / 60)
+
+
+def _parse_moment(value: object) -> datetime | None:
+    try:
+        moment = datetime.fromisoformat(str(value))
+    except ValueError:
+        return None
+    return moment if moment.tzinfo is not None else None
 
 
 def user_identities(user: dict[str, Any]) -> set[str]:
@@ -249,7 +258,10 @@ class TrackerClient:
             return None
         if not valid_issue_key(key) or minutes is None or start.tzinfo is None:
             return None
-        return Worklog(id=str(item.get("id")), key=key, day=start.astimezone(self._tz).date(), minutes=minutes)
+        return Worklog(
+            id=str(item.get("id")), key=key, day=start.astimezone(self._tz).date(), minutes=minutes,
+            created_at=_parse_moment(item.get("createdAt")),
+        )
 
     async def search_worklogs(self, created_by: str, start_from: date, start_to: date) -> list[Worklog]:
         created_from = datetime.combine(start_from - timedelta(days=WORKLOG_CREATED_MARGIN_DAYS), datetime.min.time(), self._tz)
