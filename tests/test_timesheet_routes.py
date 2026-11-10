@@ -664,3 +664,17 @@ async def test_get_does_not_poll_fresh_rows(env):
     worklog_submission_create(env["ctx"].conn, "SUPERAPP-1", "2026-11-09", 120)
     await _get(env)
     assert env["tracker"].issue_worklogs_calls == []
+
+
+async def test_get_reconciliation_is_time_boxed_and_releases_the_lock(env, monkeypatch):
+    from lpdev.db import worklog_submission_create
+
+    monkeypatch.setattr("lpdev.web.timesheet_routes.RECONCILE_ON_READ_TIMEOUT_SEC", 0.05)
+    worklog_submission_create(env["ctx"].conn, "SUPERAPP-1", "2026-11-09", 120)
+    _age_journal(env, minutes=5)
+    env["tracker"].issue_worklogs_delay = 5
+    started = asyncio.get_running_loop().time()
+    payload = await _get(env)
+    assert asyncio.get_running_loop().time() - started < 2
+    assert _rows(payload)["SUPERAPP-1"]["cells"]["2026-11-09"]["submission"] == "pending"
+    assert not env["app"].state.timesheet.submit_lock.locked()

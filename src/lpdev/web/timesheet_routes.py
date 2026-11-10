@@ -60,6 +60,7 @@ DUPLICATE_WINDOW = timedelta(minutes=10)
 RECONCILE_SLACK = timedelta(minutes=1)
 RECONCILE_MIN_AGE = timedelta(minutes=2)
 MAX_RECONCILE_ON_READ = 20
+RECONCILE_ON_READ_TIMEOUT_SEC = 10.0
 PERMANENT_RECONCILE_STATUSES = frozenset({403, 404})
 MAX_IN_PROGRESS = 5
 IN_PROGRESS_STATUSES = frozenset({"inProgress", "inReview", "testing"})
@@ -489,11 +490,13 @@ async def _reconcile_week(conn, state: TimesheetState, tracker: TrackerClient, i
         if not rows:
             return
         try:
-            identities = user_identities(await state.myself(tracker))
+            async with asyncio.timeout(RECONCILE_ON_READ_TIMEOUT_SEC):
+                identities = user_identities(await state.myself(tracker))
+                await _reconcile(conn, tracker, identities, rows, _claimed(journal))
         except TrackerApiError as exc:
             logger.warning("timesheet: reconcile skipped: %s", exc.message)
-            return
-        await _reconcile(conn, tracker, identities, rows, _claimed(journal))
+        except TimeoutError:
+            logger.warning("timesheet: reconcile on read timed out after %ss", RECONCILE_ON_READ_TIMEOUT_SEC)
 
 
 def _result(entry: Entry, status: str, error: str | None = None) -> dict[str, Any]:
