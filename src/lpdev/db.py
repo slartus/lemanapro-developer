@@ -9,7 +9,7 @@ from lpdev.opencode_runner import MAX_VERDICT_INPUT_CHARS, parse_verdict
 
 MAX_REVIEW_MD_LENGTH = MAX_VERDICT_INPUT_CHARS
 TRUNCATION_MARKER = "...[truncated]"
-SCHEMA_VERSION = 12
+SCHEMA_VERSION = 13
 
 DERIVED_ROLES = frozenset({"reviewer", "assignee", "author"})
 MENTIONED_ROLE = "mentioned"
@@ -151,6 +151,8 @@ def init_schema(conn: sqlite3.Connection) -> None:
         _run_migration(conn, 11, _migrate_to_v11)
     if version < 12:
         _run_migration(conn, 12, _migrate_to_v12)
+    if version < 13:
+        _run_migration(conn, 13, _migrate_to_v13)
     conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
     conn.commit()
 
@@ -632,6 +634,48 @@ def _migrate_to_v12(conn: sqlite3.Connection) -> None:
     )
 
 
+def _migrate_to_v13(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS timesheet_cell (
+            issue_key TEXT NOT NULL,
+            day TEXT NOT NULL,
+            minutes INTEGER NOT NULL CHECK(minutes >= 0),
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY(issue_key, day)
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS timesheet_task (
+            issue_key TEXT NOT NULL,
+            week_start TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            PRIMARY KEY(issue_key, week_start)
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS worklog_submission (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            issue_key TEXT NOT NULL,
+            day TEXT NOT NULL,
+            minutes INTEGER NOT NULL CHECK(minutes > 0),
+            status TEXT NOT NULL CHECK(status IN ('pending','done','failed','unknown')),
+            tracker_id TEXT,
+            error TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT
+        )
+        """
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_worklog_submission_day ON worklog_submission(day, issue_key)"
+    )
+
+
 def supersede_reviews(
     conn: sqlite3.Connection, mr_id: int, new_sha: str, delay_sec: float = 0.0
 ) -> SupersedeResult:
@@ -1088,3 +1132,84 @@ def ui_state_set(conn: sqlite3.Connection, key: str, value_json: str) -> None:
             """,
             (key, value_json, utcnow_iso()),
         )
+
+
+def timesheet_cells(conn: sqlite3.Connection, days: list[str]) -> dict[tuple[str, str], int]:
+    if not days:
+        return {}
+    rows = conn.execute(
+        f"SELECT issue_key, day, minutes FROM timesheet_cell WHERE day IN ({','.join('?' * len(days))})",
+        days,
+    ).fetchall()
+    return {(row["issue_key"], row["day"]): row["minutes"] for row in rows}
+
+
+def timesheet_cell_set(conn: sqlite3.Connection, issue_key: str, day: str, minutes: int | None) -> None:
+    with conn:
+        if minutes is None:
+            conn.execute("DELETE FROM timesheet_cell WHERE issue_key = ? AND day = ?", (issue_key, day))
+            return
+        conn.execute(
+            """
+            INSERT INTO timesheet_cell (issue_key, day, minutes, updated_at) VALUES (?, ?, ?, ?)
+            ON CONFLICT(issue_key, day) DO UPDATE SET minutes = excluded.minutes, updated_at = excluded.updated_at
+            """,
+            (issue_key, day, minutes, utcnow_iso()),
+        )
+
+
+def timesheet_cells_clear(conn: sqlite3.Connection, days: list[str]) -> int:
+    if not days:
+        return 0
+    with conn:
+        cursor = conn.execute(
+            f"DELETE FROM timesheet_cell WHERE day IN ({','.join('?' * len(days))})", days
+        )
+    return cursor.rowcount
+
+
+def timesheet_task_add(conn: sqlite3.Connection, issue_key: str, week_start: str) -> None:
+    with conn:
+        conn.execute(
+            "INSERT OR IGNORE INTO timesheet_task (issue_key, week_start, created_at) VALUES (?, ?, ?)",
+            (issue_key, week_start, utcnow_iso()),
+        )
+
+
+def timesheet_tasks(conn: sqlite3.Connection, week_start: str) -> list[str]:
+    rows = conn.execute(
+        "SELECT issue_key FROM timesheet_task WHERE week_start = ? ORDER BY created_at, issue_key", (week_start,)
+    ).fetchall()
+    return [row["issue_key"] for row in rows]
+
+
+def worklog_submission_create(conn: sqlite3.Connection, issue_key: str, day: str, minutes: int) -> int:
+    with conn:
+        cursor = conn.execute(
+            "INSERT INTO worklog_submission (issue_key, day, minutes, status, created_at) VALUES (?, ?, ?, 'pending', ?)",
+            (issue_key, day, minutes, utcnow_iso()),
+        )
+    return cursor.lastrowid
+
+
+def worklog_submission_finish(
+    conn: sqlite3.Connection,
+    submission_id: int,
+    status: str,
+    tracker_id: str | None = None,
+    error: str | None = None,
+) -> None:
+    with conn:
+        conn.execute(
+            "UPDATE worklog_submission SET status = ?, tracker_id = ?, error = ?, updated_at = ? WHERE id = ?",
+            (status, tracker_id, error, utcnow_iso(), submission_id),
+        )
+
+
+def worklog_submissions(conn: sqlite3.Connection, days: list[str]) -> list[sqlite3.Row]:
+    if not days:
+        return []
+    return conn.execute(
+        f"SELECT * FROM worklog_submission WHERE day IN ({','.join('?' * len(days))}) ORDER BY id",
+        days,
+    ).fetchall()
