@@ -166,6 +166,66 @@ function setLoading(on, text) {
   indicator.hidden = false;
 }
 
+const SESSION_CACHE_KEY = 'lpdev:timesheet:payload';
+const SESSION_CACHE_MAX_AGE_MS = 12 * 60 * 60 * 1000;
+
+function currentWeek(now = new Date()) {
+  const target = new Date(Date.UTC(now.getFullYear(), now.getMonth(), now.getDate()));
+  const day = target.getUTCDay() || 7;
+  target.setUTCDate(target.getUTCDate() + 4 - day);
+  const yearStart = new Date(Date.UTC(target.getUTCFullYear(), 0, 1));
+  const week = Math.ceil(((target - yearStart) / 86400000 + 1) / 7);
+  return `${target.getUTCFullYear()}-W${String(week).padStart(2, '0')}`;
+}
+
+function currentDay(now = new Date()) {
+  const mm = String(now.getMonth() + 1).padStart(2, '0');
+  const dd = String(now.getDate()).padStart(2, '0');
+  return `${now.getFullYear()}-${mm}-${dd}`;
+}
+
+function readSessionPayload(week) {
+  try {
+    const cached = JSON.parse(sessionStorage.getItem(SESSION_CACHE_KEY) ?? '');
+    const payload = cached?.payload;
+    if (typeof payload?.week !== 'string' || !Array.isArray(payload.days)) return null;
+    if (Date.now() - Number(cached.at ?? 0) > SESSION_CACHE_MAX_AGE_MS) return null;
+    if (cached.day !== currentDay()) return null;
+    if (week && week !== payload.week) return null;
+    return payload;
+  } catch {
+    return null;
+  }
+}
+
+function writeSessionPayload(payload) {
+  if (typeof payload?.week !== 'string') return;
+  try {
+    sessionStorage.setItem(SESSION_CACHE_KEY, JSON.stringify({ at: Date.now(), day: currentDay(), payload }));
+  } catch {
+    return;
+  }
+}
+
+function applyData(data) {
+  if (data.week !== state.data?.week) {
+    state.saveErrors.clear();
+    state.showWeekend = false;
+    state.showQuiet = false;
+  }
+  state.data = data;
+  state.week = data.week;
+  state.loadError = null;
+  const url = new URL(location.href);
+  url.searchParams.set('week', data.week);
+  history.replaceState(null, '', url);
+}
+
+function hydrate(data) {
+  applyData(data);
+  render();
+}
+
 async function load(week = state.week, { busy } = {}) {
   const seq = ++state.loadSeq;
   const query = week ? `?week=${encodeURIComponent(week)}` : '';
@@ -174,17 +234,8 @@ async function load(week = state.week, { busy } = {}) {
   try {
     const data = await api('GET', `/api/timesheet${query}`);
     if (seq !== state.loadSeq) return;
-    if (data.week !== state.data?.week) {
-      state.saveErrors.clear();
-      state.showWeekend = false;
-      state.showQuiet = false;
-    }
-    state.data = data;
-    state.week = data.week;
-    state.loadError = null;
-    const url = new URL(location.href);
-    url.searchParams.set('week', data.week);
-    history.replaceState(null, '', url);
+    applyData(data);
+    writeSessionPayload(data);
   } catch (error) {
     if (seq !== state.loadSeq) return;
     state.loadError = error.message || String(error);
@@ -255,6 +306,7 @@ function renderToolbar() {
   toggle.setAttribute('aria-pressed', String(state.showWeekend));
   toggle.textContent = state.showWeekend ? 'Скрыть Сб/Вс' : `Показать ${hidden.map((day) => WEEKDAYS[dayIndex(day.date)]).join('/')}`;
   $('reset-week').disabled = !data;
+  $('refresh-week').disabled = !data;
   const step = formatHours(stepOf(data));
   $('step-hint').textContent = `Ввод: часы с шагом ${step}, ↑/↓ — ±${step}, Enter — вниз, Esc — откат`;
   refreshSubmitButtons();
@@ -1059,6 +1111,7 @@ function init() {
   $('prev-week').addEventListener('click', () => state.data?.prev_week && load(state.data.prev_week));
   $('next-week').addEventListener('click', () => state.data?.next_week && load(state.data.next_week));
   $('current-week').addEventListener('click', () => load(null));
+  $('refresh-week').addEventListener('click', () => load(state.week, { busy: true }));
   $('weekend-toggle').addEventListener('click', () => {
     state.showWeekend = !state.showWeekend;
     render();
@@ -1101,6 +1154,12 @@ function init() {
     if (state.saving > 0 || state.dialog.sending) event.preventDefault();
   });
 
+  const cached = readSessionPayload(state.week ?? currentWeek());
+  if (cached) {
+    hydrate(cached);
+    setStatus('Данные из этой сессии — «Обновить» загрузит свежие', 'muted');
+    return;
+  }
   load();
 }
 

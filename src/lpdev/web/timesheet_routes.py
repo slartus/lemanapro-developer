@@ -94,6 +94,8 @@ USER_LOOKUP_WARNING = "GitLab не отдал текущего пользова�
 PR_LINK_LOOKBACK = timedelta(days=7)
 MAX_PR_LINK_ISSUES = 49
 MAX_TRACKER_PARALLEL = 6
+TRACKER_DATA_TTL_SEC = 300.0
+TRACKER_DATA_CACHE_SIZE = 8
 
 TrackerFactory = Callable[[TrackerConfig], TrackerClient]
 
@@ -306,6 +308,8 @@ class TimesheetState:
     issue_links: dict[str, tuple[str, list[tuple[str, int, bool]]]] = field(default_factory=dict)
     assignees: dict[str, tuple[float, list[tuple[datetime, frozenset[str], frozenset[str]]] | None]] = field(default_factory=dict)
     comment_moments: dict[str, tuple[str, list[datetime]]] = field(default_factory=dict)
+    tracker_data: dict[tuple[date, date, date, tuple[str, ...]], tuple[float, TrackerData]] = field(default_factory=dict)
+    tracker_epoch: int = 0
 
     async def aclose(self) -> None:
         if self.tracker is not None:
@@ -328,6 +332,8 @@ class TimesheetState:
                 self.issue_links.clear()
                 self.assignees.clear()
                 self.comment_moments.clear()
+                self.tracker_epoch += 1
+                self.tracker_data.clear()
             return self.tracker
 
     async def pr_links(
@@ -663,7 +669,7 @@ async def _my_work(
                 bucket[source] = bucket.get(source, 0) + weight
 
 
-async def _tracker_data(
+async def _fetch_tracker_data(
     state: TimesheetState, tracker: TrackerClient, cfg: TrackerConfig, days: list[date], keys: set[str], today: date
 ) -> TrackerData:
     data = TrackerData()
@@ -683,6 +689,28 @@ async def _tracker_data(
     except TrackerApiError as exc:
         logger.warning("timesheet: tracker read failed: %s", exc.message)
         return TrackerData(error=exc.message)
+    return data
+
+
+def _tracker_data_cache_key(days: list[date], keys: set[str], today: date) -> tuple[date, date, date, tuple[str, ...]]:
+    return (days[0], days[-1], today, tuple(sorted(keys)))
+
+
+async def _tracker_data(
+    state: TimesheetState, tracker: TrackerClient, cfg: TrackerConfig, days: list[date], keys: set[str], today: date
+) -> TrackerData:
+    """TTL-кэш над _fetch_tracker_data; возвращённый TrackerData вызывающий код не мутирует."""
+    key = _tracker_data_cache_key(days, keys, today)
+    now = time.monotonic()
+    epoch = state.tracker_epoch
+    cached = state.tracker_data.get(key)
+    if cached is not None and now - cached[0] < TRACKER_DATA_TTL_SEC:
+        return cached[1]
+    data = await _fetch_tracker_data(state, tracker, cfg, days, keys, today)
+    if data.error is None and epoch == state.tracker_epoch:
+        state.tracker_data[key] = (now, data)
+        while len(state.tracker_data) > TRACKER_DATA_CACHE_SIZE:
+            state.tracker_data.pop(min(state.tracker_data, key=lambda item: state.tracker_data[item][0]))
     return data
 
 
@@ -947,7 +975,10 @@ async def api_timesheet_submit(request: Request):
         tracker = await state.tracker_for(cfg)
         if tracker is None:
             return _error("Tracker не настроен", 403)
-        return JSONResponse({"results": await _submit(conn, state, tracker, cfg, entries)})
+        results = await _submit(conn, state, tracker, cfg, entries)
+        state.tracker_epoch += 1
+        state.tracker_data.clear()
+        return JSONResponse({"results": results})
 
 
 async def _submit(conn, state: TimesheetState, tracker: TrackerClient, cfg: TrackerConfig, entries: list[Entry]) -> list[dict[str, Any]]:

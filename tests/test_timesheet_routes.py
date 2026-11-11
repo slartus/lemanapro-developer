@@ -289,6 +289,38 @@ async def test_events_are_cached(env):
     assert len(env["gitlab_calls"]) == 2
 
 
+async def test_tracker_data_is_cached(env):
+    await _get(env)
+    env["tracker"].add("SUPERAPP-9", date(2026, 11, 9), 60)
+    payload = await _get(env)
+    assert len(env["tracker"].my_issue_queries) == 1
+    assert payload["days"][0]["logged"] == 0
+
+
+async def test_tracker_data_error_is_not_cached(env):
+    env["tracker"].fail_reads = TrackerApiError("Tracker: ошибка 500", 500)
+    payload = await _get(env)
+    assert payload["tracker"]["error"]
+    env["tracker"].fail_reads = None
+    payload = await _get(env)
+    assert payload["tracker"]["error"] is None
+    assert len(env["tracker"].my_issue_queries) == 1
+
+
+async def test_submit_invalidates_tracker_data_cache(env):
+    await _get(env)
+    await _submit(env, [ENTRY])
+    await _get(env)
+    assert len(env["tracker"].my_issue_queries) == 2
+
+
+async def test_tracker_data_invalidated_by_day_change(env, monkeypatch):
+    await _get(env, "2026-W46")
+    monkeypatch.setattr("lpdev.web.timesheet_routes._today", lambda cfg: date(2026, 11, 11))
+    await _get(env, "2026-W46")
+    assert len(env["tracker"].my_issue_queries) == 2
+
+
 async def test_tracker_disabled_uses_gitlab_only(env):
     env["ctx"].config = env["ctx"].config.model_copy(update={"tracker": TrackerConfig(queues=["SUPERAPP"])})
     payload = await _get(env)
