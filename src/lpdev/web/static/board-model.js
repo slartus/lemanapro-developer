@@ -9,6 +9,7 @@ const latestIso = (...values) => values.filter(Boolean).sort().at(-1) ?? null;
 export function buildRows(view, mrs, hiddenSections = []) {
   const rows = new Map();
   const hidden = new Set(hiddenSections);
+  const approvals = view?.approvals ?? {};
   const rowFor = (key) => {
     if (!rows.has(key)) rows.set(key, { key, radar: null, sections: new Set(), watch: null });
     return rows.get(key);
@@ -30,7 +31,11 @@ export function buildRows(view, mrs, hiddenSections = []) {
     if (!snoozedKeys.has(key)) rowFor(key).watch = mr;
   });
   return [...rows.values()]
-    .map((row) => ({ ...row, updatedAt: latestIso(row.radar?.updatedAt, row.watch?.updated_at) }))
+    .map((row) => {
+      const approval = approvals[row.key];
+      const radar = approval ? { ...approval, ...row.radar } : row.radar;
+      return { ...row, radar, updatedAt: latestIso(radar?.updatedAt, row.watch?.updated_at) };
+    })
     .sort((a, b) => (b.updatedAt ?? '').localeCompare(a.updatedAt ?? ''));
 }
 

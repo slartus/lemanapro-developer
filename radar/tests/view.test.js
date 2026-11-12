@@ -64,6 +64,12 @@ describe('deriveView', () => {
     assert.equal(view.sections.reviewing.length, 1);
     assert.deepEqual(view.counts, { waiting: 0, failedCi: 0 });
   });
+
+  it('passes approval info through even when the MR is not in any section', () => {
+    const approvals = { '10!4': { approvedByMe: true, approvalsCount: 1, approverNames: ['me'] } };
+    assert.deepEqual(deriveView({ sections: {}, approvals }).approvals, approvals);
+    assert.deepEqual(deriveView({ sections: {} }).approvals, {});
+  });
 });
 
 describe('sectionsToSkip', () => {

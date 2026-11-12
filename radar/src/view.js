@@ -75,7 +75,7 @@ export function deriveView(dashboard, userState = {}, now = Date.now(), hiddenSe
   const visibleSections = hiddenSections.length
     ? Object.fromEntries(SECTION_IDS.map((id) => [id, hiddenSections.includes(id) ? [] : sections[id]]))
     : sections;
-  return { sections, snoozed: snoozedItems, counts: countActionable(visibleSections) };
+  return { sections, snoozed: snoozedItems, counts: countActionable(visibleSections), approvals: dashboard.approvals ?? {} };
 }
 
 export function sectionsToSkip(settings) {

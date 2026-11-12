@@ -478,7 +478,7 @@ describe('collectDashboard', () => {
       '/projects/10/merge_requests/2/discussions': [{ notes: [note(BOB)] }],
     });
 
-    const { sections, username, skippedMrs, skippedProjects } = await collectDashboard(client);
+    const { sections, username, skippedMrs, skippedProjects, approvals: approvalMap } = await collectDashboard(client);
 
     assert.equal(username, 'me');
     assert.equal(skippedMrs, 0);
@@ -488,8 +488,23 @@ describe('collectDashboard', () => {
     assert.deepEqual(sections.authored.map((item) => item.key), ['10!2']);
     assert.equal(sections.authored[0].approvalsCount, 1);
     assert.deepEqual(sections.authored[0].approverNames, ['alice']);
+    assert.deepEqual(approvalMap['10!4'], { approvedByMe: true, approvalsCount: 1, approverNames: ['me'] });
     assert.deepEqual(sections.threads.map((item) => item.key), ['10!1', '10!2']);
     assert.ok(!client.calls.some((call) => call.path === '/projects/10/merge_requests/3/discussions'));
+  });
+
+  it('keeps approval info for an approved MR that is hidden from sections', async () => {
+    const client = new FakeClient({
+      ...emptyDashboardRoutes(),
+      '/projects': [{ id: 10 }],
+      '/projects/10/merge_requests': [mr({ iid: 4, author: BOB })],
+      '/projects/10/merge_requests/4/approvals': approvals([ME], true),
+    });
+    const dashboard = await collectDashboard(client);
+
+    assert.deepEqual(dashboard.sections.awaitingApproval, []);
+    assert.deepEqual(dashboard.approvals['10!4'], { approvedByMe: true, approvalsCount: 1, approverNames: ['me'] });
+    assert.equal(deriveView(dashboard).approvals['10!4'].approvedByMe, true);
   });
 
   it('excludes my own MRs from awaiting approval', async () => {

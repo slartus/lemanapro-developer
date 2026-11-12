@@ -763,6 +763,12 @@ export async function collectDashboard(
 ) {
   const raw = await fetchRaw(client, { selectedProjectIds, skipSections, previousStatuses });
   const enriched = await enrich(client, raw, threadCache, skipSections);
+  const approvals = Object.fromEntries(
+    [...enriched.details].map(([key, { approvedByMe, approvalsCount, approverNames }]) => [
+      key,
+      { approvedByMe, approvalsCount, approverNames },
+    ]),
+  );
   return {
     fetchedAt: new Date().toISOString(),
     username: raw.me.username,
@@ -778,6 +784,7 @@ export async function collectDashboard(
     defaultBranchesUnavailable: raw.defaultBranchesUnavailable,
     possibleMrsUnavailable: raw.possibleMrsUnavailable,
     token: raw.token,
+    approvals,
     sections: classify(raw, enriched, { ignoredCheckNames, approvalThreshold }),
     threadCache: enriched.threadCache,
   };

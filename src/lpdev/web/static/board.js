@@ -463,7 +463,7 @@ function snoozeControl(key, item, sectionId, title) {
 function renderRow(row) {
   const section = rowSections(row)[0];
   const title = row.radar?.title ?? row.watch?.title ?? row.key;
-  const actions = el('td', { className: 'actions' }, [row.radar && section ? snoozeControl(row.key, row.radar, section, title) : null]);
+  const actions = el('td', { className: 'actions' }, [row.radar?.kind === 'mr' && section ? snoozeControl(row.key, row.radar, section, title) : null]);
   const tr = el('tr', { attrs: { id: `mr-${row.key.replace('!', '-')}`, 'data-key': row.key } }, [
     renderMrCell(row),
     renderAuthorCell(row),

@@ -19,9 +19,10 @@ const watch = (overrides = {}) => ({
 
 const radarItem = (key, overrides = {}) => ({ key, kind: 'mr', title: `Radar ${key}`, updatedAt: '2026-11-09T09:00:00Z', ...overrides });
 
-const view = (sections, snoozed = []) => ({
+const view = (sections, snoozed = [], approvals = {}) => ({
   sections: { reviewing: [], assigned: [], authored: [], awaitingApproval: [], mentioned: [], threads: [], ...sections },
   snoozed,
+  approvals,
 });
 
 describe('buildRows', () => {
@@ -66,6 +67,14 @@ describe('buildRows', () => {
 
   it('works before the radar has data', () => {
     assert.deepEqual(buildRows(null, [watch()]).map((row) => row.key), ['10!1']);
+  });
+
+  it('merges approval info from the radar into a watch-only row', () => {
+    const approvals = { '10!1': { approvedByMe: true, approvalsCount: 2, approverNames: ['me', 'alice'] } };
+    const [row] = buildRows(view({}, [], approvals), [watch()]);
+    assert.equal(row.radar.approvedByMe, true);
+    assert.equal(row.radar.approvalsCount, 2);
+    assert.deepEqual(row.radar.approverNames, ['me', 'alice']);
   });
 });
 
