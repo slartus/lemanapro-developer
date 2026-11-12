@@ -1,6 +1,6 @@
 import { fileURLToPath } from 'node:url';
 
-import { collectDashboard } from './dashboard.js';
+import { collectDashboard, refreshOne } from './dashboard.js';
 import { GitLabClient } from './gitlab.js';
 import { hasActivePipelines, sectionsToSkip, withStableStatuses } from './view.js';
 
@@ -38,7 +38,7 @@ const previousStatusesOf = (previous) => {
 };
 
 export async function refreshDashboard(
-  { baseUrl, apiBase, token, settings = {}, previous = null, threadCache = null },
+  { baseUrl, apiBase, token, settings = {}, previous = null, threadCache = null, refresh = [] },
   { createClient = (url, secret, options) => new GitLabClient(url, secret, options), now = () => Date.now() } = {},
 ) {
   const {
@@ -52,6 +52,27 @@ export async function refreshDashboard(
   const client = createClient(baseUrl, token, { apiBase });
   const startedAt = now();
   try {
+    if (Array.isArray(refresh) && refresh.length > 0) {
+      if (!previous?.sections) {
+        return { ok: false, status: 400, error: 'нет данных радара для точечного обновления' };
+      }
+      const patched = await refreshOne(client, previous, refresh, { ignoredCheckNames });
+      const dashboard = withStableStatuses(previous, {
+        ...patched,
+        baseUrl,
+        filters: previous.filters ?? {
+          selectedProjectIds: isSelectedMode ? sortedNumbers(selectedProjectIds) : null,
+          ignoredCheckNames: [...ignoredCheckNames].sort(),
+          approvalThreshold,
+        },
+      });
+      return {
+        ok: true,
+        dashboard,
+        threadCache,
+        activePipelines: hasActivePipelines(patched),
+      };
+    }
     const { threadCache: nextThreadCache, ...collected } = await collectDashboard(client, {
       selectedProjectIds: isSelectedMode ? selectedProjectIds : null,
       ignoredCheckNames,

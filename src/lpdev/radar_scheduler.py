@@ -178,6 +178,41 @@ class RadarScheduler:
         )
         return bool(result.get("activePipelines"))
 
+    async def refresh_mr(self, project_id: int, iid: int) -> bool:
+        """Data-only refresh of a single MR (pipeline/status/approvals).
+
+        Reuses the node runner with a 'refresh' target so the data shape stays
+        the single source of truth. Respects on-demand mode: only ~2-4 GitLab
+        requests are made. Does NOT touch MIN_REFRESH_GAP / request_refresh.
+        """
+        config = self._config_provider()
+        snapshot = radar_snapshot_get(self._conn)
+        payload = {
+            "baseUrl": config.gitlab.url,
+            "apiBase": self._api_base,
+            "token": self._proxy_secret,
+            "settings": runner_settings(config.radar),
+            "previous": loads_or_none(snapshot["dashboard_json"]) if snapshot else None,
+            "threadCache": loads_or_none(snapshot["thread_cache_json"]) if snapshot else None,
+            "refresh": [{"projectId": project_id, "iid": iid}],
+        }
+        try:
+            result = await self._runner(payload, config.radar)
+        except RadarRunnerError as exc:
+            logger.warning("radar refresh_mr failed: %s", exc)
+            return False
+        dashboard = result.get("dashboard") if isinstance(result, dict) else None
+        if not result.get("ok") or not isinstance(dashboard, dict):
+            logger.warning("radar refresh_mr failed: %s", result.get("error") if isinstance(result, dict) else result)
+            return False
+        radar_snapshot_save_success(
+            self._conn,
+            str(dashboard.get("fetchedAt") or utcnow_iso()),
+            json.dumps(dashboard, ensure_ascii=False),
+            json.dumps(result.get("threadCache"), ensure_ascii=False),
+        )
+        return True
+
 
 def loads_or_none(value: str | None) -> Any:
     if not value:

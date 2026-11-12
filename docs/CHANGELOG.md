@@ -5,6 +5,31 @@
 
 Формат: `## <дата> — <изменение>` + секции `Что`, `Self-review`, `Правки`.
 
+## 2026-11-12 — Радар: точечное обновление одного MR (кнопка refresh на чипах CI/аппрувов)
+
+**Что:** на доске у каждого MR с данными радара в колонке GitLab добавлена кнопка ↻
+(board.js `renderGitlabCell`), которая вызывает новый `POST /api/mr/{pid}/{iid}/refresh`
+(routes.py `refresh_mr_status`). Бэкенд (radar_scheduler.py `refresh_mr`) переиспользует
+node-runner в режиме `refresh` (runner.mjs), который передаёт таргет в `refreshOne`
+(dashboard.js): обновляет для одного MR только статус pipeline + merge status +
+`hasConflicts` + аппрувы (`approvedByMe`/`approvalsCount`/`approverNames`) и патчит элемент
+во всех секциях, где встречается ключ MR, плюс `dashboard.approvals[key]`. Поля
+`myReviewState`/`threadsAwaitingReply`/вердикты/упоминания не перезапрашиваются и
+сохраняются как есть; стабильный merge-status сохраняется через `withStableStatuses`
+(транзиентные `checking`/`unchecked` не затирают прежний конкретный статус). `fetchedAt`
+не меняется (честный индикатор возраста полного снапшота). Новое ограничение: MR не
+добавляется/не убирается из секций (это требует полного скана) — принято для MVP.
+
+**Запросы в GitLab (правило on-demand):** триггер — клик по ↻ конкретного MR; частота —
+по действию пользователя, без фонового опроса; объём — 1 GET `merge_requests/{iid}` +
+1 GET `approvals` + (только при `pipeline.status == 'failed'`) 2-3 GET на jobs/bridges/
+statuses. Итого 2-4 запроса на клик; полный скан остаётся через «Проверить сейчас».
+
+**Self-review:** ревью-агент по процессу; находки и правки фиксируются в записи. Покрытие —
+dashboard.js/runner.js `refreshOne`/`refresh`-режим (dashboard.test.js, runner.test.js),
+`refresh_mr` и роут (test_radar_scheduler.py, test_hardening.py); всё зелёное (1367 pytest,
+154 radar-теста, ruff, coverage 92.9%).
+
 ## 2026-11-11 — Таймшит: обновление раз за сессию + TTL-кэш Tracker-данных
 
 **Что:** страница /timesheet дёргала Tracker/GitLab при каждом входе. Теперь: клиент —

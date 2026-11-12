@@ -97,6 +97,40 @@ describe('refreshDashboard', () => {
     assert.equal(result.dashboard.sections.authored[0].status, 'mergeable');
   });
 
+  it('patches a single MR via the refresh targets without a rescan', async () => {
+    const client = fakeClient({
+      '/projects/10/merge_requests/2': mr({
+        iid: 2,
+        title: 'Refreshed',
+        detailed_merge_status: 'ci_must_pass',
+        head_pipeline: { id: 9, sha: 'abc', status: 'success', web_url: 'https://gitlab.example.com/-/pipelines/9' },
+      }),
+      '/projects/10/merge_requests/2/approvals': { approved_by: [{ user: ME }], user_has_approved: false },
+    });
+    const previous = {
+      baseUrl: BASE_URL,
+      username: 'me',
+      filters: { selectedProjectIds: null, ignoredCheckNames: [], approvalThreshold: 0 },
+      sections: { authored: [{ key: '10!2', kind: 'mr', status: 'mergeable', pipeline: { status: 'pending' } }] },
+    };
+    const result = await run({ previous, refresh: [{ projectId: 10, iid: 2 }] }, client);
+    assert.equal(result.ok, true);
+    const item = result.dashboard.sections.authored[0];
+    assert.equal(item.status, 'ci_must_pass');
+    assert.equal(item.title, 'Refreshed');
+    assert.equal(item.approvalsCount, 1);
+    assert.equal(item.pipeline.status, 'success');
+    assert.equal(result.dashboard.filters, previous.filters);
+    assert.equal(typeof result.activePipelines, 'boolean');
+    assert.ok(!client.calls.some((call) => call.path === '/merge_requests'));
+  });
+
+  it('rejects a per-MR refresh without a previous dashboard', async () => {
+    const client = fakeClient({});
+    const result = await run({ previous: null, refresh: [{ projectId: 10, iid: 2 }] }, client);
+    assert.deepEqual(result, { ok: false, status: 400, error: 'нет данных радара для точечного обновления' });
+  });
+
   it('reports failures with a readable message and the status', async () => {
     const client = fakeClient({ '/user': new GitLabError(401, '401 Unauthorized: /user', '/user') });
     assert.deepEqual(await run({}, client), {

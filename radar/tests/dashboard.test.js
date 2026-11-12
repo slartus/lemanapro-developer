@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 
-import { collectDashboard, collectMentions, collectPossibleMrs, countThreadsAwaitingReply } from '../src/dashboard.js';
+import { collectDashboard, collectMentions, collectPossibleMrs, countThreadsAwaitingReply, refreshOne } from '../src/dashboard.js';
 import { GitLabError } from '../src/gitlab.js';
 import { deriveView } from '../src/view.js';
 import {
@@ -1515,5 +1515,105 @@ describe('collectDashboard review verdicts from activity notes', () => {
     assert.equal(dashboard.sections.awaitingApproval[0].myReviewState, null);
     assert.deepEqual(dashboard.threadCache.verdictEntries, {});
     assert.equal(deriveView(dashboard).counts.waiting, 1);
+  });
+});
+
+describe('refreshOne', () => {
+  const sectionItem = (overrides = {}) => ({
+    key: '10!1',
+    kind: 'mr',
+    projectId: 10,
+    title: 'Old title',
+    status: 'mergeable',
+    hasConflicts: false,
+    updatedAt: '2026-01-01T00:00:00Z',
+    myReviewState: 'unresolved',
+    threadsAwaitingReply: 2,
+    pipeline: { status: 'success' },
+    ...overrides,
+  });
+
+  it('patches pipeline, status, approvals and approvals map while preserving untouched fields', async () => {
+    const previous = {
+      username: 'me',
+      baseUrl: 'https://gitlab.example.com',
+      filters: { selectedProjectIds: null, ignoredCheckNames: [], approvalThreshold: 0 },
+      approvals: { '10!1': { approvedByMe: false, approvalsCount: 0, approverNames: [] } },
+      sections: { reviewing: [sectionItem()], awaitingApproval: [sectionItem()] },
+    };
+    const freshMr = mr({
+      projectId: 10,
+      iid: 1,
+      title: 'New title',
+      detailed_merge_status: 'unchecked',
+      has_conflicts: true,
+      updatedAt: '2026-02-01T00:00:00Z',
+      head_pipeline: { id: 9, sha: 'abc', status: 'running', web_url: 'https://gitlab.example.com/-/pipelines/9' },
+    });
+    const client = new FakeClient({
+      '/projects/10/merge_requests/1': freshMr,
+      '/projects/10/merge_requests/1/approvals': approvals([BOB], false),
+    });
+
+    const result = await refreshOne(client, previous, [{ projectId: 10, iid: 1 }]);
+
+    assert.equal(client.calls.length, 2);
+    assert.ok(client.calls.some((call) => call.path === '/projects/10/merge_requests/1'));
+    assert.ok(client.calls.some((call) => call.path === '/projects/10/merge_requests/1/approvals'));
+    assert.ok(!client.calls.some((call) => call.path.includes('/pipelines/9/jobs')));
+    assert.deepEqual(result.approvals['10!1'], { approvedByMe: false, approvalsCount: 1, approverNames: ['bob'] });
+    const patched = result.sections.reviewing[0];
+    assert.equal(patched.key, '10!1');
+    assert.equal(patched.title, 'New title');
+    assert.equal(patched.status, 'unchecked');
+    assert.equal(patched.hasConflicts, true);
+    assert.equal(patched.updatedAt, '2026-02-01T00:00:00Z');
+    assert.equal(patched.approvedByMe, false);
+    assert.equal(patched.approvalsCount, 1);
+    assert.deepEqual(patched.approverNames, ['bob']);
+    assert.equal(patched.pipeline.status, 'running');
+    assert.equal(patched.myReviewState, 'unresolved');
+    assert.equal(patched.threadsAwaitingReply, 2);
+    assert.deepEqual(result.sections.awaitingApproval, result.sections.reviewing);
+    assert.equal(result.fetchedAt, undefined);
+  });
+
+  it('fetches pipeline failures for a failed pipeline', async () => {
+    const previous = {
+      sections: { authored: [sectionItem()] },
+      approvals: {},
+    };
+    const freshMr = mr({
+      projectId: 10,
+      iid: 1,
+      head_pipeline: { id: 9, sha: 'abc', status: 'failed', web_url: 'https://gitlab.example.com/-/pipelines/9' },
+    });
+    const client = new FakeClient({
+      '/projects/10/merge_requests/1': freshMr,
+      '/projects/10/merge_requests/1/approvals': approvals(),
+      '/projects/group%2Fproject/pipelines/9/jobs': [{ id: 11, name: 'lint', stage: 'test', failure_reason: 'script_failure', web_url: 'x', allow_failure: false }],
+      '/projects/group%2Fproject/pipelines/9/bridges': [],
+      '/projects/group%2Fproject/repository/commits/abc/statuses': [],
+    });
+
+    const result = await refreshOne(client, previous, [{ projectId: 10, iid: 1 }], { ignoredCheckNames: ['lint'] });
+
+    assert.equal(result.sections.authored[0].pipeline.status, 'failed');
+    assert.equal(result.sections.authored[0].pipeline.failures.length, 1);
+    assert.equal(result.sections.authored[0].pipeline.onlyIgnoredFailures, true);
+  });
+
+  it('skips an MR that no longer exists and leaves the dashboard unchanged', async () => {
+    const previous = {
+      sections: { reviewing: [sectionItem()] },
+      approvals: { '10!1': { approvedByMe: true, approvalsCount: 1, approverNames: ['me'] } },
+    };
+    const client = new FakeClient({}); // no route for the MR -> GitLabError(404)
+
+    const result = await refreshOne(client, previous, [{ projectId: 10, iid: 1 }]);
+
+    assert.deepEqual(result.sections, previous.sections);
+    assert.deepEqual(result.approvals, previous.approvals);
+    assert.equal(client.calls.length, 1);
   });
 });

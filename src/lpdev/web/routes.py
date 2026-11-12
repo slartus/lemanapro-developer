@@ -310,6 +310,25 @@ async def start_mr_review(request: Request, gitlab_project_id: int, iid: int):
     return JSONResponse({"review_id": review_id}, status_code=201)
 
 
+@router.post("/api/mr/{gitlab_project_id}/{iid}/refresh")
+async def refresh_mr_status(request: Request, gitlab_project_id: int, iid: int):
+    if request.headers.get("x-requested-with") != "lpdev":
+        return PlainTextResponse("forbidden", status_code=403)
+    radar = getattr(request.app.state, "radar", None)
+    if radar is None:
+        return PlainTextResponse("радар выключен", status_code=404)
+    if radar.is_refreshing():
+        return PlainTextResponse("радар уже обновляется", status_code=409)
+    try:
+        ok = await radar.refresh_mr(gitlab_project_id, iid)
+    except Exception:
+        logger.exception("radar refresh_mr failed for %s!%s", gitlab_project_id, iid)
+        return PlainTextResponse("не удалось обновить MR", status_code=502)
+    if not ok:
+        return PlainTextResponse("не удалось обновить MR", status_code=502)
+    return JSONResponse({"ok": True})
+
+
 @router.post("/reviews/{review_id}/cancel")
 async def review_cancel(request: Request, review_id: int):
     if request.headers.get("x-requested-with") != "lpdev":

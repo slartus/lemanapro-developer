@@ -789,3 +789,51 @@ export async function collectDashboard(
     threadCache: enriched.threadCache,
   };
 }
+
+export async function refreshOne(client, dashboard, targets, { ignoredCheckNames = [] } = {}) {
+  const ignoredChecks = new Set(ignoredCheckNames.map(normalizeCheckName));
+  const sections = { ...(dashboard.sections ?? {}) };
+  const approvals = { ...(dashboard.approvals ?? {}) };
+  for (const target of targets ?? []) {
+    const { projectId, iid } = target;
+    if (projectId == null || iid == null) {
+      continue;
+    }
+    const key = `${projectId}!${iid}`;
+    let mr;
+    try {
+      mr = await client.get(`/projects/${projectId}/merge_requests/${iid}`);
+    } catch (error) {
+      if (error instanceof GitLabError && SKIPPABLE_STATUSES.has(error.status)) {
+        continue;
+      }
+      throw error;
+    }
+    if (!mr) {
+      continue;
+    }
+    const approvalsData = await fetchApprovals(client, mr);
+    const details = {
+      approvedByMe: Boolean(approvalsData.user_has_approved),
+      approvalsCount: approvalsData.approved_by?.length ?? 0,
+      approverNames: (approvalsData.approved_by ?? [])
+        .map((entry) => entry.user ?? entry)
+        .map((user) => user.name || user.username)
+        .filter(Boolean),
+    };
+    approvals[key] = {
+      approvedByMe: details.approvedByMe,
+      approvalsCount: details.approvalsCount,
+      approverNames: details.approverNames,
+    };
+    const pipeline = headPipelineOf(mr);
+    const failures = pipeline?.status === 'failed' ? await optional(fetchPipelineFailures(client, pipeline)) : null;
+    const fresh = { ...toItem(mr, details), pipeline: withFailures(pipeline, failures, ignoredChecks) };
+    for (const section of Object.keys(sections)) {
+      sections[section] = sections[section].map((item) =>
+        item.key === key ? { ...item, ...fresh, pipeline: fresh.pipeline } : item,
+      );
+    }
+  }
+  return { ...dashboard, approvals, sections };
+}

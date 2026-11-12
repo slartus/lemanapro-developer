@@ -234,6 +234,56 @@ async def test_dashboard_of_the_wrong_shape_is_an_error(ctx):
     assert "неверного формата" in radar_snapshot_get(ctx[0].conn)["error"]
 
 
+async def test_refresh_mr_builds_target_payload_and_saves_snapshot(ctx):
+    runner = FakeRunner(_ok({"fetchedAt": "2026-11-09T10:00:00.000Z", "username": "me", "sections": {"authored": []}}))
+    scheduler = _scheduler(ctx, runner)
+    assert await scheduler.refresh_mr(10, 2) is True
+    assert runner.payloads[0]["refresh"] == [{"projectId": 10, "iid": 2}]
+    assert runner.payloads[0]["previous"] is None
+    row = radar_snapshot_get(ctx[0].conn)
+    assert row["version"] == 1
+    assert json.loads(row["dashboard_json"])["sections"] == {"authored": []}
+    assert row["error"] is None and row["failed_at"] is None
+
+
+async def test_refresh_mr_is_false_on_runner_failure_without_recording_error(ctx):
+    runner = FakeRunner({"ok": False, "status": 401, "error": "Токен невалиден"})
+    scheduler = _scheduler(ctx, runner)
+    assert await scheduler.refresh_mr(10, 2) is False
+    assert radar_snapshot_get(ctx[0].conn) is None
+
+
+async def test_api_refresh_mr_forbidden_without_requested_with_header(ctx):
+    app = create_app(ctx[0])
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://127.0.0.1:8123") as client:
+        response = await client.post("/api/mr/10/2/refresh")
+    assert response.status_code == 403
+
+
+async def test_api_refresh_mr_endpoint_calls_refresh_mr(ctx):
+    ctx_obj, _ = ctx
+    app = create_app(ctx_obj)
+
+    class FakeRadar:
+        def __init__(self):
+            self.calls = []
+
+        def is_refreshing(self):
+            return False
+
+        async def refresh_mr(self, project_id, iid):
+            self.calls.append((project_id, iid))
+            return True
+
+    fake = FakeRadar()
+    app.state.radar = fake
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://127.0.0.1:8123") as client:
+        response = await client.post("/api/mr/10/2/refresh", headers={"x-requested-with": "lpdev"})
+    assert response.status_code == 200
+    assert response.json() == {"ok": True}
+    assert fake.calls == [(10, 2)]
+
+
 async def test_api_radar_survives_a_corrupted_snapshot(ctx):
     ctx_obj, _ = ctx
     ctx_obj.conn.execute(

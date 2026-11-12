@@ -286,8 +286,39 @@ function renderGitlabCell(row) {
     const approvers = radar.approverNames?.length ? { title: radar.approverNames.join(', ') } : {};
     cell.append(tag(`апрувов: ${radar.approvalsCount}`, radar.approvalsCount > 0 ? 'ok' : '', approvers));
   }
+  if (cell.childNodes.length) {
+    cell.append(el('button', {
+      className: 'icon-btn',
+      text: '↻',
+      attrs: {
+        type: 'button',
+        title: 'Обновить CI/аппрувы этого MR',
+        'aria-label': `Обновить статусы MR: ${radar.title ?? row.key}`,
+        'data-focus-id': `refresh:${row.key}`,
+      },
+    }));
+    cell.lastChild.addEventListener('click', (event) => refreshMrStatus(row, event.currentTarget));
+  }
   if (!cell.childNodes.length) cell.append(el('span', { className: 'muted', text: row.radar ? '—' : '' }));
   return cell;
+}
+
+async function refreshMrStatus(row, button) {
+  button.disabled = true;
+  const [projectId, iid] = row.key.split('!');
+  try {
+    const response = await fetch(`/api/mr/${Number(projectId)}/${Number(iid)}/refresh`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'lpdev' },
+      body: '{}',
+    });
+    showStatus(response.ok ? { text: 'MR обновлён' } : { text: (await response.text()) || `ошибка ${response.status}`, error: true });
+    if (response.ok) refresh();
+  } catch {
+    showStatus({ text: 'сервис не отвечает', error: true });
+  } finally {
+    button.disabled = false;
+  }
 }
 
 async function startReview(row, button) {
