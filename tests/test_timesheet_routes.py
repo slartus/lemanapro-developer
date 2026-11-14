@@ -5,6 +5,7 @@ from datetime import date, datetime, timedelta, UTC
 
 import httpx
 import pytest
+import yaml
 
 from lpdev.config import TrackerConfig
 from lpdev.db import timesheet_cell_set, timesheet_cells, timesheet_tasks, worklog_submissions
@@ -364,6 +365,47 @@ async def test_tracker_client_is_rebuilt_on_config_change_and_closed(env):
     env["tracker"].closed = False
     await env["app"].state.timesheet.aclose()
     assert env["tracker"].closed
+
+
+async def test_switch_role(env, tmp_path, monkeypatch):
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        "gitlab:\n  url: https://gitlab.example.com\n  pat_command: printf tok\n"
+        "projects:\n  - gitlab_project_id: 10\n    slug: g/p\n    agent: agent-a\n"
+        "tracker:\n  role: developer\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("lpdev.web.timesheet_routes.default_config_path", lambda: config_path)
+    response = await env["client"].post("/api/timesheet/role", json={"role": "qa"}, headers=H)
+    assert response.status_code == 200, response.text
+    assert response.json() == {"role": "qa"}
+    tracker = env["ctx"].config.tracker
+    assert tracker.role == "qa"
+    assert tracker.in_progress_statuses == ["testing"]
+    assert tracker.activity_statuses == {"testing": "t"}
+    raw = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    assert raw["tracker"]["role"] == "qa"
+    assert raw["tracker"]["in_progress_statuses"] == ["testing"]
+
+    response = await env["client"].post("/api/timesheet/role", json={"role": "developer"}, headers=H)
+    assert response.status_code == 200, response.text
+    tracker = env["ctx"].config.tracker
+    assert tracker.role == "developer"
+    assert tracker.in_progress_statuses == ["development", "codereview", "rework"]
+    assert tracker.activity_statuses == {"development": "d", "codereview": "r", "rework": "w"}
+
+
+async def test_switch_role_validation(env):
+    response = await env["client"].post("/api/timesheet/role", json={"role": "boss"}, headers=H)
+    assert response.status_code == 422
+
+    response = await env["client"].post("/api/timesheet/role", json={"role": "qa"})
+    assert response.status_code == 403
+
+
+async def test_timesheet_payload_reports_role(env):
+    payload = await _get(env)
+    assert payload["role"] == "developer"
 
 
 async def test_put_cell_sets_and_resets(env):

@@ -157,6 +157,7 @@ MUTATING_ROUTES = [
     "/api/mr/1/1/refresh",
     "/api/timesheet/tasks",
     "/api/timesheet/submit",
+    "/api/timesheet/role",
 ]
 
 

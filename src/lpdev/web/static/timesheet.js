@@ -305,6 +305,11 @@ function renderToolbar() {
   toggle.hidden = hidden.length === 0;
   toggle.setAttribute('aria-pressed', String(state.showWeekend));
   toggle.textContent = state.showWeekend ? 'Скрыть Сб/Вс' : `Показать ${hidden.map((day) => WEEKDAYS[dayIndex(day.date)]).join('/')}`;
+  const roleToggle = $('role-toggle');
+  const role = data?.role ?? 'developer';
+  roleToggle.hidden = !data;
+  roleToggle.setAttribute('aria-pressed', String(role === 'qa'));
+  roleToggle.textContent = role === 'qa' ? 'Роль: QA' : 'Роль: Разработчик';
   $('reset-week').disabled = !data;
   $('refresh-week').disabled = !data;
   const step = formatHours(stepOf(data));
@@ -1117,6 +1122,19 @@ function init() {
     render();
   });
   $('reset-week').addEventListener('click', () => state.data && resetCells(null));
+  $('role-toggle').addEventListener('click', async () => {
+    const next = (state.data?.role ?? 'developer') === 'qa' ? 'developer' : 'qa';
+    const toggle = $('role-toggle');
+    toggle.disabled = true;
+    try {
+      await api('POST', '/api/timesheet/role', { role: next });
+      await load(state.week, { busy: true });
+    } catch (error) {
+      setStatus(error.message || String(error), 'error');
+    } finally {
+      toggle.disabled = false;
+    }
+  });
   $('submit-week').addEventListener('click', () => openSubmitDialog({ type: 'week' }));
   $('add-task').addEventListener('submit', addTask);
   $('add-key').addEventListener('input', () => {

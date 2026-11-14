@@ -7,13 +7,15 @@ import time
 from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, time as dt_time, timedelta
+from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
 
+import yaml
 from fastapi import APIRouter, Request
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
 
-from lpdev.config import TrackerConfig, run_secret_command
+from lpdev.config import ROLE_PROFILES, ConfigError, TrackerConfig, default_config_path, run_secret_command
 from lpdev.db import (
     timesheet_cell_set,
     timesheet_cells,
@@ -61,7 +63,7 @@ from lpdev.tracker_client import (
     worklog_author,
     valid_issue_key,
 )
-from lpdev.web.routes import templates
+from lpdev.web.routes import _atomic_write_yaml, _write_backup, templates
 from lpdev.workcalendar import day_norm_minutes, has_year
 
 logger = logging.getLogger(__name__)
@@ -792,7 +794,47 @@ async def api_timesheet(request: Request):
     for row in payload["rows"]:
         row["activity"] = activity_by_key.get(row["key"])
         row["status"] = data.statuses.get(row["key"])
-    return JSONResponse({**payload, "warnings": warnings}, headers={"Cache-Control": "no-store"})
+    return JSONResponse({**payload, "role": cfg.role, "warnings": warnings}, headers={"Cache-Control": "no-store"})
+
+
+def _persist_tracker_role(path: Path, role: str) -> None:
+    try:
+        raw = yaml.safe_load(path.read_text(encoding="utf-8"))
+    except (OSError, yaml.YAMLError) as exc:
+        raise ConfigError(f"config {path} не читается") from exc
+    if not isinstance(raw, dict):
+        raise ConfigError(f"config {path} повреждён")
+    tracker = raw.setdefault("tracker", {})
+    if not isinstance(tracker, dict):
+        tracker = raw["tracker"] = {}
+    tracker.update({"role": role, **ROLE_PROFILES[role]})
+    _write_backup(path, path.with_suffix(".yaml.bak"))
+    _atomic_write_yaml(path, raw)
+
+
+@router.post("/api/timesheet/role")
+async def api_timesheet_role(request: Request):
+    if request.headers.get("x-requested-with") != "lpdev":
+        return PlainTextResponse("forbidden", status_code=403)
+    try:
+        role = (await _json_body(request)).get("role")
+    except InvalidRequest as exc:
+        return _error(str(exc))
+    if role not in ROLE_PROFILES:
+        return _error("роль должна быть developer или qa")
+    ctx = _ctx(request)
+    cfg = ctx.config.tracker
+    if cfg.role == role:
+        return JSONResponse({"role": role})
+    new_cfg = TrackerConfig.model_validate({**cfg.model_dump(), "role": role, **ROLE_PROFILES[role]})
+    try:
+        _persist_tracker_role(default_config_path(), role)
+    except (ConfigError, OSError) as exc:
+        logger.exception("timesheet: role persist failed: %s", exc)
+        return PlainTextResponse("config.yaml не сохранился, роль не изменена", status_code=400)
+    ctx.config.tracker = new_cfg
+    await _state(request).tracker_for(new_cfg)
+    return JSONResponse({"role": role})
 
 
 @router.put("/api/timesheet/cell")

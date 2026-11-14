@@ -21,6 +21,17 @@ _PAT_TIMEOUT_SEC = 10
 AGENT_NAME_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
 PRIVATE_DIR_MODE = 0o700
 
+ROLE_PROFILES: dict[str, dict[str, object]] = {
+    "developer": {
+        "in_progress_statuses": ["development", "codereview", "rework"],
+        "activity_statuses": {"development": "d", "codereview": "r", "rework": "w"},
+    },
+    "qa": {
+        "in_progress_statuses": ["testing"],
+        "activity_statuses": {"testing": "t"},
+    },
+}
+
 logger = logging.getLogger(__name__)
 
 
@@ -170,8 +181,8 @@ class TrackerConfig(BaseModel):
     @model_validator(mode="before")
     @classmethod
     def role_defaults(cls, value: object) -> object:
-        if isinstance(value, dict) and value.get("role") == "qa":
-            return {"in_progress_statuses": ["testing"], "activity_statuses": {"testing": "t"}, **value}
+        if isinstance(value, dict) and (profile := ROLE_PROFILES.get(value.get("role"))):
+            return {**profile, **value}
         return value
 
     @field_validator("url")

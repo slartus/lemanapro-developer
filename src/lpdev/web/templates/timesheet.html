@@ -5,6 +5,8 @@
   .ts-head { display: flex; flex-wrap: wrap; align-items: center; gap: 0.6rem 1rem; margin-bottom: 0.8rem; }
   .ts-head > * { min-width: 0; }
   .ts-head h1 { margin: 0; }
+  .role-toggle { padding: 0.42rem 0.7rem; font-weight: 600; }
+  .role-toggle[aria-pressed="true"] { background: var(--info-bg); color: var(--info-fg); border-color: var(--info-fg); }
   .week-nav { display: flex; align-items: center; gap: 0.35rem; flex-wrap: wrap; max-width: 100%; }
   .week-nav .nav-arrow { padding: 0.42rem 0.7rem; }
   .week-label { font-weight: 600; min-width: 13em; text-align: center; }
@@ -167,6 +169,7 @@
 {% block content %}
 <div class="ts-head">
   <h1>Таймшит</h1>
+  <button type="button" id="role-toggle" class="role-toggle" aria-pressed="false" hidden>Роль: Разработчик</button>
   <div class="week-nav" role="group" aria-label="Неделя">
     <button type="button" class="nav-arrow" id="prev-week" title="Предыдущая неделя" aria-label="Предыдущая неделя">←</button>
     <span class="week-label" id="week-label" aria-live="polite">…</span>
