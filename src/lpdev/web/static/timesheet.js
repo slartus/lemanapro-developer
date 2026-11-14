@@ -1135,6 +1135,9 @@ function init() {
       toggle.disabled = false;
     }
   });
+  const helpDialog = $('help-dialog');
+  $('help-toggle').addEventListener('click', () => helpDialog.showModal());
+  $('help-close').addEventListener('click', () => helpDialog.close());
   $('submit-week').addEventListener('click', () => openSubmitDialog({ type: 'week' }));
   $('add-task').addEventListener('submit', addTask);
   $('add-key').addEventListener('input', () => {

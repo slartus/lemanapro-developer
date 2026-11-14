@@ -7,6 +7,7 @@
   .ts-head h1 { margin: 0; }
   .role-toggle { padding: 0.42rem 0.7rem; font-weight: 600; }
   .role-toggle[aria-pressed="true"] { background: var(--info-bg); color: var(--info-fg); border-color: var(--info-fg); }
+  .help-toggle { padding: 0.42rem 0.7rem; }
   .week-nav { display: flex; align-items: center; gap: 0.35rem; flex-wrap: wrap; max-width: 100%; }
   .week-nav .nav-arrow { padding: 0.42rem 0.7rem; }
   .week-label { font-weight: 600; min-width: 13em; text-align: center; }
@@ -170,6 +171,7 @@
 <div class="ts-head">
   <h1>Таймшит</h1>
   <button type="button" id="role-toggle" class="role-toggle" aria-pressed="false" hidden>Роль: Разработчик</button>
+  <button type="button" id="help-toggle" class="help-toggle" title="Как считаются предложения">Справка</button>
   <div class="week-nav" role="group" aria-label="Неделя">
     <button type="button" class="nav-arrow" id="prev-week" title="Предыдущая неделя" aria-label="Предыдущая неделя">←</button>
     <span class="week-label" id="week-label" aria-live="polite">…</span>
@@ -218,6 +220,33 @@
     <h2 id="dlg-title">Списание в Tracker</h2>
     <div class="dlg-body" id="dlg-body" aria-live="polite"></div>
     <div class="dlg-actions" id="dlg-actions"></div>
+  </div>
+</dialog>
+<dialog id="help-dialog" class="ts-dialog" aria-labelledby="help-title">
+  <div class="dlg-inner">
+    <h2 id="help-title">Как считаются предложения</h2>
+    <div class="dlg-body">
+      <p class="dlg-note">Каждый день есть норма из рабочего календаря (обычно 8 ч, короткие дни — меньше, выходные и праздники — 0). Предложение дня — это оставшаяся норма за вычетом уже списанного и ваших ручных правок; остаток распределяется по задачам пропорционально их весу, с шагом 0,5 ч.</p>
+      <h3>Общее для обеих ролей</h3>
+      <ul>
+        <li>События в GitLab дают задаче вес: пуш — 3 (до 6 на день), открытие/принятие/мерж MR — 2, ревью — 1.</li>
+        <li>Задачи «в работе» без других сигналов получают долю простоя: вес 0,5, вместе не более 25% бюджета дня, не более 5 задач.</li>
+      </ul>
+      <h3>Роль «Разработчик»</h3>
+      <ul>
+        <li>Статусы работы: development, codereview, rework.</li>
+        <li>Сигналы — только из GitLab (пуш, MR, ревью) и «в работе». Статусы и комментарии Трекера вес не дают.</li>
+      </ul>
+      <h3>Роль «QA»</h3>
+      <ul>
+        <li>Статус работы: testing — день считается днём тестирования.</li>
+        <li>День, когда задача была на вас в статусе testing, даёт вес 3.</li>
+        <li>Ваши переходы статуса — +2, ваши комментарии — +1.</li>
+      </ul>
+    </div>
+    <div class="dlg-actions">
+      <button type="button" id="help-close">Закрыть</button>
+    </div>
   </div>
 </dialog>
 {% endblock %}
